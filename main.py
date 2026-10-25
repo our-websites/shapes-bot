@@ -1,6 +1,6 @@
 """Shapes for Yapper.
 
-Same commands as the Discord bot, running on Yapper through yapper.py. Data lives in Cloudflare Workers KV
+Same commands as the Discord bot, running on Yapper through yapper.py. Data lives in Cloudflare D1
 (see cfstore.py), and a small web server runs on port 5004.
 
 Layout of this file:
@@ -37,7 +37,7 @@ from openai import OpenAI
 from slpp import slpp as lua
 
 import yshim
-from cfstore import CloudflareKV
+from cfstore import CloudflareD1
 from yshim import app_commands, commands, discord
 
 # Emoji used by the Discord version were custom server emoji. yshim.clean() turns them into plain text/emoji.
@@ -70,12 +70,12 @@ def _secret(env_name, file_name=None):
 chatgpt = OpenAI(api_key=os.getenv("OPENAI_KEY") or "missing", base_url="https://api.navy/v1")
 AIModel = "gpt-oss-120b"
 
-# === Databases (Cloudflare Workers KV, or local JSON when the Cloudflare env vars are not set) ===
-countingDB = CloudflareKV("counting")
-embedDB = CloudflareKV("embed")
-usersDB = CloudflareKV("users")
-autoroleDB = CloudflareKV("autorole")
-AI_DB = CloudflareKV("ai")
+# === Databases (Cloudflare D1, or local JSON when the Cloudflare env vars are not set) ===
+countingDB = CloudflareD1("counting")
+embedDB = CloudflareD1("embed")
+usersDB = CloudflareD1("users")
+autoroleDB = CloudflareD1("autorole")
+AI_DB = CloudflareD1("ai")
 DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "autoroleDB": autoroleDB, "AI_DB": AI_DB}
 
 # === Yapper bot ===
