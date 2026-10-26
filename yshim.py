@@ -689,6 +689,33 @@ def _click_thread(i):
 ui = types.SimpleNamespace(View=View, Button=Button, button=_button_deco)
 
 
+# --------------------------------------------------------------------------- private (ephemeral) replies
+
+class _Reveal(View):
+    def __init__(self, owner_id, content, embed, view):
+        super().__init__(timeout=600)
+        self._owner_id, self._content, self._embed, self._inner = owner_id, content, embed, view
+        self.stub = None
+        btn = Button(style="primary", label="Show privately", emoji="🔒")
+        btn.callback = self._open
+        self.add_item(btn)
+
+    async def interaction_check(self, click):
+        if str(click.user.id) != str(self._owner_id):
+            await click.response.send_message("This private reply isn't yours. Run the command yourself.", ephemeral=True)
+            return False
+        return True
+
+    async def _open(self, click):
+        await click.response.send_message(self._content, embed=self._embed, view=self._inner, ephemeral=True)
+        self.stop()
+        if self.stub is not None:
+            try:
+                BOT.delete(self.stub.channel_id, self.stub.id)
+            except Exception:
+                pass
+
+
 # --------------------------------------------------------------------------- Interaction
 
 class _Response:
@@ -761,17 +788,43 @@ class Interaction:
                     embeds = [embed.to_dict()]
                 else:
                     text = _join(text, embed.to_text())
+            comps = _components(view) or None
             if ephemeral:
-                self._click.ephemeral(text, embeds)
+                answer = getattr(self._click, "_answer", None)
+                if answer is None:      # older yapper.py: private replies cannot carry components
+                    self._click.ephemeral(text, embeds)
+                    return None
+                try:
+                    answer("ephemeral", text, embeds, comps)
+                except YapperError:
+                    if not comps:
+                        raise
+                    answer("ephemeral", text, embeds)   # server refused buttons on a private reply
             else:
-                self._click.reply(text, embeds, _components(view) or None)
+                self._click.reply(text, embeds, comps)
             return None
+        if ephemeral:
+            return self._send_private(content, embed, view)
         reply_to = None if self._sent_first else (self._msg or {}).get("id")
         sent = _post(self.channel_id, content, embed, view, reply_to=reply_to)
         self._sent_first = True
         if self._original is None:
             self._original = sent
         return sent
+
+    def _send_private(self, content, embed, view):
+        """A private reply to a command. Yapin only lets bots answer a BUTTON CLICK privately, so the command posts a
+        small stub with a "Show privately" button; the person who ran the command taps it, sees the real reply
+        (only they can), and the stub is removed. Nobody else gets to read it."""
+        self._responded = True
+        reveal = _Reveal(self.user.id, content, embed, view)
+        stub = _post(self.channel_id, f"🔒 {self.user.mention}, your private reply is ready.", view=reveal,
+                     reply_to=None if self._sent_first else (self._msg or {}).get("id"))
+        reveal.stub = stub
+        self._sent_first = True
+        if self._original is None:
+            self._original = stub
+        return stub
 
     def _edit_message(self, content, embed, view):
         """Click only: change the message the button is on."""

@@ -212,10 +212,10 @@ def default_counting():
 async def need_admin(interaction):
     """True if the caller may manage this server (replies and returns False otherwise)."""
     if interaction.is_dm:
-        await interaction.response.send_message("This command only works inside a server.")
+        await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
         return False
     if not yshim.is_admin(interaction.guild_id, interaction.user.id):
-        await interaction.response.send_message("You need to be a server admin to use this command.")
+        await interaction.response.send_message("You need to be a server admin to use this command.", ephemeral=True)
         return False
     return True
 
@@ -223,7 +223,7 @@ async def need_admin(interaction):
 
 # =====================================================================================
 # Commands rewritten for Yapper
-# (select menus, modals and ephemeral replies do not exist for commands, so these take arguments instead)
+# (select menus and modals do not exist for commands, so these take arguments instead; private replies use click-to-reveal)
 # =====================================================================================
 
 @bot.tree.command(name="userinstalls", description="Get The User Installation Count For Shapes!")
@@ -238,22 +238,20 @@ async def servercount(interaction: discord.Interaction):
 
 @bot.tree.command(name="getdata", description="Owner only: /getdata <embedDB|countingDB|usersDB|autoroleDB|AI_DB> <key>")
 async def getdata(interaction: discord.Interaction, database: str, key: str):
-    # Yapper commands cannot reply privately, so the data goes to the owner's DMs, never into the channel.
+    # Private reply: only the owner who ran it can open it (see yshim._send_private).
     if not yshim.is_owner(interaction.user):
-        await interaction.response.send_message(":x: You don't have permission to use this command! :x:")
+        await interaction.response.send_message(":x: You don't have permission to use this command! :x:", ephemeral=True)
         return
     db = DATABASES.get(database)
     if db is None:
-        await interaction.response.send_message(f":x: Database `{database}` not found! Options: {', '.join(DATABASES)}")
+        await interaction.response.send_message(f":x: Database `{database}` not found! Options: {', '.join(DATABASES)}", ephemeral=True)
         return
     data = db.get(key)
-    dm = bot.dm(interaction.user.id)
     if data:
         text = f"Data for key `{key}` in database `{database}`:\n```{json.dumps(data, indent=2, default=str)[:1800]}```"
     else:
         text = f":x: No data found for key `{key}` in database `{database}`! :x:"
-    yshim.post(dm, text)
-    await interaction.response.send_message("📬 Sent to your DMs.")
+    await interaction.response.send_message(text, ephemeral=True)
 
 
 @bot.tree.command(name="settings", description="Your Settings For Shapes: /settings color <name>")
@@ -266,21 +264,45 @@ async def settings(interaction: discord.Interaction, option: str = "", value: st
         if pick == "random":
             match = ("Random", discord.Color.random())
         if not match:
-            await interaction.response.send_message(f"Pick one of: {', '.join(names)}, Random")
+            await interaction.response.send_message(f"Pick one of: {', '.join(names)}, Random", ephemeral=True)
             return
         embedDB.set(f"{uid}", match[1].value)
         embed = discord.Embed(title="Embed Color Changed!",
                               description=f"Your embed color has been changed successfully to {match[0]}!", color=match[1])
         embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
-    current = embedDB.get(f"{uid}")
+    await interaction.response.send_message(embed=_settings_embed(interaction.user), view=_color_view(uid), ephemeral=True)
+
+
+def _settings_embed(user, note=None):
+    current = embedDB.get(f"{user.id}")
     current_name = next((n for n, c in DiscordColors if c.value == current), "Blue" if not current else "Custom")
-    embed = discord.Embed(title="Settings", color=ecolor(uid),
-                          description=f"**Embed color:** {current_name}\n\nChange it with `/settings color <name>`\n"
-                                      f"Colors: {', '.join(names)}, Random")
-    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-    await interaction.response.send_message(embed=embed)
+    embed = discord.Embed(title="Settings", color=ecolor(user.id),
+                          description=(f"✅ {note}\n\n" if note else "") + f"**Embed color:** {current_name}\n\nTap a color below to change it.")
+    embed.set_footer(text=f"Requested By {user.name} | {MainURL}")
+    return embed
+
+
+def _color_view(user_id):
+    """One button per embed color; tapping one saves it and refreshes the panel."""
+    view = discord.ui.View(timeout=300)
+    current = embedDB.get(f"{user_id}")
+    for name, color in DiscordColors + [("Random", None)]:
+        selected = color is not None and color.value == current
+        button = discord.ui.Button(label=name, style=discord.ButtonStyle.primary if selected else discord.ButtonStyle.secondary)
+
+        async def pick(click, name=name, color=color):
+            if str(click.user.id) != str(user_id):
+                await click.response.send_message("This isn't your settings panel. Run /settings yourself.", ephemeral=True)
+                return
+            chosen = color or discord.Color.random()
+            embedDB.set(f"{user_id}", chosen.value)
+            await click.response.edit_message(embed=_settings_embed(click.user, f"Embed color changed to {name}!"), view=_color_view(user_id))
+
+        button.callback = pick
+        view.add_item(button)
+    return view
 
 
 @bot.tree.command(name="status", description=f"Get the {MainURL} status")
@@ -349,7 +371,7 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
                     f"- Warnings: `{data['warnings']}`\n- Last Counter: `{data['lastcounter']}`\n\n"
                     f"Change it with `/counting toggle` or `/counting channel #channel`")
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="autorole", description="Automatically give new members a role: /autorole <role> [true|false]")
@@ -395,7 +417,7 @@ async def autorole(interaction: discord.Interaction, role: discord.Role, enable:
             yshim.post(click.channel_id, f"Assigned {role.name} to {count} existing members.")
 
     status = "enabled" if enable else "disabled"
-    await interaction.response.send_message(f"Autorole {status} for {role.name}. Assign to existing members?", view=AutoroleView())
+    await interaction.response.send_message(f"Autorole {status} for {role.name}. Assign to existing members?", view=AutoroleView(), ephemeral=True)
 
 
 @bot.tree.command(name="help", description="Get help with all available commands")
@@ -460,6 +482,118 @@ async def ping(interaction: discord.Interaction):
     await interaction.edit_original_response(embed=embed, content=None)
 
 
+# --- Last.fm ---
+
+LastFMKey = _secret("LASTFM_API_KEY", "LastFMToken.txt")
+LASTFM_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{1,14}$")
+
+
+def lastfm_call(method, **params):
+    """One Last.fm API call; returns the JSON dict, or None on any failure (including a missing key)."""
+    if not LastFMKey:
+        return None
+    try:
+        r = requests.get("https://ws.audioscrobbler.com/2.0/",
+                         params={"method": method, "api_key": LastFMKey, "format": "json", **params}, timeout=8)
+        data = r.json()
+        return None if "error" in data else data
+    except Exception as e:
+        print(f"lastfm {method} failed: {e}")
+        return None
+
+
+def get_lastfm(user_id):
+    """The linked Last.fm username for a Yapper user id, or None."""
+    entry = usersDB.get(str(user_id))
+    return entry.get("lastfm") if isinstance(entry, dict) else None
+
+
+def set_lastfm(user_id, name):
+    """Link (or with name=None, unlink) a Last.fm username; keeps whatever else is stored for the user."""
+    entry = usersDB.get(str(user_id))
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    if name:
+        entry["lastfm"] = name
+    else:
+        entry.pop("lastfm", None)
+    usersDB.set(str(user_id), entry)
+
+
+def lastfm_profile(name):
+    """Summary for a Last.fm user: url, scrobbles, and the current/last track. None if the lookup failed."""
+    info = lastfm_call("user.getinfo", user=name)
+    if not info or "user" not in info:
+        return None
+    u = info["user"]
+    out = {"name": u.get("name", name), "url": u.get("url") or f"https://www.last.fm/user/{name}",
+           "scrobbles": u.get("playcount"), "track": None, "now": False, "image": None}
+    for img in reversed(u.get("image") or []):
+        if img.get("#text"):
+            out["image"] = img["#text"]
+            break
+    recent = lastfm_call("user.getrecenttracks", user=name, limit=1)
+    try:
+        tracks = recent["recenttracks"]["track"]
+        if isinstance(tracks, dict):
+            tracks = [tracks]
+        if tracks:
+            t = tracks[0]
+            out["track"] = f"{t['artist']['#text']} - {t['name']}"
+            out["now"] = bool((t.get("@attr") or {}).get("nowplaying"))
+    except (TypeError, KeyError):
+        pass
+    return out
+
+
+def lastfm_line(p):
+    scrobbles = f"{int(p['scrobbles']):,}" if str(p.get("scrobbles") or "").isdigit() else "?"
+    text = f"[{p['name']}]({p['url']}) · {scrobbles} scrobbles"
+    if p.get("track"):
+        text += f"\n{'🎶 Now playing' if p['now'] else '⏮️ Last played'}: {p['track']}"
+    return text
+
+
+@bot.tree.command(name="lastfm", description="Link your Last.fm account or see what someone is listening to")
+async def lastfm(interaction: discord.Interaction, action: str = "", name: str = "", user: discord.User = None):
+    action = action.lower().strip()
+    uid = interaction.user.id
+    if action == "link":
+        if not LASTFM_NAME.match(name or ""):
+            await interaction.response.send_message("Usage: `/lastfm link <your last.fm username>`", ephemeral=True)
+            return
+        if not LastFMKey:
+            await interaction.response.send_message("Last.fm isn't set up on this bot (missing LASTFM_API_KEY).", ephemeral=True)
+            return
+        info = lastfm_call("user.getinfo", user=name)
+        if not info or "user" not in info:
+            await interaction.response.send_message(f"Couldn't find a Last.fm user named `{name}`.", ephemeral=True)
+            return
+        real = info["user"].get("name", name)
+        set_lastfm(uid, real)
+        await interaction.response.send_message(f"✅ Linked to Last.fm user **{real}**. It now shows on your profile.", ephemeral=True)
+        return
+    if action == "unlink":
+        had = get_lastfm(uid)
+        set_lastfm(uid, None)
+        await interaction.response.send_message("Unlinked your Last.fm account." if had else "You had no Last.fm account linked.", ephemeral=True)
+        return
+    target = user or interaction.user
+    linked = get_lastfm(target.id)
+    if not linked:
+        who = "You haven't" if target.id == uid else f"{target.display_name} hasn't"
+        await interaction.response.send_message(f"{who} linked a Last.fm account. Use `/lastfm link <username>`.", ephemeral=True)
+        return
+    p = lastfm_profile(linked)
+    if not p:
+        await interaction.response.send_message(f"Couldn't reach Last.fm for `{linked}` right now.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"{target.display_name} on Last.fm", description=lastfm_line(p), color=ecolor(uid))
+    if p["image"]:
+        embed.set_thumbnail(url=p["image"])
+    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
+    await interaction.response.send_message(embed=embed)
+
+
 # --- Yapper profile commands (these were /discorduser, /discordavatar, /discordbanner on Discord) ---
 
 def _profile_target(interaction, user):
@@ -503,6 +637,10 @@ async def discorduser(interaction: discord.Interaction, user: discord.User = Non
         print(f"mutual server lookup failed: {e}")
     if mutual:
         embed.add_field(name=f"Mutual Servers ({len(mutual)})", value="\n".join(mutual[:15]) + ("\n..." if len(mutual) > 15 else ""), inline=False)
+    linked = get_lastfm(target.id)
+    if linked:
+        p = lastfm_profile(linked)
+        embed.add_field(name="Last.fm", value=lastfm_line(p) if p else f"[{linked}](https://www.last.fm/user/{linked})", inline=False)
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
     await interaction.response.send_message(embed=embed)
 
