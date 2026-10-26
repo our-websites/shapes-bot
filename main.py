@@ -91,6 +91,7 @@ APIBaseURL_Key = _secret("Shapes_API_Key")
 APIBaseURL_Headers = {"Authorization": f"Bearer {APIBaseURL_Key}"}
 APIBaseURL = os.environ.get("SHAPES_API_URL", "http://localhost:25574")
 GoogleAPIKey = _secret("GOOGLE_API_KEY", "GoogleToken.txt")
+SPOOK_API_KEY = _secret("SPOOK_API_KEY", "SpookToken.txt") or ""
 ADMIN_KEY = _secret("ADMIN_KEY", "akey.txt")
 
 bot_ready = False
@@ -420,7 +421,7 @@ async def help_command(interaction: discord.Interaction):
 async def countingleaderboard(interaction: discord.Interaction):
     embed = discord.Embed(
         title="Counting Leaderboard",
-        description="[Click here to view the counting leaderboard](https://our-websites.github.ioshapes.lol/counting/leaderboard/)",
+        description="[Click here to view the counting leaderboard](https://our-websites.github.io/shapes.lol/counting/leaderboard/)",
         color=ecolor(interaction.user.id))
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
     await interaction.response.send_message(embed=embed)
