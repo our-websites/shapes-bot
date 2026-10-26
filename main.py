@@ -919,20 +919,9 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
             return False
 
     async def check_verification_items(session: aiohttp.ClientSession, user_id: str) -> bool:
-        items = {
-            'hats': ['18824203', '93078560', '102611803'],
-            'sign': '1567446'
-        }
-
-        has_sign = await check_ownership(session, user_id, items['sign'])
-        if has_sign:
-            return True
-
-        for hat_id in items['hats']:
-            if await check_ownership(session, user_id, hat_id):
-                return True
-
-        return False
+        items = ['1567446', '18824203', '93078560', '102611803']   # the verified sign, then the hats
+        results = await asyncio.gather(*(check_ownership(session, user_id, item) for item in items))
+        return any(results)
 
     async def check_inventory_visibility(session: aiohttp.ClientSession, user_id: str) -> str:
         try:
@@ -951,8 +940,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 with open('roblosecuritytoken.txt', 'r') as f:
                     roblosecurity_token = f.read().strip()
             except FileNotFoundError:
-                print("ROBLOSECURITY token file not found")
-                return (0, None)
+                return (None, None)
 
             presence_url = 'https://presence.roblox.com/v1/presence/users'
             headers = {
@@ -970,7 +958,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                         return (presence_type, place_id)
         except Exception as e:
             print(f"Error checking presence: {e}")
-        return (0, None)
+        return (None, None)
 
     class BadgeService:
         def __init__(self, session: aiohttp.ClientSession):
@@ -1063,7 +1051,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                     return friends_data.get('count', 0)
         except Exception as e:
             print(f"Error fetching friends count: {e}")
-        return 0
+        return None
 
     async def get_followers_count(session: aiohttp.ClientSession, user_id: str) -> int:
         try:
@@ -1074,7 +1062,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                     return followers_data.get('count', 0)
         except Exception as e:
             print(f"Error fetching followers count: {e}")
-        return 0
+        return None
 
     async def get_followings_count(session: aiohttp.ClientSession, user_id: str) -> int:
         try:
@@ -1085,7 +1073,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                     return followings_data.get('count', 0)
         except Exception as e:
             print(f"Error fetching followings count: {e}")
-        return 0
+        return None
 
     async def get_user_games_visits(session: aiohttp.ClientSession, user_id: str) -> int:
         try:
@@ -1118,7 +1106,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                     return total_visits
         except Exception as e:
             print(f"Error fetching user games visits: {e}")
-        return 0
+        return None
 
     async def get_profile_api_data(session: aiohttp.ClientSession, user_id: str) -> dict:
         try:
@@ -1194,14 +1182,16 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
 
                     return profile_data
 
+        except FileNotFoundError:
+            pass   # no .ROBLOSECURITY cookie file: the public endpoints fill the numbers in below
         except Exception as e:
             print(f"Error fetching profile API data: {e}")
 
         return {
-            'visits': 0,
-            'friends_count': 0,
-            'followers_count': 0,
-            'followings_count': 0,
+            'visits': None,
+            'friends_count': None,
+            'followers_count': None,
+            'followings_count': None,
             'is_verified': False,
             'is_premium': False,
             'description': '',
@@ -1235,20 +1225,21 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
             Display = userinfo["displayName"]
             hasVerifiedBadge = userinfo.get("hasVerifiedBadge", False)
 
-            rap_value = 0
-            value_value = 0
+            profile_data = {'last_online': None}
+            rap_value = None
+            value_value = None
             rolimons_last_online = None
             badge_last_online = None
             badge_place_id = None
             is_premium = False
             is_verified = False
             roblox_badges = []
-            total_visits = 0
+            total_visits = None
             inventory_visibility = "Private"
-            friends_count = 0
-            followers_count = 0
-            followings_count = 0
-            presence_type = 0
+            friends_count = None
+            followers_count = None
+            followings_count = None
+            presence_type = None
             current_place_id = None
             profile_description = ""
 
@@ -1264,6 +1255,15 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                     followings_count = profile_data['followings_count']
                     total_visits = profile_data['visits']
                     profile_description = profile_data['description']
+
+                    # Without the profile API (no cookie) fall back to the public endpoints for every user.
+                    if None in (friends_count, followers_count, followings_count, total_visits):
+                        pub = await asyncio.gather(get_friends_count(session, UserID), get_followers_count(session, UserID),
+                                                   get_followings_count(session, UserID), get_user_games_visits(session, UserID))
+                        friends_count = pub[0] if friends_count is None else friends_count
+                        followers_count = pub[1] if followers_count is None else followers_count
+                        followings_count = pub[2] if followings_count is None else followings_count
+                        total_visits = pub[3] if total_visits is None else total_visits
 
                     tasks = [
                         check_verification_items(session, UserID),
@@ -1293,8 +1293,8 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                         if response.status == 200:
                             rolimons_stats_data = await response.json()
                             if rolimons_stats_data.get('success'):
-                                rap_value = rolimons_stats_data.get('rap', 0) or 0
-                                value_value = rolimons_stats_data.get('value', 0) or 0
+                                rap_value = rolimons_stats_data.get('rap') or 0
+                                value_value = rolimons_stats_data.get('value') or 0
                                 rolimons_last_online = rolimons_stats_data.get('last_online')
             except Exception as e:
                 print(f"Error fetching data: {e}")
@@ -1439,16 +1439,9 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
 
             badges_display = "None"
             if roblox_badges and len(roblox_badges) > 0:
-                badge_emojis = []
-                for badge in roblox_badges:
-                    badge_name = badge.get("name", "")
-                    if badge_name in badges:
-                        badge_emojis.append(badges[badge_name])
-
-                if badge_emojis:
-                    badges_display = " ".join(badge_emojis)
-                else:
-                    badges_display = "None"
+                # Yapin has none of the Discord custom emoji, so badges are listed by name.
+                badge_names = [b.get("name", "") for b in roblox_badges if b.get("name")]
+                badges_display = ", ".join(badge_names) if badge_names else "None"
 
             presence_status_map = {
                 0: {'icon_url': 'https://files.catbox.moe/tjiecu.png', 'text': 'Offline'},
@@ -1457,7 +1450,12 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 3: {'icon_url': 'https://files.catbox.moe/72opoa.png', 'text': 'In Studio'}
             }
 
-            current_status = presence_status_map.get(presence_type, presence_status_map[0])
+            presence_status_map[None] = {'icon_url': presence_status_map[0]['icon_url'], 'text': 'Status unknown'}
+            current_status = presence_status_map.get(presence_type, presence_status_map[None])
+
+            def num(n):
+                return f"{n:,}" if isinstance(n, (int, float)) else "N/A"
+
 
             view = discord.ui.View()
             if not is_terminated:
@@ -1474,7 +1472,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 url=rolimonsurl
             ))
 
-            friends_followers_text = f"-# **{friends_count:,}** Friends | **{followers_count:,}** Followers | **{followings_count:,}** Following"
+            friends_followers_text = f"**{num(friends_count)}** Friends | **{num(followers_count)}** Followers | **{num(followings_count)}** Following"
 
             full_description = f"{friends_followers_text}\n\n{Description}"
 
@@ -1488,19 +1486,19 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
             if is_terminated:
                 embed.add_field(name="ID", value=f"{UserID}", inline=True)
                 embed.add_field(name="Terminated", value="True", inline=True)
-                embed.add_field(name="Visits", value=f"{total_visits:,}", inline=True)
+                embed.add_field(name="Visits", value=num(total_visits), inline=True)
 
                 embed.add_field(name="Created", value=created_timestamp if created_timestamp else "Unknown", inline=True)
                 embed.add_field(name="Last Online", value=formatted_last_online, inline=True)
                 embed.add_field(name="Badges", value=badges_display, inline=True)
             else:
                 embed.add_field(name="ID", value=f"{UserID}", inline=True)
-                embed.add_field(name="Verified", value="Hat" if is_verified else "False", inline=True)
+                embed.add_field(name="Verified", value="Hat" if is_verified else ("Unknown" if inventory_visibility == "Private" else "False"), inline=True)
                 embed.add_field(name="Inventory", value=inventory_visibility, inline=True)
 
-                embed.add_field(name="RAP", value=f"[`{rap_value:,}`]({rolimonsurl})", inline=True)
-                embed.add_field(name="Value", value=f"[`{value_value:,}`]({rolimonsurl})", inline=True)
-                embed.add_field(name="Visits", value=f"{total_visits:,}", inline=True)
+                embed.add_field(name="RAP", value=f"[`{num(rap_value)}`]({rolimonsurl})", inline=True)
+                embed.add_field(name="Value", value=f"[`{num(value_value)}`]({rolimonsurl})", inline=True)
+                embed.add_field(name="Visits", value=num(total_visits), inline=True)
 
                 embed.add_field(name="Created", value=created_timestamp if created_timestamp else "Unknown", inline=True)
                 embed.add_field(name="Last Online", value=formatted_last_online, inline=True)
