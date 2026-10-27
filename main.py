@@ -68,7 +68,7 @@ def _secret(env_name, file_name=None):
 
 # OpenAI-compatible client for /ai
 chatgpt = OpenAI(api_key=os.getenv("OPENAI_KEY"), base_url="https://openrouter.ai/api/v1")
-AIModel = "openai/gpt-oss-120b:free"
+AIModel = "gpt-oss-20b"
 
 # === Databases (Cloudflare D1, or local JSON when the Cloudflare env vars are not set) ===
 countingDB = CloudflareD1("counting")
