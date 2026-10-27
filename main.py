@@ -434,9 +434,9 @@ async def help_command(interaction: discord.Interaction):
         "• /badge - Badge information\n• /badges - Check a user's badges\n• /recentbadges - Latest badges\n• /outfits - A user's outfits\n"
         "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox"), inline=False)
     embed.add_field(name="Utility", value=(
-        "• /ping - Latency\n• /invite - Invite link\n• /google - Search Google\n• /ai - Chat with an AI\n• /github - GitHub user\n"
+        "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI\n• /github - GitHub user\n"
         "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp, /discord2spook - spook.bio"), inline=False)
-    embed.add_field(name="Yapper profile", value="• /discorduser - Info about a user\n• /discordavatar - Avatar\n• /discordbanner - Banner", inline=False)
+    embed.add_field(name="Yapper profile", value="• /yapperuser - Info about a user\n• /discordavatar - Avatar\n• /discordbanner - Banner", inline=False)
     embed.set_footer(text="Right-click context menus from the Discord bot are not available on Yapper; use the slash commands.")
     await interaction.response.send_message(embed=embed)
 
@@ -445,7 +445,7 @@ async def help_command(interaction: discord.Interaction):
 async def countingleaderboard(interaction: discord.Interaction):
     embed = discord.Embed(
         title="Counting Leaderboard",
-        description="[Click here to view the counting leaderboard](https://our-websites.github.io/shapes.lol/counting/leaderboard/)",
+        description=f"[Click here to view the counting leaderboard]({MainURL}/counting/leaderboard/)",
         color=ecolor(interaction.user.id))
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
     await interaction.response.send_message(embed=embed)
@@ -471,14 +471,14 @@ def _quality(ms):
 @bot.tree.command(name="ping", description="Check the bot's latency.")
 async def ping(interaction: discord.Interaction):
     latency = _latency_ms()
-    embed = discord.Embed(title="Bot Server Stats", description=f"Latency: `{latency:.2f}ms` ({_quality(latency)} Connection)",
+    embed = discord.Embed(title="Server Stats", description=f"Latency: `{latency:.2f}ms` ({_quality(latency)} Connection)",
                           color=ecolor(interaction.user.id))
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
     await interaction.response.send_message(embed=embed)
     await asyncio.sleep(2)
     updated = _latency_ms()
     embed = discord.Embed(
-        title="Bot Server Stats", color=ecolor(interaction.user.id),
+        title="Server Stats", color=ecolor(interaction.user.id),
         description=f"OriginalLatency: `{latency:.2f}ms` ({_quality(latency)} Connection)\nEditLatency: `{updated:.2f}ms` ({_quality(updated)} Connection)")
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
     await interaction.edit_original_response(embed=embed, content=None)
@@ -596,7 +596,7 @@ async def lastfm(interaction: discord.Interaction, action: str = "", name: str =
     await interaction.response.send_message(embed=embed)
 
 
-# --- Yapper profile commands (these were /discorduser, /discordavatar, /discordbanner on Discord) ---
+# --- Yapper profile commands (these were /yapperuser, /discordavatar, /discordbanner on Discord) ---
 
 def _profile_target(interaction, user):
     """The user to look up. Fills in the full profile from Yapper so avatar/banner/bio are available."""
@@ -897,6 +897,9 @@ async def ai(interaction: discord.Interaction, *, prompt: str):
                 "Always respond in a single concise paragraph. Otherwise your response will not be recieved due to the embed text limit"
                 "Follow Yapper's rules. Do not provide instructions for illegal activity. "
                 "Stay safe, respectful, and friendly."
+                "Your name is Shapes, the support server is https://yapin.gg/invite/shapes if a user requests it or if you think the prompt is support related."
+                "Please stay away from nsfw/bad topics, it will get you deleted/banned."
+                "You're created/owned by Spooky Inc. with leandre as your main developer and nathan as the second developer."
             )
         }
     ]
@@ -935,9 +938,9 @@ async def ai(interaction: discord.Interaction, *, prompt: str):
     await interaction.edit_original_response(embed=embed)
 
 
-# --- google ---
+# --- search ---
 # Google is retiring the Custom Search JSON API (discontinued January 1, 2027) and has no whole-web replacement.
-# /google now uses the Brave Search API (BRAVE_API_KEY). If only the old GOOGLE_API_KEY is set, it keeps using
+# /search now uses the Brave Search API (BRAVE_API_KEY). If only the old GOOGLE_API_KEY is set, it keeps using
 # Google's API until that shuts off. Adding another provider = one more function in SEARCH_PROVIDERS.
 BraveAPIKey = _secret("BRAVE_API_KEY", "BraveToken.txt")
 
@@ -982,8 +985,8 @@ def _search_providers():
     return found
 
 
-@bot.tree.command(name="google", description="Search the web.")
-async def google(interaction: discord.Interaction, query: str = "Spook"):
+@bot.tree.command(name="search", description="Search the web.")
+async def search(interaction: discord.Interaction, query: str = "Yapin'"):
     await interaction.response.defer()
 
     thinkingembed = discord.Embed(
@@ -1430,7 +1433,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                             roblox_badges = badges_data
 
                     rolimons_stats_url = f"https://api.rolimons.com/players/v1/playerinfo/{UserID}"
-                    async with session.get(rolimons_stats_url, headers={'User-Agent': 'our-websites.github.io/shapes.lol'}) as response:
+                    async with session.get(rolimons_stats_url, headers={'User-Agent': 'our-websites.github.io/shapes.lol/yapin'}) as response:
                         if response.status == 200:
                             rolimons_stats_data = await response.json()
                             if rolimons_stats_data.get('success'):
