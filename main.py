@@ -83,8 +83,8 @@ bot = yapper.Bot()
 bot.tree = yshim.tree
 yshim.BOT = bot
 owner = "leandre"
-MainURL = "https://our-websites.github.io/shapes.lol"
-InviteURL = os.environ.get("YAPPER_INVITE_URL", "https://our-websites.github.io/shapes.lol/yapper")
+MainURL = "https://our-websites.github.io/shapes.lol/yapin"
+InviteURL = os.environ.get("YAPPER_INVITE_URL", "https://our-websites.github.io/shapes.lol/yapin?s=true")
 searchengine = "621a38269031b4e89"  # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
 APIBaseURL_Key = _secret("Shapes_API_Key")
@@ -338,6 +338,8 @@ async def restart(interaction: discord.Interaction):
     await interaction.response.send_message(":white_check_mark: Restarting...")
     _save_everything()
     print("Bot restart initiated by command")
+    bot.stop()
+    app.stop()
     threading.Timer(1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)).start()
 
 
@@ -607,8 +609,8 @@ def _profile_target(interaction, user):
     return target
 
 
-@bot.tree.command(name="discorduser", description="Get information about a user")
-async def discorduser(interaction: discord.Interaction, user: discord.User = None):
+@bot.tree.command(name="yapperuser", description="Get information about a user")
+async def yapperuser(interaction: discord.Interaction, user: discord.User = None):
     target = _profile_target(interaction, user)
     embed = discord.Embed(title=f"{target.display_name}" + (f" (@{target.name})" if target.display_name != target.name else ""),
                           color=ecolor(interaction.user.id))
@@ -616,7 +618,7 @@ async def discorduser(interaction: discord.Interaction, user: discord.User = Non
     if bio:
         embed.description = str(bio)
     embed.add_field(name="ID", value=f"`{target.id}`", inline=True)
-    embed.add_field(name="Bot", value="Yes" if target.bot else "No", inline=True)
+    embed.add_field(name="Bot", value="Yes" if target.is_bot else "No", inline=True)
     created = target.created_at
     if created:
         embed.add_field(name="Created", value=f"<t:{int(created.timestamp())}:D>", inline=True)
@@ -640,7 +642,7 @@ async def discorduser(interaction: discord.Interaction, user: discord.User = Non
     linked = get_lastfm(target.id)
     if linked:
         p = lastfm_profile(linked)
-        embed.add_field(name="Last.fm", value=lastfm_line(p) if p else f"[{linked}](https://www.last.fm/user/{linked})", inline=False)
+        embed.add_field(name="LastFM", value=lastfm_line(p) if p else f"[{linked}](https://www.last.fm/user/{linked})", inline=False)
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
     await interaction.response.send_message(embed=embed)
 
@@ -648,6 +650,7 @@ async def discorduser(interaction: discord.Interaction, user: discord.User = Non
 @bot.tree.command(name="discordavatar", description="Get a user's avatar")
 async def discordavatar(interaction: discord.Interaction, user: discord.User = None):
     target = _profile_target(interaction, user)
+    print(str(target))
     url = target.avatar_url
     if not url:
         await interaction.response.send_message(f"{target.name} doesn't have an avatar.")
