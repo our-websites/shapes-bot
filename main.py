@@ -4102,7 +4102,40 @@ def create_instagram_embed(username, profile_info, requester_name):
 
     return embed
 
+@bot.tree.command(name="tiktok", description="repost a tiktok  video")
+async def tiktok(interaction: discord.Interaction, subcommand: str, url: str):
+    if subcommand.lower() != "repost":
+        await interaction.response.send_message("Error")
+        return
 
+    await interaction.response.defer(thinking=True)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://www.tikwm.com/api/", params={"url": url}) as resp:
+                data = await resp.json()
+
+            play = (data.get("data") or {}).get("play")
+            if not play:
+                raise ValueError("Error")
+
+            async with session.get(play) as resp:
+                content = await resp.read()
+
+        filename = f"{os.urandom(8).hex()}.mp4"
+        uploaded = bot.api("POST", f"/channels/{interaction.channel_id}/uploads", {"filename": filename})
+
+        await interaction.edit_original_response(
+            content=None,
+            embeds=None,
+            layout=[container(file_display(uploaded["url"]))]
+        )
+    except Exception:
+        await interaction.edit_original_response(
+            content="Error",
+            embeds=None,
+            layout=None
+        )
 
 # =====================================================================================
 # Events
