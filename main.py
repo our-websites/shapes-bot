@@ -4102,12 +4102,8 @@ def create_instagram_embed(username, profile_info, requester_name):
 
     return embed
 
-@bot.tree.command(name="tiktok", description="repost a tiktok  video")
-async def tiktok(interaction: discord.Interaction, subcommand: str, url: str):
-    if subcommand.lower() != "repost":
-        await interaction.response.send_message("Error")
-        return
-
+@bot.tree.command(name="repost", description="Repost a TikTok video")
+async def repost(interaction: discord.Interaction, url: str):
     await interaction.response.defer(thinking=True)
 
     try:
@@ -4130,7 +4126,8 @@ async def tiktok(interaction: discord.Interaction, subcommand: str, url: str):
             embeds=None,
             layout=[container(file_display(uploaded["url"]))]
         )
-    except Exception:
+    except Exception as e:
+        print(f"[repost] {type(e).__name__}: {e}")
         await interaction.edit_original_response(
             content="Error",
             embeds=None,
