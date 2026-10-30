@@ -240,6 +240,29 @@ def _norm_id(v):
 _USER_CACHE = {}
 
 
+SITE_URL = (os.environ.get("YAPPER_SITE_URL") or "https://www.yapin.gg").rstrip("/")
+
+
+def _image_url(value):
+    """A usable absolute https image URL from whatever the API gave (string, {"url": ...}, relative path, //host)."""
+    if isinstance(value, dict):
+        value = _first(value, "url", "src", "href")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or value.lower() in ("null", "none", "undefined"):
+        return None
+    if value.startswith("//"):
+        value = "https:" + value
+    elif value.startswith("/"):
+        value = SITE_URL + value
+    elif value.startswith("http://"):
+        value = "https://" + value[len("http://"):]     # embeds and images only load over https
+    if not value.startswith("https://"):
+        return None
+    return value.replace(" ", "%20")
+
+
 def fetch_user(user_id):
     """The raw Yapper user dict (cached for 5 minutes), or {}."""
     key = str(user_id)
@@ -286,12 +309,20 @@ class YUser:
         self.data = dict(data or {})
         self.name = name or _first(self.data, "username", "name", "display_name") or str(id)
         self.display_name = display_name or _first(self.data, "display_name", "displayName") or self.name
-        self.bot = bool(bot or self.data.get("bot") or self.data.get("is_bot"))
+        self._bot_hint = bool(bot)
         self._guild_id = None
 
     @property
     def is_bot(self):
-        return self.bot
+        """Read live from the profile data, because the full profile is merged in after the user is created."""
+        d = self.data
+        kind = str(_first(d, "type", "kind", "account_type", "user_type") or "").lower()
+        return bool(self._bot_hint or d.get("bot") is True or d.get("is_bot") is True or d.get("isBot") is True
+                    or d.get("author_bot") is True or kind == "bot")
+
+    @property
+    def bot(self):
+        return self.is_bot
 
     @classmethod
     def from_api(cls, data):
@@ -314,13 +345,11 @@ class YUser:
 
     @property
     def avatar_url(self):
-        url = _first(self.data, "avatar_url", "avatarUrl", "avatar", "image_url")
-        return url if isinstance(url, str) and url.startswith(("http://", "https://", "/")) else None
+        return _image_url(_first(self.data, "avatar_url", "avatarUrl", "avatar", "image_url", "author_avatar_url", "profile_picture"))
 
     @property
     def banner_url(self):
-        url = _first(self.data, "banner_url", "bannerUrl", "banner")
-        return url if isinstance(url, str) and url.startswith(("http://", "https://", "/")) else None
+        return _image_url(_first(self.data, "banner_url", "bannerUrl", "banner", "profile_banner"))
 
     @property
     def display_avatar(self):

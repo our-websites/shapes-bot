@@ -677,7 +677,7 @@ def _profile_target(interaction, user):
     target = user or interaction.user
     data = yshim.fetch_user(target.id)
     if data:
-        target.data = {**data, **target.data}
+        target.data = {**target.data, **{k: v for k, v in data.items() if v not in (None, "")}}   # the full profile wins
         target.name = yshim._first(data, "username", "name") or target.name
         target.display_name = yshim._first(data, "display_name", "displayName") or target.display_name
     return target
