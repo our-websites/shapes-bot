@@ -630,23 +630,63 @@ def handle_automod(msg):
     return removed or punishment is not None
 
 
-def _automod_summary(cfg):
+def _automod_embed(cfg, user, note=None):
     r, a = cfg["rules"], cfg["actions"]
+    on = cfg["enabled"]
+    embed = discord.Embed(title="Automod", color=discord.Color.green() if on else discord.Color.red(),
+                          description=(f"✅ {note}\n\n" if note else "") + (f"**On** · violations are removed and logged" + (f" in <#{cfg['log_channel']}>" if cfg["log_channel"] else "")
+                                                                         if on else "**Off** · nothing is being checked"))
 
-    def flag(name):
-        return "✅" if r[name]["on"] else "❌"
-    lines = [
-        f"**Automod is {'ON' if cfg['enabled'] else 'OFF'}**" + (f" · logs in <#{cfg['log_channel']}>" if cfg["log_channel"] else ""),
-        f"{flag('words')} words ({len(r['words']['list'])} blocked)",
-        f"{flag('links')} links" + (f" (allowed: {', '.join(r['links']['allow'])})" if r["links"]["allow"] else ""),
-        f"{flag('invites')} invites",
-        f"{flag('caps')} caps (≥{r['caps']['percent']}% of {r['caps']['min_length']}+ letters)",
-        f"{flag('spam')} spam ({r['spam']['count']} messages in {r['spam']['seconds']}s)",
-        f"{flag('mentions')} mentions (more than {r['mentions']['limit']})",
-        f"Punishment: delete + warn; timeout {a['timeout_minutes']} min after {a['timeout_after'] or 'never'} strikes"
-        + (f"; kick after {a['kick_after']}" if a["kick_after"] else "") + f" (strikes last {a['strike_minutes']} min)",
-    ]
-    return "\n".join(lines)
+    def line(name, label, detail):
+        return f"{'🟢' if r[name]['on'] else '⚫'} **{label}** · {detail}"
+    embed.add_field(name="Rules", inline=False, value="\n".join([
+        line("words", "Words", f"{len(r['words']['list'])} blocked"),
+        line("links", "Links", "any link" + (f" except {', '.join(r['links']['allow'][:4])}" + ("…" if len(r["links"]["allow"]) > 4 else "") if r["links"]["allow"] else "")),
+        line("invites", "Invites", "links to other servers"),
+        line("caps", "Caps", f"{r['caps']['percent']}%+ of {r['caps']['min_length']}+ letters"),
+        line("spam", "Spam", f"{r['spam']['count']} messages in {r['spam']['seconds']}s"),
+        line("mentions", "Mentions", f"more than {r['mentions']['limit']}"),
+    ]))
+    steps = ["Message removed" + (" + warning" if a["warn"] else "")]
+    if a["timeout_after"]:
+        steps.append(f"Timeout {a['timeout_minutes']} min at {a['timeout_after']} strikes")
+    if a["kick_after"]:
+        steps.append(f"Kick at {a['kick_after']} strikes")
+    embed.add_field(name="Punishment", value=" → ".join(steps) + f"\nStrikes expire after {a['strike_minutes']} min", inline=False)
+    if cfg["exempt_channels"] or cfg["exempt_roles"]:
+        embed.add_field(name="Exempt", inline=False, value=" ".join([f"<#{c}>" for c in cfg["exempt_channels"][:8]] + [f"<@&{x}>" for x in cfg["exempt_roles"][:8]]))
+    embed.set_footer(text="Tap a rule to switch it on or off · /automod help for every option · Admins are never checked")
+    return embed
+
+
+def _automod_view(sid, owner_id):
+    """Toggle buttons under the panel. Each press saves and redraws the panel."""
+    cfg = get_automod(sid)
+    view = discord.ui.View(timeout=300)
+
+    def add(label, on, toggle):
+        button = discord.ui.Button(label=label, style=discord.ButtonStyle.success if on else discord.ButtonStyle.secondary)
+
+        async def pressed(click):
+            if str(click.user.id) != str(owner_id) or not yshim.is_admin(sid, click.user.id):
+                await click.response.send_message("Only the admin who opened this panel can change it.", ephemeral=True)
+                return
+            current = get_automod(sid)
+            toggle(current)
+            current = save_automod(sid, current)
+            await click.response.edit_message(embed=_automod_embed(current, click.user), view=_automod_view(sid, owner_id))
+        button.callback = pressed
+        view.add_item(button)
+
+    def flip_enabled(c):
+        c["enabled"] = not c["enabled"]
+    add("Turn off" if cfg["enabled"] else "Turn on", False, flip_enabled)
+    view.children[-1].style = discord.ButtonStyle.danger if cfg["enabled"] else discord.ButtonStyle.primary
+    for name in automod.RULE_NAMES:
+        def flip(c, name=name):
+            c["rules"][name]["on"] = not c["rules"][name]["on"]
+        add(name.capitalize(), cfg["rules"][name]["on"], flip)
+    return view
 
 
 AUTOMOD_HELP = ("**/automod** (admins only)\n"
@@ -669,8 +709,12 @@ async def automod_command(interaction: discord.Interaction, action: str = "statu
     async def reply(text):
         await interaction.response.send_message(text, ephemeral=True)
 
-    if action in ("status", ""):
-        return await reply(_automod_summary(cfg))
+    async def panel(note=None):
+        await interaction.response.send_message(embed=_automod_embed(get_automod(sid), interaction.user, note),
+                                                view=_automod_view(sid, interaction.user.id), ephemeral=True)
+
+    if action in ("status", "panel", ""):
+        return await panel()
     if action in ("enable", "disable"):
         cfg["enabled"] = action == "enable"
     elif action == "rule":
@@ -740,9 +784,10 @@ async def automod_command(interaction: discord.Interaction, action: str = "statu
             return await reply("Usage: `/automod kick <strikes>` (0 = never kick)")
         cfg["actions"]["kick_after"] = int(a)
     else:
-        return await reply(AUTOMOD_HELP)
-    cfg = save_automod(sid, cfg)
-    await reply("✅ Saved.\n\n" + _automod_summary(cfg))
+        embed = discord.Embed(title="Automod help", color=ecolor(interaction.user.id), description=AUTOMOD_HELP)
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+    save_automod(sid, cfg)
+    await panel("Saved.")
 
 
 # --- Last.fm (linked with Last.fm's web auth, so the account is verified by Last.fm itself) ---

@@ -434,36 +434,63 @@ def is_owner(user):
     return str(user.name).lower() in OWNER_USERNAMES
 
 
+_ADMIN_PERMS = {"administrator", "admin", "manage_server", "manage_guild", "manage_community", "owner"}
+_STAFF_WORDS = re.compile(r"\b(admin(istrator)?s?|owner|co-?owner|moderators?|mods?|staff)\b", re.I)
+
+
 def _has_admin(blob):
+    """Does this member/role dict say it can manage the server? Yapin's field names aren't documented, so this accepts
+    booleans (is_admin, administrator…), permission lists/dicts of names, a Discord-style number (0x8 administrator,
+    0x20 manage server), and a plain rank like role: "admin"."""
     if not isinstance(blob, dict):
         return False
-    for key in ("is_admin", "admin", "administrator", "is_owner", "owner"):
+    for key in ("is_admin", "admin", "administrator", "is_owner", "owner", "manage_server", "can_manage_server"):
         if blob.get(key) is True:
             return True
-    perms = blob.get("permissions")
+    for key in ("role", "rank", "member_role", "server_role"):
+        v = blob.get(key)
+        if isinstance(v, str) and v.lower() in ("owner", "admin", "administrator", "co-owner", "coowner"):
+            return True
+    perms = blob.get("permissions", blob.get("perms"))
     if isinstance(perms, (list, tuple, set)):
-        return any(str(p).lower() in ("administrator", "admin", "manage_server") for p in perms)
+        return any(str(p).lower().replace(" ", "_") in _ADMIN_PERMS for p in perms)
     if isinstance(perms, dict):
-        return any(perms.get(k) for k in ("administrator", "admin", "manage_server"))
+        return any(perms.get(k) for k in _ADMIN_PERMS)
+    if isinstance(perms, str) and perms.isdigit():
+        perms = int(perms)
+    if isinstance(perms, int) and not isinstance(perms, bool):
+        return bool(perms & 0x8 or perms & 0x20)
     return False
 
 
+_denied_logged = set()
+
+
 def is_admin(server_id, user_id):
-    """Best effort: bot owners, the server owner, or a member/role flagged as administrator.
-    Yapper's permission fields are not documented in what I could read, so several likely names are checked."""
+    """Best effort: bot owners, the server owner, a member/role flagged as administrator, or a role named like
+    Admin / Owner / Moderator / Staff (only admins can create roles, so a name is a fair sign)."""
     if str(user_id) in OWNER_IDS:
         return True
     try:
         server = BOT.server(server_id)
-        if str(_first(server, "owner_id", "ownerId", "owner")) == str(user_id):
+        owner_keys = ("owner_id", "ownerId", "owner", "created_by", "creator_id", "founder_id")
+        if any(str(server.get(k) if not isinstance(server.get(k), dict) else server[k].get("id")) == str(user_id) for k in owner_keys if server.get(k) is not None):
             return True
         member = BOT.member(server_id, user_id)
-        if _has_admin(member):
+        if _has_admin(member) or (isinstance(member.get("user"), dict) and _has_admin(member["user"])):
             return True
-        role_ids = {str(r.get("id") if isinstance(r, dict) else r) for r in (member.get("roles") or [])}
-        return any(_has_admin(r) for r in BOT.roles(server_id) if str(r.get("id")) in role_ids)
-    except Exception:
-        return False
+        role_ids = {str(r.get("id") if isinstance(r, dict) else r) for r in (member.get("roles") or member.get("role_ids") or [])}
+        for r in BOT.roles(server_id):
+            if str(r.get("id")) in role_ids and (_has_admin(r) or _STAFF_WORDS.search(str(r.get("name") or ""))):
+                return True
+        key = (str(server_id), str(user_id))
+        if key not in _denied_logged:     # once per person, to help work out which field Yapin uses
+            _denied_logged.add(key)
+            print(f"[admin check] {user_id} is not an admin in {server_id}. member fields: {sorted(member)}; "
+                  f"server fields: {sorted(server)}; roles: {[r.get('name') for r in BOT.roles(server_id) if str(r.get('id')) in role_ids]}")
+    except Exception as e:
+        print(f"[admin check] failed for {user_id} in {server_id}: {e}")
+    return False
 
 
 # --------------------------------------------------------------------------- sending
