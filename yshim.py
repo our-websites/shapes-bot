@@ -818,7 +818,7 @@ class Interaction:
         (only they can), and the stub is removed. Nobody else gets to read it."""
         self._responded = True
         reveal = _Reveal(self.user.id, content, embed, view)
-        stub = _post(self.channel_id, f"🔒 {self.user.mention}, your private reply is ready.", view=reveal,
+        stub = _post(self.channel_id, f"🔒 {self.user.mention}, private reply is ready.", view=reveal,
                      reply_to=None if self._sent_first else (self._msg or {}).get("id"))
         reveal.stub = stub
         self._sent_first = True
