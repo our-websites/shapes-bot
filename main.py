@@ -322,32 +322,76 @@ def _save_everything():
             print(f"save failed for {db.name}: {e}")
 
 
-@bot.tree.command(name="stop", description="Stop the bot.")
+def _shutdown_services():
+    """Stop the bot and release the web server's port, so a restart can bind it again right away."""
+    for label, stopper in (("bot", getattr(bot, "stop", None)), ("web server", stop_web)):
+        try:
+            if stopper:
+                stopper()
+        except Exception as e:
+            print(f"could not stop the {label}: {e}")
+
+
+class ConfirmStop(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    async def interaction_check(self, click):
+        if not yshim.is_owner(click.user):
+            await click.response.send_message("Only the bot owner can press this.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Stop the bot", style=discord.ButtonStyle.danger)
+    async def confirm(self, click, button):
+        self.stop()
+        await click.response.edit_message(content="✅ Shutting down. Saving data first…", embed=None, view=None)
+        _save_everything()
+        print("Bot shutdown initiated by command")
+        _shutdown_services()
+        threading.Timer(1.0, lambda: os._exit(0)).start()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, click, button):
+        self.stop()
+        await click.response.edit_message(content="Cancelled. The bot is still running.", embed=None, view=None)
+
+
+@bot.tree.command(name="stop", description="Stop the bot (asks you to confirm).")
 async def stop(interaction: discord.Interaction):
     if not yshim.is_owner(interaction.user):
-        await interaction.response.send_message(f"Only {owner} can use this command.")
+        await interaction.response.send_message(f"Only {owner} can use this command.", ephemeral=True)
         return
-    await interaction.response.send_message(":white_check_mark: Shutdown Successfully!")
-    _save_everything()
-    print("Bot shutdown initiated by command")
-    bot.stop()
-    threading.Timer(1.0, lambda: os._exit(0)).start()
+    await interaction.response.send_message("⚠️ Stop the bot completely? It stays offline until someone starts it again.",
+                                            view=ConfirmStop(), ephemeral=True)
 
 
 @bot.tree.command(name="restart", description="Restart the bot.")
 async def restart(interaction: discord.Interaction):
     if not yshim.is_owner(interaction.user):
-        await interaction.response.send_message(f"Only {owner} can use this command.")
+        await interaction.response.send_message(f"Only {owner} can use this command.", ephemeral=True)
         return
-    await interaction.response.send_message(":white_check_mark: Restarting...")
+    await interaction.response.send_message(":white_check_mark: Restarting...", ephemeral=True)
     _save_everything()
     print("Bot restart initiated by command")
-    for stopper in (getattr(bot, "stop", None), getattr(app, "stop", None)):   # Flask has no stop(); don't let that break /restart
+    _shutdown_services()    # frees port 5004 first: starting a second server on it was what broke restarts
+
+    def relaunch():
         try:
-            stopper and stopper()
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        argv = [sys.executable] + sys.argv
+        try:
+            os.closerange(3, 1024)      # nothing (sockets, files) should leak into the new process
+            os.execv(sys.executable, argv)
         except Exception as e:
-            print(f"stop failed: {e}")
-    threading.Timer(1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)).start()
+            print(f"execv failed ({e}), starting a new process instead")
+            import subprocess
+            subprocess.Popen(argv)
+            os._exit(0)
+    threading.Timer(1.5, relaunch).start()
 
 
 @bot.tree.command(name="counting", description="Counting Settings: /counting [toggle|channel <#channel>]")
@@ -4792,10 +4836,23 @@ def mutualservers():
 # Startup
 # =====================================================================================
 
+_web_server = None
+
+
+def stop_web():
+    """Close the web server's socket (so the port is free again)."""
+    if _web_server is not None:
+        _web_server.shutdown()
+        _web_server.server_close()
+
+
 def run_web():
+    global _web_server
+    from werkzeug.serving import make_server
     port = int(os.environ.get("PORT", 5004))
     print(f"Starting web server on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+    _web_server = make_server("0.0.0.0", port, app, threaded=True)
+    _web_server.serve_forever()
 
 
 if __name__ == "__main__":
