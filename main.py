@@ -4586,7 +4586,7 @@ def cached(key, ttl, fn):
 def admin_required(f):
     def wrapped(*args, **kwargs):
         if session.get("admin") is not True:
-            if request.path.startswith("/api/"):
+            if request.path.startswith("/api/") or request.path == "/mutuals":
                 return jsonify({"error": "login required"}), 401
             return redirect(url_for("admin_login"))
         return f(*args, **kwargs)
@@ -4686,7 +4686,8 @@ def _person(d):
     return {
         "id": str(uid), "name": yshim._first(merged, "username", "name") or str(uid),
         "display": yshim._first(merged, "display_name", "displayName", "nickname", "nick") or yshim._first(merged, "username", "name") or str(uid),
-        "avatar": _avatar_of(merged), "bot": yshim.YUser(uid, data=merged).is_bot,
+        "avatar": _avatar_of(merged),
+        "bot": yshim.YUser(uid, data=merged).is_bot or str(uid) == str((bot.me or {}).get("id")),
         "roles": [str(r.get("id") if isinstance(r, dict) else r) for r in (merged.get("roles") or merged.get("role_ids") or [])],
         "joined": yshim._first(merged, "joined_at", "joinedAt", "created_at"),
     }
@@ -5066,21 +5067,42 @@ def countinglb():
     return {"Leaderboard": sorted(lb.items(), key=lambda x: x[1]["highestnumber"], reverse=True)}, 200
 
 
+def _all_members(server_id, limit=5000):
+    """Every member (paged 200 at a time), as flat dicts from _person."""
+    out, after = [], None
+    while len(out) < limit:
+        page = bot.members(server_id, after=after)
+        people = [_person(dict(m)) for m in page]
+        out.extend(people)
+        if len(page) < 200 or not people:
+            break
+        after = people[-1]["id"]
+    return out
+
+
 @app.route("/mutuals", methods=["GET"])
+@admin_required     # member lists are user data, so this is no longer public (the /mutuals command still is)
 def mutualservers():
     if not bot_ready:
         return {"Servers": "Unknown"}, 503
-    servers = {}
-    for s in cached("servers", 15, bot.servers):
-        sid = s.get("id")
-        entry = {"name": s.get("name"), "iconurl": yshim._first(s, "icon_url", "icon"), "owner": yshim._first(s, "owner_id", "owner"),
-                 "channels": len(bot.channels(sid)), "roles": len(bot.roles(sid)), "members": [], "bots": []}
-        for m in bot.members(sid):
-            row = {"name": _name(m), "id": yshim._first(m, "user_id", "id")}
-            (entry["bots"] if m.get("bot") or m.get("is_bot") else entry["members"]).append(row)
-        entry["membercount"], entry["botcount"] = len(entry["members"]), len(entry["bots"])
-        servers[sid] = entry
-    return {"Servers": servers}, 200
+
+    def build():
+        servers = {}
+        for s in bot.servers():
+            sid = s.get("id")
+            try:
+                entry = {"name": s.get("name"), "iconurl": yshim._image_url(yshim._first(s, "icon_url", "iconUrl", "icon", "image_url")),
+                         "owner": yshim._first(s, "owner_id", "ownerId", "owner"), "channels": len(bot.channels(sid)),
+                         "roles": len(bot.roles(sid)), "members": [], "bots": []}
+                for p in _all_members(sid):
+                    (entry["bots"] if p["bot"] else entry["members"]).append({"name": p["name"], "id": p["id"]})
+            except Exception as e:
+                print(f"[mutuals] {sid}: {e}")
+                continue
+            entry["membercount"], entry["botcount"] = len(entry["members"]), len(entry["bots"])
+            servers[sid] = entry
+        return servers
+    return {"Servers": cached("mutuals", 60, build)}, 200
 
 
 # =====================================================================================
