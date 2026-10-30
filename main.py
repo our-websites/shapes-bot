@@ -37,6 +37,7 @@ from openai import OpenAI
 from slpp import slpp as lua
 
 import yshim
+import automod
 from cfstore import CloudflareD1
 from yshim import app_commands, commands, discord
 
@@ -76,7 +77,10 @@ embedDB = CloudflareD1("embed")
 usersDB = CloudflareD1("users")
 autoroleDB = CloudflareD1("autorole")
 AI_DB = CloudflareD1("ai")
-DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "autoroleDB": autoroleDB, "AI_DB": AI_DB}
+automodDB = CloudflareD1("automod")
+dmDB = CloudflareD1("dms")       # DM channels the dashboard knows about: user id -> {channel_id, name, last}
+DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "autoroleDB": autoroleDB, "AI_DB": AI_DB,
+             "automodDB": automodDB, "dmDB": dmDB}
 
 # === Yapper bot ===
 bot = yapper.Bot()
@@ -430,7 +434,8 @@ async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="Bot Help & Commands", color=ecolor(interaction.user.id),
                           description="Use `/command` or `!command`. Put names with spaces in quotes.")
     embed.add_field(name="Counting", value="• /counting - Counting settings (`toggle`, `channel #channel`)\n• /countingleaderboard - Leaderboard website", inline=False)
-    embed.add_field(name="User Settings", value="• /settings - Customize your embed color\n• /autorole - Give new members a role", inline=False)
+    embed.add_field(name="User Settings", value="• /settings - Customize your embed color\n• /autorole - Give new members a role\n• /lastfm - Link Last.fm", inline=False)
+    embed.add_field(name="Moderation", value="• /automod - Block words, links, invites, spam, caps and mass mentions (admins)", inline=False)
     embed.add_field(name="Roblox", value=(
         "• /robloxinfo - User information\n• /roblox2yapin - Find a Roblox user's linked account\n• /yapin2roblox - Find a user's Roblox\n"
         "• /britishuser - Check if a user is British\n• /iteminfo - Item information\n• /placeinfo - Place/game information\n"
@@ -487,6 +492,217 @@ async def ping(interaction: discord.Interaction):
         description=f"OriginalLatency: `{latency:.2f}ms` ({_quality(latency)} Connection)\nEditLatency: `{updated:.2f}ms` ({_quality(updated)} Connection)")
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
     await interaction.edit_original_response(embed=embed, content=None)
+
+
+def track_dm(msg):
+    pass    # replaced below by the dashboard's DM tracking
+
+
+# --- Automod ---
+
+_spam = automod.SpamTracker()
+_strikes = automod.Strikes()
+_admin_cache = {}       # (server, user) -> (expires_at, bool); is_admin costs several API calls
+
+
+def get_automod(server_id):
+    return automod.merged(automodDB.get(str(server_id)))
+
+
+def save_automod(server_id, cfg):
+    cfg = automod.clean_config(cfg)
+    automodDB.set(str(server_id), cfg)
+    return cfg
+
+
+def _exempt(sid, uid, channel_id, cfg):
+    if str(channel_id) in cfg["exempt_channels"]:
+        return True
+    key = (sid, str(uid))
+    hit = _admin_cache.get(key)
+    if not hit or hit[0] < time.time():
+        hit = (time.time() + 120, bool(yshim.is_admin(sid, uid)))
+        _admin_cache[key] = hit
+    if hit[1]:
+        return True
+    if cfg["exempt_roles"]:
+        try:
+            roles = {str(r.get("id") if isinstance(r, dict) else r) for r in (bot.member(sid, uid).get("roles") or [])}
+            return bool(roles & set(cfg["exempt_roles"]))
+        except Exception:
+            return False
+    return False
+
+
+def handle_automod(msg):
+    """Returns True when the message was removed (so other handlers, like counting, skip it)."""
+    if msg.get("author_bot") or msg.get("command"):
+        return False
+    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    if not sid:
+        return False
+    stored = automodDB.get(sid)
+    if not stored:
+        return False
+    cfg = automod.merged(stored)
+    if not cfg["enabled"]:
+        return False
+    uid, channel, mid = str(msg.get("author_id")), msg.get("channel_id"), msg.get("id")
+    hits = automod.violations(cfg, msg.get("content") or "", (sid, uid), _spam)
+    if not hits or _exempt(sid, uid, channel, cfg):
+        return False
+
+    actions = cfg["actions"]
+    removed = False
+    if actions["delete"]:
+        try:
+            bot.delete(channel, mid)
+            removed = True
+        except Exception as e:
+            print(f"[automod] could not delete {mid}: {e}")
+    strikes = _strikes.add((sid, uid), actions["strike_minutes"] * 60)
+    punishment = automod.escalation(cfg, strikes)
+    why = ", ".join(automod.REASONS[h] for h in hits)
+    outcome = "message removed" if removed else "flagged"
+    if punishment == "kick":
+        try:
+            bot.kick(sid, uid)
+            outcome, _ = "kicked", _strikes.clear((sid, uid))
+        except Exception as e:
+            print(f"[automod] kick failed: {e}")
+    elif punishment == "timeout":
+        try:
+            bot.timeout(sid, uid, actions["timeout_minutes"], reason=f"Automod: {why}")
+            outcome = f"timed out for {actions['timeout_minutes']} min"
+            _strikes.clear((sid, uid))
+        except Exception as e:
+            print(f"[automod] timeout failed: {e}")
+    if actions["warn"] and punishment is None:
+        try:
+            bot.send(channel, f"⚠️ <@{uid}>, {why}. ({strikes}/{actions['timeout_after'] or '∞'} strikes)")
+        except Exception as e:
+            print(f"[automod] warning failed: {e}")
+    if cfg["log_channel"]:
+        try:
+            bot.send(cfg["log_channel"], f"🛡️ **Automod** · <@{uid}> in <#{channel}> {why}. Result: {outcome}.")
+        except Exception as e:
+            print(f"[automod] log failed: {e}")
+    return removed or punishment is not None
+
+
+def _automod_summary(cfg):
+    r, a = cfg["rules"], cfg["actions"]
+
+    def flag(name):
+        return "✅" if r[name]["on"] else "❌"
+    lines = [
+        f"**Automod is {'ON' if cfg['enabled'] else 'OFF'}**" + (f" · logs in <#{cfg['log_channel']}>" if cfg["log_channel"] else ""),
+        f"{flag('words')} words ({len(r['words']['list'])} blocked)",
+        f"{flag('links')} links" + (f" (allowed: {', '.join(r['links']['allow'])})" if r["links"]["allow"] else ""),
+        f"{flag('invites')} invites",
+        f"{flag('caps')} caps (≥{r['caps']['percent']}% of {r['caps']['min_length']}+ letters)",
+        f"{flag('spam')} spam ({r['spam']['count']} messages in {r['spam']['seconds']}s)",
+        f"{flag('mentions')} mentions (more than {r['mentions']['limit']})",
+        f"Punishment: delete + warn; timeout {a['timeout_minutes']} min after {a['timeout_after'] or 'never'} strikes"
+        + (f"; kick after {a['kick_after']}" if a["kick_after"] else "") + f" (strikes last {a['strike_minutes']} min)",
+    ]
+    return "\n".join(lines)
+
+
+AUTOMOD_HELP = ("**/automod** (admins only)\n"
+                "`status` · `enable` · `disable`\n"
+                "`rule <words|links|invites|caps|spam|mentions> <on|off> [number]` (number = caps %, spam messages, or mention limit)\n"
+                "`words add|remove|list <word>`\n"
+                "`allow <domain>` / `unallow <domain>` for the links rule\n"
+                "`log <#channel|off>` · `exempt <#channel>` (toggle) · `exemptrole <role>` (toggle)\n"
+                "`timeout <strikes> <minutes>` · `kick <strikes|0>`")
+
+
+@bot.tree.command(name="automod", description="Configure automod: /automod status, enable, rule, words, allow, log, timeout...")
+async def automod_command(interaction: discord.Interaction, action: str = "status", a: str = "", b: str = ""):
+    if not await need_admin(interaction):
+        return
+    sid = str(interaction.guild_id)
+    cfg = get_automod(sid)
+    action = action.lower().strip()
+
+    async def reply(text):
+        await interaction.response.send_message(text, ephemeral=True)
+
+    if action in ("status", ""):
+        return await reply(_automod_summary(cfg))
+    if action in ("enable", "disable"):
+        cfg["enabled"] = action == "enable"
+    elif action == "rule":
+        name, state = a.lower(), b.lower()
+        if name not in automod.RULE_NAMES or state not in ("on", "off"):
+            return await reply("Usage: `/automod rule <words|links|invites|caps|spam|mentions> <on|off>`")
+        cfg["rules"][name]["on"] = state == "on"
+    elif action == "set":
+        name, rest = a.lower(), b
+        keys = {"caps": "percent", "spam": "count", "mentions": "limit"}
+        if name not in keys or not rest.isdigit():
+            return await reply("Usage: `/automod set <caps|spam|mentions> <number>`")
+        cfg["rules"][name][keys[name]] = int(rest)
+    elif action == "words":
+        sub, word = a.lower(), b.strip().lower()
+        words = cfg["rules"]["words"]["list"]
+        if sub == "list":
+            return await reply("Blocked words: " + (", ".join(f"||{w}||" for w in words) if words else "none yet"))
+        if sub not in ("add", "remove") or not word:
+            return await reply("Usage: `/automod words add|remove|list <word>`")
+        if sub == "add" and word not in words:
+            words.append(word)
+        if sub == "remove" and word in words:
+            words.remove(word)
+        try:   # the message with the word in it is not left for everyone to read
+            bot.delete(interaction.channel_id, interaction._msg.get("id")) if interaction._msg else None
+        except Exception:
+            pass
+    elif action in ("allow", "unallow"):
+        domain = a.lower().replace("https://", "").replace("http://", "").strip("/")
+        allow = cfg["rules"]["links"]["allow"]
+        if not domain:
+            return await reply("Usage: `/automod allow <domain>`")
+        if action == "allow" and domain not in allow:
+            allow.append(domain)
+        if action == "unallow" and domain in allow:
+            allow.remove(domain)
+    elif action == "log":
+        if a.lower() in ("off", "none", ""):
+            cfg["log_channel"] = None
+        else:
+            ch = resolve_channel(sid, a)
+            if not ch:
+                return await reply("I couldn't find that channel.")
+            cfg["log_channel"] = str(ch.get("id"))
+    elif action == "exempt":
+        ch = resolve_channel(sid, a)
+        if not ch:
+            return await reply("Usage: `/automod exempt <#channel>` (run again to remove it)")
+        cid = str(ch.get("id"))
+        cfg["exempt_channels"] = [c for c in cfg["exempt_channels"] if c != cid] if cid in cfg["exempt_channels"] else cfg["exempt_channels"] + [cid]
+    elif action == "exemptrole":
+        try:
+            role = yshim.resolve_role(a, sid) if a else None
+        except ValueError:
+            role = None
+        if not role:
+            return await reply("Usage: `/automod exemptrole <role>` (run again to remove it). I couldn't find that role.")
+        rid = str(role.id)
+        cfg["exempt_roles"] = [r for r in cfg["exempt_roles"] if r != rid] if rid in cfg["exempt_roles"] else cfg["exempt_roles"] + [rid]
+    elif action == "timeout":
+        if not (a.isdigit() and b.isdigit()):
+            return await reply("Usage: `/automod timeout <strikes> <minutes>` (0 strikes = never time out)")
+        cfg["actions"]["timeout_after"], cfg["actions"]["timeout_minutes"] = int(a), max(1, int(b))
+    elif action == "kick":
+        if not a.isdigit():
+            return await reply("Usage: `/automod kick <strikes>` (0 = never kick)")
+        cfg["actions"]["kick_after"] = int(a)
+    else:
+        return await reply(AUTOMOD_HELP)
+    cfg = save_automod(sid, cfg)
+    await reply("✅ Saved.\n\n" + _automod_summary(cfg))
 
 
 # --- Last.fm (linked with Last.fm's web auth, so the account is verified by Last.fm itself) ---
@@ -4268,6 +4484,15 @@ def handle_counting(msg):
 
 @bot.on("message")
 def on_message(msg):
+    try:
+        if handle_automod(msg):
+            return
+    except Exception as e:
+        print(f"[automod] {type(e).__name__}: {e}")
+    try:
+        track_dm(msg)
+    except Exception as e:
+        print(f"[dm] {type(e).__name__}: {e}")
     try:
         handle_counting(msg)
     except Exception as e:
