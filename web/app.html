@@ -130,10 +130,25 @@
   .progress { height: 6px; border-radius: 4px; background: var(--line); overflow: hidden; }
   .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
 
+  #v-data .layout { grid-template-columns: 280px minmax(0, 1fr); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { background: none; border: 0; padding: 6px 14px; font-weight: 550; color: var(--muted); }
+  .seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+  .editing { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--accent-soft); border-bottom: 1px solid var(--line); }
+  .editing .av { width: 40px; height: 40px; font-size: 16px; }
+  .editing small { display: block; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; font-size: 11px; color: var(--accent); }
+  .editing b { font-size: 16px; }
+  .rec { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+  .rec > header { height: auto; border: 0; padding: 10px 14px 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; background: none; }
+  .rec h3 { margin: 0; font-size: 14px; } .rec code.db { font-size: 12px; color: var(--muted); }
+  .rec textarea { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; width: calc(100% - 28px); margin: 8px 14px; min-height: 120px; tab-size: 2; }
+  .rec .inline { padding: 0 14px 12px; }
+  .btn.danger { background: none; color: var(--danger); border: 1px solid var(--danger); }
+  .hist { font-size: 12.5px; color: var(--muted); padding: 0 14px 10px; }
   @media (max-width: 860px) {
     body { height: auto; } main { overflow: visible; }
     header { flex-wrap: wrap; height: auto; padding: 8px 12px; } .meta { display: none; }
-    #v-servers .layout, #v-dms .layout, .announce, .chat { grid-template-columns: 1fr; height: auto; }
+    #v-servers .layout, #v-dms .layout, #v-data .layout, .announce, .chat { grid-template-columns: 1fr; height: auto; }
     .card { max-height: none; } .scroll { max-height: 220px; } .msgs { max-height: 55vh; }
     .tree { max-height: 160px; border-right: 0; border-bottom: 1px solid var(--line); }
   }
@@ -146,6 +161,7 @@
     <button role="tab" data-view="servers" aria-selected="true">Servers</button>
     <button role="tab" data-view="dms" aria-selected="false">Direct messages</button>
     <button role="tab" data-view="announce" aria-selected="false">Announcements</button>
+    <button role="tab" data-view="data" aria-selected="false">Data</button>
   </nav>
   <div class="spacer"></div>
   <div class="meta"><span id="stats"></span><a href="/logout">Sign out</a></div>
@@ -194,6 +210,18 @@
         <div class="toolbar"><label class="switch"><input type="checkbox" id="annall" checked> Select all</label><span class="muted" id="anncount"></span></div>
         <div class="scroll"><table><thead><tr><th style="width:36px"></th><th>Server</th><th>Channel</th><th>Result</th></tr></thead><tbody id="anntargets"></tbody></table></div>
       </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-data" aria-label="Edit data">
+    <div class="layout">
+      <div class="card">
+        <h2>Who or what to edit</h2>
+        <div class="toolbar"><div class="seg" role="group" aria-label="Type"><button data-kind="server" aria-pressed="true">Server</button><button data-kind="user" aria-pressed="false">User</button></div></div>
+        <div class="toolbar" id="dsearchbar" hidden><input type="search" id="dsearch" placeholder="Search a name, or paste an ID" autocomplete="off" aria-label="Find a user"></div>
+        <div class="scroll" id="dpicker"></div>
+      </div>
+      <div class="card" id="dpane"><div class="empty">Pick a server or a user to see and edit what the bot has saved for them.</div></div>
     </div>
   </section>
 </main>
@@ -252,6 +280,7 @@ $$('nav button').forEach(b => b.onclick = () => {
   $$('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + b.dataset.view));
   if (b.dataset.view === 'dms') loadDMs();
   if (b.dataset.view === 'announce') loadTargets();
+  if (b.dataset.view === 'data') drawPicker();
 });
 
 /* ---------- overview ---------- */
@@ -492,6 +521,64 @@ $('#annform').onsubmit = async e => {
   } catch (err) { st.className = 'status err'; st.textContent = err.message; }
   $('#annsend').disabled = false;
 };
+
+/* ---------- data editor ---------- */
+let dkind = 'server', dtimer;
+$$('#v-data [data-kind]').forEach(b => b.onclick = () => {
+  dkind = b.dataset.kind; $$('#v-data [data-kind]').forEach(x => x.setAttribute('aria-pressed', x === b));
+  $('#dsearchbar').hidden = dkind !== 'user'; $('#dpane').innerHTML = '<div class="empty">Pick a ' + dkind + ' to edit.</div>'; drawPicker();
+});
+function drawPicker() {
+  if (dkind === 'server') {
+    $('#dpicker').innerHTML = servers.map(s => `<button class="row" data-id="${esc(s.id)}">${avatar(s.icon, s.name, 'sq')}<span class="name">${esc(s.name)}</span></button>`).join('') || '<div class="empty">No servers.</div>';
+  } else if (!$('#dsearch').value) { $('#dpicker').innerHTML = '<div class="empty">Search for someone, or paste their ID.</div>'; }
+}
+$('#dsearch').oninput = () => {
+  clearTimeout(dtimer); const q = $('#dsearch').value.trim();
+  if (q.length < 2) { drawPicker(); return; }
+  dtimer = setTimeout(async () => {
+    try {
+      const users = (await api('/api/users/search?q=' + encodeURIComponent(q))).users;
+      const byId = /^[A-Za-z0-9_-]{5,}$/.test(q) && !users.some(u => u.id === q) ? [{ id: q, display: 'Edit by ID: ' + q, name: q, avatar: null }] : [];
+      $('#dpicker').innerHTML = [...users, ...byId].map(u => `<button class="row" data-id="${esc(u.id)}">${avatar(u.avatar, u.display)}<span class="name">${esc(u.display)}${u.display !== u.name ? ` <span class="muted">@${esc(u.name)}</span>` : ''}</span></button>`).join('') || '<div class="empty">Nobody found.</div>';
+    } catch (e) { $('#dpicker').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }, 250);
+};
+$('#dpicker').onclick = e => { const r = e.target.closest('.row'); if (!r) return; $$('#dpicker .row').forEach(x => x.setAttribute('aria-current', x === r)); openData(dkind, r.dataset.id); };
+async function openData(kind, id) {
+  $('#dpane').innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const d = await api(`/api/data/${kind}/${encodeURIComponent(id)}`);
+    const en = d.entity;
+    $('#dpane').innerHTML = `<div class="editing">${avatar(en.avatar, en.name, kind === 'server' ? 'sq' : '')}<div><small>Editing ${esc(kind)}</small><b>${esc(en.name)}</b> <span class="muted">${esc(en.note || '')} · ID ${esc(en.id)}</span></div></div>
+      <div class="scroll" style="padding:12px;display:grid;gap:12px;align-content:start" id="recs">${d.records.map((r, i) => recHTML(r, i)).join('')}
+      ${d.history.length ? `<div class="rec"><header><h3>Recent changes</h3></header><div class="hist" style="padding-top:8px">${d.history.map(h => `${esc(ago(h.at))} · ${esc(h.action)} ${esc(h.db)}`).join('<br>')}</div></div>` : ''}</div>`;
+    d.records.forEach((r, i) => wireRec(kind, id, r, i));
+  } catch (e) { $('#dpane').innerHTML = `<div class="empty">Couldn't load: ${esc(e.message)}</div>`; }
+}
+const pretty = v => v === null || v === undefined ? '' : JSON.stringify(v, null, 2);
+function recHTML(r, i) {
+  return `<div class="rec" id="rec${i}"><header><h3>${esc(r.label)}</h3><code class="db">${esc(r.db)}</code><span class="muted">${esc(r.about)}</span>${r.exists ? '' : '<span class="badge">NOTHING SAVED</span>'}</header>
+    <textarea spellcheck="false" aria-label="${esc(r.label)} data (JSON)" placeholder="Nothing saved yet. Paste JSON here to create it.">${esc(pretty(r.value))}</textarea>
+    <div class="inline"><button class="btn" data-a="save">Save</button><button class="btn ghost" data-a="revert">Revert</button><button class="btn danger" data-a="delete">Delete</button><span class="status" role="status"></span></div></div>`;
+}
+function wireRec(kind, id, r, i) {
+  const box = $('#rec' + i), ta = $('textarea', box), st = $('.status', box);
+  const say = (m, c) => { st.className = 'status ' + (c || ''); st.textContent = m; };
+  ta.onkeydown = e => { if (e.key === 'Tab') { e.preventDefault(); const p = ta.selectionStart; ta.setRangeText('  ', p, ta.selectionEnd, 'end'); } };
+  $('[data-a=revert]', box).onclick = () => { ta.value = pretty(r.value); say(''); };
+  $('[data-a=save]', box).onclick = async () => {
+    let value; try { value = JSON.parse(ta.value); } catch (e) { say('That isn’t valid JSON: ' + e.message, 'err'); return; }
+    if (!confirm(`Save ${r.label} for ${$('.editing b').textContent}?`)) return;
+    try { const out = await api(`/api/data/${kind}/${encodeURIComponent(id)}/${r.db}`, { method: 'PUT', json: { value } }); r.value = out.value; ta.value = pretty(out.value); say('Saved.', 'ok'); }
+    catch (e) { say(e.message, 'err'); }
+  };
+  $('[data-a=delete]', box).onclick = async () => {
+    if (!confirm(`Delete ${r.label} for ${$('.editing b').textContent}? The bot will treat it as never set.`)) return;
+    try { await api(`/api/data/${kind}/${encodeURIComponent(id)}/${r.db}`, { method: 'DELETE' }); r.value = null; ta.value = ''; say('Deleted.', 'ok'); }
+    catch (e) { say(e.message, 'err'); }
+  };
+}
 
 loadOverview().catch(e => { $('#serverlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
 setInterval(() => loadOverview().catch(() => {}), 60000);

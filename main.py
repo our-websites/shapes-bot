@@ -78,9 +78,10 @@ usersDB = CloudflareD1("users")
 autoroleDB = CloudflareD1("autorole")
 AI_DB = CloudflareD1("ai")
 automodDB = CloudflareD1("automod")
+auditDB = CloudflareD1("audit")     # who changed what from the dashboard
 dmDB = CloudflareD1("dms")       # DM channels the dashboard knows about: user id -> {channel_id, name, last}
 DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "autoroleDB": autoroleDB, "AI_DB": AI_DB,
-             "automodDB": automodDB, "dmDB": dmDB}
+             "automodDB": automodDB, "dmDB": dmDB, "auditDB": auditDB}
 
 # === Yapper bot ===
 bot = yapper.Bot()
@@ -5047,6 +5048,110 @@ def api_announce_job(job_id):
 
 def secrets_token():
     return base64.urlsafe_b64encode(os.urandom(9)).decode()
+
+
+# --- edit a server's or user's stored data ---
+
+def _vcounting(v):
+    if not isinstance(v, dict):
+        raise ValueError("Counting data must be an object.")
+    out = {**default_counting(), **v}
+    for key in ("number", "warnings", "highestnumber"):
+        if not isinstance(out[key], int) or isinstance(out[key], bool) or out[key] < 0:
+            raise ValueError(f'"{key}" must be a whole number, 0 or more.')
+    for key in ("enabled", "banned"):
+        if not isinstance(out[key], bool):
+            raise ValueError(f'"{key}" must be true or false.')
+    for key in ("channel", "lastcounter"):
+        if out[key] is not None:
+            out[key] = str(out[key])
+    return out
+
+
+def _vautorole(v):
+    if not isinstance(v, dict) or not isinstance(v.get("enabled"), bool):
+        raise ValueError('Autorole needs {"role_id": "…", "enabled": true/false}.')
+    return {"role_id": str(v.get("role_id") or ""), "enabled": v["enabled"]}
+
+
+def _vcolor(v):
+    if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 0xFFFFFF:
+        raise ValueError("The embed color is a whole number between 0 and 16777215 (0xFFFFFF).")
+    return v
+
+
+def _vobject(v):
+    if not isinstance(v, dict):
+        raise ValueError("This must be a JSON object ({ … }).")
+    return v
+
+
+# kind -> [(database name, label, what it holds, validator)]
+DATA_SCHEMA = {
+    "server": [("countingDB", "Counting", "Counting channel, current number, warnings", _vcounting),
+               ("autoroleDB", "Autorole", "Role given to new members", _vautorole),
+               ("automodDB", "Automod", "Rules and punishments", automod.clean_config)],
+    "user": [("embedDB", "Embed color", "Color of this person's embeds, as a number", _vcolor),
+             ("usersDB", "Profile data", "Linked accounts (Last.fm, Roblox…) and other saved details", _vobject),
+             ("AI_DB", "AI chat history", "Saved /ai conversation", _vobject)],
+}
+
+
+def _entity(kind, entity_id):
+    """Who or what is being edited, for the header on the data page."""
+    if kind == "server":
+        info = dict(cached(f"server:{entity_id}", 30, lambda: bot.server(entity_id)))
+        return {"kind": "server", "id": entity_id, "name": info.get("name") or entity_id,
+                "avatar": yshim._image_url(yshim._first(info, "icon_url", "iconUrl", "icon", "image_url")),
+                "note": f"{yshim._first(info, 'member_count', 'members_count', 'memberCount') or '?'} members"}
+    p = _person(dict(bot.user(entity_id)))
+    return {"kind": "user", "id": entity_id, "name": p["display"], "avatar": p["avatar"], "note": f"@{p['name']}" + (" · bot" if p["bot"] else "")}
+
+
+@app.route("/api/data/<kind>/<entity_id>")
+@admin_required
+def api_data_get(kind, entity_id):
+    if kind not in DATA_SCHEMA:
+        return jsonify({"error": "kind must be server or user"}), 404
+    try:
+        entity = _entity(kind, entity_id)
+    except yapper.YapperError as e:
+        return _api_error(e)
+    records = [{"db": name, "label": label, "about": about, "exists": DATABASES[name].exists(entity_id), "value": DATABASES[name].get(entity_id)}
+               for name, label, about, _ in DATA_SCHEMA[kind]]
+    log = [v for v in auditDB.items().values() if isinstance(v, dict) and str(v.get("key")) == entity_id]
+    return jsonify({"entity": entity, "records": records, "history": sorted(log, key=lambda v: -v.get("at", 0))[:10]})
+
+
+def _audit(db, key, action, before, after):
+    stamp = time.time()
+    auditDB.set(f"{int(stamp * 1000)}", {"at": int(stamp), "db": db, "key": key, "action": action,
+                                          "before": json.dumps(before)[:2000], "after": json.dumps(after)[:2000]})
+    print(f"[data edit] {action} {db}[{key}] from the dashboard")
+
+
+@app.route("/api/data/<kind>/<entity_id>/<db>", methods=["PUT", "DELETE"])
+@admin_required
+def api_data_write(kind, entity_id, db):
+    schema = {name: check for name, _, _, check in DATA_SCHEMA.get(kind, [])}
+    if db not in schema:
+        return jsonify({"error": f"{db} isn't editable for a {kind}."}), 404
+    store, before = DATABASES[db], DATABASES[db].get(entity_id)
+    if request.method == "DELETE":
+        store.remove(entity_id)
+        _audit(db, entity_id, "delete", before, None)
+        return jsonify({"ok": True, "exists": False, "value": None})
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or "value" not in body:
+        return jsonify({"error": "Send {\"value\": …}."}), 400
+    try:
+        value = schema[db](body["value"])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    store.set(entity_id, value)
+    store.save()
+    _audit(db, entity_id, "edit", before, value)
+    return jsonify({"ok": True, "exists": True, "value": value})
 
 
 # --- automod from the dashboard ---
