@@ -223,7 +223,7 @@ async def need_admin(interaction):
 
 # =====================================================================================
 # Commands rewritten for Yapper
-# (select menus and modals do not exist for commands, so these take arguments instead; private replies use click-to-reveal)
+# (select menus and modals do not exist for commands, so these take arguments instead; private replies use ephemeral=True)
 # =====================================================================================
 
 @bot.tree.command(name="userinstalls", description="Get The User Installation Count For Shapes!")
@@ -238,7 +238,7 @@ async def servercount(interaction: discord.Interaction):
 
 @bot.tree.command(name="getdata", description="Owner only: /getdata <embedDB|countingDB|usersDB|autoroleDB|AI_DB> <key>")
 async def getdata(interaction: discord.Interaction, database: str, key: str):
-    # Private reply: only the owner who ran it can open it (see yshim._send_private).
+    # Private reply (ephemeral): only the person who ran the command sees it.
     if not yshim.is_owner(interaction.user):
         await interaction.response.send_message(":x: You don't have permission to use this command! :x:", ephemeral=True)
         return

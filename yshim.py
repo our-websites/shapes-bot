@@ -473,19 +473,32 @@ def _join(*parts):
     return "\n".join(p for p in parts if p).strip()
 
 
-def _post(channel_id, content=None, embed=None, view=None, reply_to=None):
+def _send_msg(channel_id, text, embeds=None, comps=None, reply_to=None, ephemeral=False):
+    if not ephemeral:
+        return BOT.send(channel_id, text, embeds=embeds, components=comps, reply_to=reply_to)
+    body = {"content": str(text or ""), "ephemeral": True}   # only the person who ran the command sees it
+    if reply_to:
+        body["reply_to"] = reply_to
+    if embeds:
+        body["embeds"] = embeds
+    if comps:
+        body["components"] = comps
+    return BOT.api("POST", f"/channels/{channel_id}/messages", body).get("message") or {}
+
+
+def _post(channel_id, content=None, embed=None, view=None, reply_to=None, ephemeral=False):
     comps = _components(view) or None
     text = clean(content) if content else ""
     if embed is not None and _embeds_ok:
         try:
-            return SentMessage(channel_id, BOT.send(channel_id, text, embeds=[embed.to_dict()], components=comps, reply_to=reply_to))
+            return SentMessage(channel_id, _send_msg(channel_id, text, [embed.to_dict()], comps, reply_to, ephemeral))
         except YapperError as e:
             if EMBED_MODE == "embed" or e.status not in (400, 422):
                 raise
             _disable_embeds(e)
     if embed is not None:
         text = _join(text, embed.to_text())
-    return SentMessage(channel_id, BOT.send(channel_id, text or "​", components=comps, reply_to=reply_to))
+    return SentMessage(channel_id, _send_msg(channel_id, text or "\u200b", None, comps, reply_to, ephemeral))
 
 
 def _edit(channel_id, message_id, content=None, embed=None, view=None):
@@ -696,31 +709,6 @@ ui = types.SimpleNamespace(View=View, Button=Button, button=_button_deco)
 
 # --------------------------------------------------------------------------- private (ephemeral) replies
 
-class _Reveal(View):
-    def __init__(self, owner_id, content, embed, view):
-        super().__init__(timeout=600)
-        self._owner_id, self._content, self._embed, self._inner = owner_id, content, embed, view
-        self.stub = None
-        btn = Button(style="primary", label="Show privately", emoji="🔒")
-        btn.callback = self._open
-        self.add_item(btn)
-
-    async def interaction_check(self, click):
-        if str(click.user.id) != str(self._owner_id):
-            await click.response.send_message("This private reply isn't yours. Run the command yourself.", ephemeral=True)
-            return False
-        return True
-
-    async def _open(self, click):
-        await click.response.send_message(self._content, embed=self._embed, view=self._inner, ephemeral=True)
-        self.stop()
-        if self.stub is not None:
-            try:
-                BOT.delete(self.stub.channel_id, self.stub.id)
-            except Exception:
-                pass
-
-
 # --------------------------------------------------------------------------- Interaction
 
 class _Response:
@@ -808,28 +796,12 @@ class Interaction:
             else:
                 self._click.reply(text, embeds, comps)
             return None
-        if ephemeral:
-            return self._send_private(content, embed, view)
         reply_to = None if self._sent_first else (self._msg or {}).get("id")
-        sent = _post(self.channel_id, content, embed, view, reply_to=reply_to)
+        sent = _post(self.channel_id, content, embed, view, reply_to=reply_to, ephemeral=ephemeral)
         self._sent_first = True
         if self._original is None:
             self._original = sent
         return sent
-
-    def _send_private(self, content, embed, view):
-        """A private reply to a command. Yapin only lets bots answer a BUTTON CLICK privately, so the command posts a
-        small stub with a "Show privately" button; the person who ran the command taps it, sees the real reply
-        (only they can), and the stub is removed. Nobody else gets to read it."""
-        self._responded = True
-        reveal = _Reveal(self.user.id, content, embed, view)
-        stub = _post(self.channel_id, f"🔒 {self.user.mention}, private reply is ready.", view=reveal,
-                     reply_to=None if self._sent_first else (self._msg or {}).get("id"))
-        reveal.stub = stub
-        self._sent_first = True
-        if self._original is None:
-            self._original = stub
-        return stub
 
     def _edit_message(self, content, embed, view):
         """Click only: change the message the button is on."""
