@@ -289,6 +289,10 @@ class YUser:
         self.bot = bool(bot or self.data.get("bot") or self.data.get("is_bot"))
         self._guild_id = None
 
+    @property
+    def is_bot(self):
+        return self.bot
+
     @classmethod
     def from_api(cls, data):
         return cls(_first(data, "id", "user_id") or "unknown", data=data)

@@ -67,7 +67,7 @@ def _secret(env_name, file_name=None):
 
 
 # OpenAI-compatible client for /ai
-chatgpt = OpenAI(api_key=os.getenv("OPENAI_KEY"), base_url="https://openrouter.ai/api/v1")
+chatgpt = OpenAI(api_key=os.getenv("OPENAI_KEY") or "unset", base_url="https://openrouter.ai/api/v1")
 AIModel = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 # === Databases (Cloudflare D1, or local JSON when the Cloudflare env vars are not set) ===
@@ -338,8 +338,11 @@ async def restart(interaction: discord.Interaction):
     await interaction.response.send_message(":white_check_mark: Restarting...")
     _save_everything()
     print("Bot restart initiated by command")
-    bot.stop()
-    app.stop()
+    for stopper in (getattr(bot, "stop", None), getattr(app, "stop", None)):   # Flask has no stop(); don't let that break /restart
+        try:
+            stopper and stopper()
+        except Exception as e:
+            print(f"stop failed: {e}")
     threading.Timer(1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)).start()
 
 
