@@ -489,19 +489,43 @@ async def ping(interaction: discord.Interaction):
     await interaction.edit_original_response(embed=embed, content=None)
 
 
-# --- Last.fm ---
+# --- Last.fm (linked with Last.fm's web auth, so the account is verified by Last.fm itself) ---
+# Flow: /lastfm link -> private message with a Last.fm authorize button -> Last.fm sends the person back to
+# PUBLIC_URL/lastfm/callback/<state>?token=... -> we trade the token for a session (name + key) and save it.
+# Env: LASTFM_API_KEY, LASTFM_API_SECRET (both from https://www.last.fm/api/account/create) and PUBLIC_URL.
+
+import hashlib
 
 LastFMKey = _secret("LASTFM_API_KEY", "LastFMToken.txt")
-LASTFM_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{1,14}$")
+LastFMSecret = _secret("LASTFM_API_SECRET", "LastFMSecret.txt")
+PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
+LASTFM_STATE_KEY = (os.environ.get("FLASK_SECRET_KEY") or os.urandom(32).hex()).encode()
+LASTFM_STATE_TTL = 600
+_lastfm_used_states = {}
+_lastfm_cache = {}          # name -> (expires_at, profile); keeps us far below Last.fm's rate limit
+LASTFM_CACHE_SECONDS = 60
 
 
-def lastfm_call(method, **params):
-    """One Last.fm API call; returns the JSON dict, or None on any failure (including a missing key)."""
-    if not LastFMKey:
+def lastfm_ready():
+    return bool(LastFMKey and LastFMSecret and PUBLIC_URL)
+
+
+def _lastfm_sign(params):
+    """api_sig: md5 of every parameter (name+value, sorted by name, without format/callback) + the shared secret."""
+    raw = "".join(f"{k}{v}" for k, v in sorted(params.items()) if k not in ("format", "callback")) + LastFMSecret
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def lastfm_call(method, signed=False, **params):
+    """One Last.fm API call; returns the JSON dict, or None on any failure (including missing config)."""
+    if not LastFMKey or (signed and not LastFMSecret):
         return None
+    q = {"method": method, "api_key": LastFMKey, **params}
+    if signed:
+        q["api_sig"] = _lastfm_sign(q)
+    q["format"] = "json"
     try:
-        r = requests.get("https://ws.audioscrobbler.com/2.0/",
-                         params={"method": method, "api_key": LastFMKey, "format": "json", **params}, timeout=8)
+        r = requests.get("https://ws.audioscrobbler.com/2.0/", params=q, timeout=8)
         data = r.json()
         return None if "error" in data else data
     except Exception as e:
@@ -509,25 +533,77 @@ def lastfm_call(method, **params):
         return None
 
 
+def lastfm_state(user_id):
+    """A tamper-proof, expiring token that says which Yapin user started the link."""
+    expires = int(time.time()) + LASTFM_STATE_TTL
+    payload = f"{user_id}.{expires}"
+    return f"{payload}.{hmac.new(LASTFM_STATE_KEY, payload.encode(), hashlib.sha256).hexdigest()[:32]}"
+
+
+def lastfm_state_user(state):
+    """The user id a state was made for, or None if it is forged, expired or already used."""
+    try:
+        user_id, expires, sig = state.rsplit(".", 2)
+        good = hmac.new(LASTFM_STATE_KEY, f"{user_id}.{expires}".encode(), hashlib.sha256).hexdigest()[:32]
+        now = time.time()
+        for k in [k for k, t in _lastfm_used_states.items() if t < now]:
+            _lastfm_used_states.pop(k, None)
+        if not hmac.compare_digest(sig, good) or int(expires) < now or state in _lastfm_used_states:
+            return None
+        _lastfm_used_states[state] = int(expires)
+        return user_id
+    except (ValueError, AttributeError):
+        return None
+
+
+def lastfm_auth_url(user_id):
+    callback = f"{PUBLIC_URL}/lastfm/callback/{lastfm_state(user_id)}"
+    return f"https://www.last.fm/api/auth/?api_key={LastFMKey}&cb={urllib.parse.quote(callback, safe='')}"
+
+
+def lastfm_finish_link(state, token):
+    """Callback step: returns the verified Last.fm username (and saves it), or None."""
+    user_id = lastfm_state_user(state)
+    if not user_id or not token:
+        return None
+    data = lastfm_call("auth.getSession", signed=True, token=token)
+    session = (data or {}).get("session") or {}
+    if not session.get("name"):
+        return None
+    set_lastfm(user_id, session["name"], session.get("key"))
+    return session["name"]
+
+
 def get_lastfm(user_id):
-    """The linked Last.fm username for a Yapper user id, or None."""
+    """The linked (verified) Last.fm username for a Yapin user id, or None."""
     entry = usersDB.get(str(user_id))
-    return entry.get("lastfm") if isinstance(entry, dict) else None
+    value = entry.get("lastfm") if isinstance(entry, dict) else None
+    return value.get("name") if isinstance(value, dict) else value
 
 
-def set_lastfm(user_id, name):
-    """Link (or with name=None, unlink) a Last.fm username; keeps whatever else is stored for the user."""
+def set_lastfm(user_id, name, session_key=None):
+    """Link (or with name=None, unlink) a Last.fm account; keeps whatever else is stored for the user."""
     entry = usersDB.get(str(user_id))
     entry = dict(entry) if isinstance(entry, dict) else {}
     if name:
-        entry["lastfm"] = name
+        entry["lastfm"] = {"name": name, "key": session_key, "linked_at": int(time.time())}
     else:
         entry.pop("lastfm", None)
     usersDB.set(str(user_id), entry)
 
 
 def lastfm_profile(name):
-    """Summary for a Last.fm user: url, scrobbles, and the current/last track. None if the lookup failed."""
+    """Summary for a Last.fm user: url, scrobbles, and the current/last track. None if the lookup failed. Cached."""
+    hit = _lastfm_cache.get(name.lower())
+    if hit and hit[0] > time.time():
+        return hit[1]
+    result = _lastfm_profile_uncached(name)
+    if result:
+        _lastfm_cache[name.lower()] = (time.time() + LASTFM_CACHE_SECONDS, result)
+    return result
+
+
+def _lastfm_profile_uncached(name):
     info = lastfm_call("user.getinfo", user=name)
     if not info or "user" not in info:
         return None
@@ -561,23 +637,16 @@ def lastfm_line(p):
 
 
 @bot.tree.command(name="lastfm", description="Link your Last.fm account or see what someone is listening to")
-async def lastfm(interaction: discord.Interaction, action: str = "", name: str = "", user: discord.User = None):
+async def lastfm(interaction: discord.Interaction, action: str = "", user: discord.User = None):
     action = action.lower().strip()
     uid = interaction.user.id
     if action == "link":
-        if not LASTFM_NAME.match(name or ""):
-            await interaction.response.send_message("Usage: `/lastfm link <your last.fm username>`", ephemeral=True)
+        if not lastfm_ready():
+            await interaction.response.send_message("Last.fm linking isn't set up on this bot yet (the owner needs LASTFM_API_KEY, LASTFM_API_SECRET and PUBLIC_URL).", ephemeral=True)
             return
-        if not LastFMKey:
-            await interaction.response.send_message("Last.fm isn't set up on this bot (missing LASTFM_API_KEY).", ephemeral=True)
-            return
-        info = lastfm_call("user.getinfo", user=name)
-        if not info or "user" not in info:
-            await interaction.response.send_message(f"Couldn't find a Last.fm user named `{name}`.", ephemeral=True)
-            return
-        real = info["user"].get("name", name)
-        set_lastfm(uid, real)
-        await interaction.response.send_message(f"✅ Linked to Last.fm user **{real}**. It now shows on your profile.", ephemeral=True)
+        view = discord.ui.View(timeout=LASTFM_STATE_TTL)
+        view.add_item(discord.ui.Button(label="Authorize on Last.fm", style=discord.ButtonStyle.link, url=lastfm_auth_url(uid)))
+        await interaction.response.send_message("Tap the button, approve access on Last.fm and you're linked. The link works for 10 minutes and only for you.", view=view, ephemeral=True)
         return
     if action == "unlink":
         had = get_lastfm(uid)
@@ -588,7 +657,7 @@ async def lastfm(interaction: discord.Interaction, action: str = "", name: str =
     linked = get_lastfm(target.id)
     if not linked:
         who = "You haven't" if target.id == uid else f"{target.display_name} hasn't"
-        await interaction.response.send_message(f"{who} linked a Last.fm account. Use `/lastfm link <username>`.", ephemeral=True)
+        await interaction.response.send_message(f"{who} linked a Last.fm account. Use `/lastfm link`.", ephemeral=True)
         return
     p = lastfm_profile(linked)
     if not p:
@@ -4313,6 +4382,17 @@ async function load(){if(!cur)return;try{const d=await j('/api/channels/'+cur+'/
 $('#send').onsubmit=async e=>{e.preventDefault();await fetch('/api/channels/'+cur+'/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:$('#text').value})});$('#text').value='';load()};
 setInterval(load,8000);
 </script></body></html>"""
+
+
+@app.route("/lastfm/callback/<state>")
+def lastfm_callback(state):
+    name = lastfm_finish_link(state, request.args.get("token", ""))
+    if name:
+        body = f"<h2>Linked!</h2><p>Your Last.fm account <b>{name}</b> is now linked. You can close this tab.</p>"
+    else:
+        body = "<h2>That didn't work</h2><p>The link expired or was already used. Run <code>/lastfm link</code> again.</p>"
+    return Response(f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Last.fm</title>"
+                    f"<body style='font-family:system-ui;max-width:28rem;margin:4rem auto;padding:0 1rem'>{body}", mimetype="text/html")
 
 
 @app.route("/status")
