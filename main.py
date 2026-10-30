@@ -429,14 +429,14 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="Counting", value="• /counting - Counting settings (`toggle`, `channel #channel`)\n• /countingleaderboard - Leaderboard website", inline=False)
     embed.add_field(name="User Settings", value="• /settings - Customize your embed color\n• /autorole - Give new members a role", inline=False)
     embed.add_field(name="Roblox", value=(
-        "• /robloxinfo - User information\n• /roblox2discord - Find a Roblox user's linked account\n• /discord2roblox - Find a user's Roblox\n"
+        "• /robloxinfo - User information\n• /roblox2yapin - Find a Roblox user's linked account\n• /yapin2roblox - Find a user's Roblox\n"
         "• /britishuser - Check if a user is British\n• /iteminfo - Item information\n• /placeinfo - Place/game information\n"
         "• /badge - Badge information\n• /badges - Check a user's badges\n• /recentbadges - Latest badges\n• /outfits - A user's outfits\n"
         "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox"), inline=False)
     embed.add_field(name="Utility", value=(
         "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI\n• /github - GitHub user\n"
-        "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp, /discord2spook - spook.bio"), inline=False)
-    embed.add_field(name="Yapper profile", value="• /yapperuser - Info about a user\n• /discordavatar - Avatar\n• /discordbanner - Banner", inline=False)
+        "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp, /yapin2spook - spook.bio"), inline=False)
+    embed.add_field(name="Yapper profile", value="• /yapperuser - Info about a user\n• /yapinavatar - Avatar\n• /yapinbanner - Banner", inline=False)
     embed.set_footer(text="Right-click context menus from the Discord bot are not available on Yapper; use the slash commands.")
     await interaction.response.send_message(embed=embed)
 
@@ -459,6 +459,8 @@ async def invite(interaction: discord.Interaction):
 
 
 def _latency_ms():
+    """Round trip to the API on a warm (reused) connection, so it measures the network and not the TLS handshake."""
+    bot.api("GET", "/me", retries=0)
     start = time.perf_counter()
     bot.api("GET", "/me", retries=0)
     return (time.perf_counter() - start) * 1000
@@ -596,7 +598,7 @@ async def lastfm(interaction: discord.Interaction, action: str = "", name: str =
     await interaction.response.send_message(embed=embed)
 
 
-# --- Yapper profile commands (these were /yapperuser, /discordavatar, /discordbanner on Discord) ---
+# --- Yapper profile commands (/yapperuser, /yapinavatar, /yapinbanner; these were the Discord user/avatar/banner commands) ---
 
 def _profile_target(interaction, user):
     """The user to look up. Fills in the full profile from Yapper so avatar/banner/bio are available."""
@@ -647,8 +649,8 @@ async def yapperuser(interaction: discord.Interaction, user: discord.User = None
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="discordavatar", description="Get a user's avatar")
-async def discordavatar(interaction: discord.Interaction, user: discord.User = None):
+@bot.tree.command(name="yapinavatar", description="Get a user's avatar")
+async def yapinavatar(interaction: discord.Interaction, user: discord.User = None):
     target = _profile_target(interaction, user)
     print(str(target))
     url = target.avatar_url
@@ -663,8 +665,8 @@ async def discordavatar(interaction: discord.Interaction, user: discord.User = N
     await interaction.response.send_message(embed=embed, view=view)
 
 
-@bot.tree.command(name="discordbanner", description="Get a user's banner")
-async def discordbanner(interaction: discord.Interaction, user: discord.User = None):
+@bot.tree.command(name="yapinbanner", description="Get a user's banner")
+async def yapinbanner(interaction: discord.Interaction, user: discord.User = None):
     target = _profile_target(interaction, user)
     url = target.banner_url
     if not url:
@@ -700,11 +702,11 @@ async def spookpfp(interaction: discord.Interaction, username: str = "leandre"):
         print(f"Error fetching data: {response.status_code}")
 
 
-# --- discord2spook ---
-@bot.tree.command(name="discord2spook", description="Get a Spook profile from a discord user.")
+# --- yapin2spook ---
+@bot.tree.command(name="yapin2spook", description="Get a Spook profile from a Yapin user.")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def discord2spook(interaction: discord.Interaction, user: discord.User): # = 481295611417853982):
+async def yapin2spook(interaction: discord.Interaction, user: discord.User): # = 481295611417853982):
     url = f"https://spook.bio/api/profiles?discordId={user.id}"
     print(user.id)
     print(url)
@@ -721,11 +723,11 @@ async def discord2spook(interaction: discord.Interaction, user: discord.User): #
         print(f"Error fetching data: {response.status_code}")
 
 
-# --- roblox2discord ---
-@bot.tree.command(name="roblox2discord", description="Get a roblox user's Discord from their username.")
+# --- roblox2yapin ---
+@bot.tree.command(name="roblox2yapin", description="Get a Roblox user's linked Yapin account from their username.")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def roblox2discord(interaction: discord.Interaction, user: str):
+async def roblox2yapin(interaction: discord.Interaction, user: str):
     await interaction.response.defer()
 
     #print(f"Searching For {user}")
@@ -812,11 +814,11 @@ async def roblox2discord(interaction: discord.Interaction, user: str):
         return
 
 
-# --- discord2roblox ---
-@bot.tree.command(name="discord2roblox", description="Get a roblox profile from their Discord UserID.")
+# --- yapin2roblox ---
+@bot.tree.command(name="yapin2roblox", description="Get a Roblox profile from a Yapin user.")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def discord2roblox(interaction: discord.Interaction, user: discord.User):
+async def yapin2roblox(interaction: discord.Interaction, user: discord.User):
     userid = user.id
     await interaction.response.defer(thinking=True)
 

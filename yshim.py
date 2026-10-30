@@ -23,6 +23,7 @@ Embeds
 import asyncio
 import functools
 import inspect
+import json
 import itertools
 import os
 import random
@@ -973,10 +974,57 @@ class Tree:
 tree = Tree()
 
 
+def _pool_api(bot):
+    """Swap bot.api for a keep-alive version. The SDK opens a brand-new TLS connection for every call (urllib), which
+    is most of the delay on each reply and on /ping. One pooled requests.Session reuses the connection instead.
+    Same behaviour as the SDK: 429 / 503-busy are waited out and retried, other failures raise YapperError."""
+    import random
+    import requests
+    from requests.adapters import HTTPAdapter
+
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=32))
+    session.headers.update({"Authorization": f"Bot {bot.token}", "Content-Type": "application/json",
+                            "User-Agent": "shapes-bot (yapper.py)"})
+    original = bot.api
+
+    def api(method, path, body=None, timeout=40, retries=3):
+        try:
+            r = session.request(method, bot.base + path, data=None if body is None else json.dumps(body), timeout=timeout)
+        except requests.RequestException:
+            return original(method, path, body, timeout, retries)   # let the SDK's own fallback logic handle it
+        try:
+            data = r.json() if r.content else {}
+        except ValueError:
+            data = {}
+        if r.status_code < 400:
+            return data
+        err = data if isinstance(data, dict) else {}
+        busy = r.status_code == 503 and "retry_after" in err
+        wait = 0.0
+        if r.status_code == 429 or busy:
+            try:
+                wait = float(r.headers.get("Retry-After") or err.get("retry_after") or 0)
+            except (TypeError, ValueError):
+                wait = 0.0
+        if 0 < wait <= 60 and retries > 0:
+            time.sleep(wait * (1 + random.random() * 0.5))
+            return api(method, path, body, timeout, retries - 1)
+        if r.status_code in (502, 504):
+            return original(method, path, body, timeout, retries)
+        raise YapperError(err.get("error") or f"{method} {path} failed ({r.status_code})", r.status_code, wait or None)
+
+    bot.api = api
+
+
 def install(bot):
     """Call once, after every command is defined and before bot.run()."""
     global BOT
     BOT = bot
+    try:
+        _pool_api(bot)
+    except Exception as e:
+        print(f"[shim] connection pooling unavailable, using the SDK's default: {e}")
     for spec in tree.commands.values():
         def handler(msg, spec=spec):
             threading.Thread(target=_run_command, args=(spec, msg), daemon=True, name=f"cmd-{spec.name}").start()
