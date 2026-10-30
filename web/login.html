@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Sign in · Shapes</title>
+<style>
+  :root {
+    --bg: #f4f3f0; --panel: #ffffff; --ink: #1d1c1a; --muted: #6d6a64; --line: #dcd9d2;
+    --accent: #2f4fd1; --accent-ink: #ffffff; --danger: #b3261e; --field: #fbfaf8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --panel: #1d1d1b; --ink: #ecebe7; --muted: #9a978f; --line: #33322f;
+            --accent: #7c93f5; --accent-ink: #11131c; --danger: #f2877f; --field: #171716; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    display: grid; grid-template-rows: 1fr auto; -webkit-font-smoothing: antialiased;
+  }
+  main { display: grid; place-items: center; padding: 24px 16px; }
+  .card { width: 100%; max-width: 360px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  .mark { width: 28px; height: 28px; border-radius: 7px; background: var(--ink); color: var(--bg);
+          display: grid; place-items: center; font-weight: 700; font-size: 15px; letter-spacing: -.02em; }
+  .brand span { font-weight: 600; letter-spacing: -.01em; }
+  h1 { font-size: 22px; line-height: 1.25; margin: 0 0 6px; letter-spacing: -.015em; font-weight: 650; }
+  p.sub { margin: 0 0 24px; color: var(--muted); }
+  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  input {
+    width: 100%; font: inherit; color: inherit; background: var(--field);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  }
+  input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+  button {
+    margin-top: 16px; width: 100%; font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 10px 14px;
+  }
+  button:hover { filter: brightness(1.06); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .error { margin: 0 0 14px; padding: 9px 12px; border-radius: 8px; font-size: 14px;
+           border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+           color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+  footer { padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <form class="card" method="post" autocomplete="off">
+    <div class="brand"><div class="mark">S</div><span>Shapes</span></div>
+    <h1>Sign in</h1>
+    <p class="sub">Bot dashboard. Enter the admin key to continue.</p>
+    {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+    <label for="pass">Admin key</label>
+    <input id="pass" name="pass" type="password" required autofocus autocomplete="current-password">
+    <button type="submit">Continue</button>
+  </form>
+</main>
+<footer>Shapes on Yapin</footer>
+</body>
+</html>

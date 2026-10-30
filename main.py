@@ -538,10 +538,6 @@ async def ping(interaction: discord.Interaction):
     await interaction.edit_original_response(embed=embed, content=None)
 
 
-def track_dm(msg):
-    pass    # replaced below by the dashboard's DM tracking
-
-
 # --- Automod ---
 
 _spam = automod.SpamTracker()
@@ -4571,6 +4567,7 @@ def on_ready(me):
 app = Flask(__name__)
 CORS(app)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or os.urandom(32).hex()
+app.config.update(SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_HTTPONLY=True, PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 14)
 if not os.environ.get("FLASK_SECRET_KEY"):
     print("FLASK_SECRET_KEY is not set: admin logins will reset whenever the bot restarts.")
 
@@ -4601,56 +4598,12 @@ def _name(d):
     return yshim._first(d, "username", "display_name", "name") or str(yshim._first(d, "id", "user_id") or "?")
 
 
-LOGIN_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Admin Login</title><style>
-body{background:#121212;color:#eee;font-family:Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
-.box{background:#282a36;padding:40px 50px;border-radius:12px;box-shadow:0 0 15px #50fa7b;text-align:center;width:320px;max-width:80vw}
-h2{margin:0 0 25px;color:#50fa7b}input{width:100%;box-sizing:border-box;padding:12px;margin-bottom:20px;border:none;border-radius:6px;font-size:16px;background:#44475a;color:#f8f8f2}
-button{background:#50fa7b;border:none;color:#000;padding:12px 0;width:100%;font-size:16px;font-weight:bold;border-radius:6px;cursor:pointer}
-.err{color:#ff5555;margin-bottom:12px}</style></head><body><div class="box"><h2>Admin Login</h2>
-{% if error %}<div class="err">{{ error }}</div>{% endif %}
-<form method="POST"><input type="password" name="pass" placeholder="Enter admin key" required autofocus><button type="submit">Login</button></form></div></body></html>"""
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
-DASHBOARD_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Shapes Dashboard</title><style>
-:root{--bg:#1e1e2f;--card:#282a36;--line:#3a3d52;--fg:#f2f2f7;--mut:#a0a3b8;--acc:#50fa7b}
-*{box-sizing:border-box}body{margin:0;font-family:system-ui,Arial,sans-serif;background:var(--bg);color:var(--fg)}
-header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}
-h1{margin:0;font-size:20px;color:var(--acc)}a{color:var(--acc)}.mut{color:var(--mut);font-size:13px}
-main{display:grid;grid-template-columns:260px 240px 1fr;gap:12px;padding:12px;min-height:calc(100vh - 70px)}
-@media(max-width:900px){main{grid-template-columns:1fr}}
-.pane{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;overflow:auto;max-height:80vh}
-.item{padding:8px 10px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;gap:8px}
-.item:hover,.item.on{background:#3a3d52}.pane h3{margin:4px 6px 8px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
-.msg{padding:6px 8px;border-bottom:1px solid var(--line)}.msg b{color:var(--acc)}.msg time{color:var(--mut);font-size:12px;margin-left:6px}
-.msg p{margin:2px 0 0;white-space:pre-wrap;word-break:break-word}
-form{display:flex;gap:8px;margin-top:10px}input[type=text]{flex:1;padding:8px;border-radius:6px;border:1px solid var(--line);background:#1b1c2a;color:var(--fg)}
-button{background:var(--acc);border:none;border-radius:6px;padding:8px 14px;font-weight:bold;cursor:pointer}
-.stats span{margin-right:14px}</style></head><body>
-<header><h1>🤖 Shapes on Yapper</h1><div class="mut stats"><span>{{ servers|length }} servers</span><span>{{ command_count }} commands</span><span>storage: {{ storage }}</span></div>
-<span><a href="/api/overview">JSON</a> · <a href="/logout">Logout</a></span></header>
-<main>
-<div class="pane" id="servers"><h3>Servers</h3>{% for s in servers %}<div class="item" data-id="{{ s.id }}"><span>{{ s.name }}</span><span class="mut">{{ s.members }}</span></div>{% else %}<div class="mut" style="padding:8px">The bot is not in any server yet.</div>{% endfor %}</div>
-<div class="pane" id="channels"><h3>Channels</h3><div class="mut" style="padding:8px">Pick a server</div></div>
-<div class="pane" id="view"><h3 id="vt">Messages</h3><div id="msgs" class="mut" style="padding:8px">Pick a channel</div>
-<form id="send" style="display:none"><input type="text" id="text" placeholder="Send a message as the bot" required><button>Send</button></form></div>
-</main>
-<script>
-let cur=null,srv=null;
-const $=s=>document.querySelector(s),esc=t=>String(t??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-async function j(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error(r.status);return r.json()}
-$('#servers').onclick=async e=>{const it=e.target.closest('.item');if(!it)return;srv=it.dataset.id;
- document.querySelectorAll('#servers .item').forEach(x=>x.classList.toggle('on',x===it));
- const d=await j('/api/servers/'+srv);$('#channels').innerHTML='<h3>Channels</h3>'+d.channels.map(c=>`<div class="item" data-id="${esc(c.id)}"><span># ${esc(c.name)}</span></div>`).join('')};
-$('#channels').onclick=e=>{const it=e.target.closest('.item');if(!it)return;cur=it.dataset.id;
- document.querySelectorAll('#channels .item').forEach(x=>x.classList.toggle('on',x===it));load()};
-async function load(){if(!cur)return;try{const d=await j('/api/channels/'+cur+'/messages');
- $('#msgs').className='';$('#send').style.display='flex';
- $('#msgs').innerHTML=d.messages.length?d.messages.map(m=>`<div class="msg"><b>${esc(m.author)}</b><time>${esc(m.created_at||'')}</time><p>${esc(m.content)}</p></div>`).join(''):'<div class="mut" style="padding:8px">No messages</div>'}
- catch(e){$('#msgs').innerHTML='<div class="mut" style="padding:8px">Could not load messages ('+esc(e.message)+')</div>'}}
-$('#send').onsubmit=async e=>{e.preventDefault();await fetch('/api/channels/'+cur+'/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:$('#text').value})});$('#text').value='';load()};
-setInterval(load,8000);
-</script></body></html>"""
+
+def _web_file(name):
+    with open(os.path.join(WEB_DIR, name), "r", encoding="utf-8") as f:
+        return f.read()
 
 
 @app.route("/lastfm/callback/<state>")
@@ -4669,20 +4622,34 @@ def web_status():
     return "OK", 200
 
 
+_login_attempts = {}
+
+
+def _too_many_logins(ip):
+    now = time.time()
+    recent = [t for t in _login_attempts.get(ip, []) if now - t < 300]
+    _login_attempts[ip] = recent
+    return len(recent) >= 8
+
+
 @app.route("/login", methods=["GET", "POST"])
 def admin_login():
     if session.get("admin") is True:
         return redirect(url_for("dashboard"))
     error = None
     if request.method == "POST":
-        if not ADMIN_KEY:
+        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "?").split(",")[0].strip()
+        if _too_many_logins(ip):
+            error = "Too many attempts. Wait a few minutes and try again."
+        elif not ADMIN_KEY:
             error = "No admin key is configured (set ADMIN_KEY)."
         elif hmac.compare_digest(request.form.get("pass", ""), ADMIN_KEY):
             session["admin"] = True
             return redirect(url_for("dashboard"))
         else:
-            error = "Incorrect key."
-    return render_template_string(LOGIN_HTML, error=error)
+            _login_attempts.setdefault(ip, []).append(time.time())
+            error = "That key isn't right."
+    return render_template_string(_web_file("login.html"), error=error)
 
 
 @app.route("/logout")
@@ -4703,9 +4670,61 @@ def _server_rows():
 @admin_required
 def dashboard():
     if not bot_ready:
-        return "<h3>Bot is not ready yet, please try again in a moment.</h3>"
-    return render_template_string(DASHBOARD_HTML, servers=_server_rows(), command_count=len(bot.commands),
-                                  storage=__import__("cfstore").backend_summary())
+        return Response("<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=3><body style='font-family:system-ui;padding:3rem'>The bot is still starting. This page refreshes on its own.", mimetype="text/html")
+    return Response(_web_file("app.html"), mimetype="text/html")
+
+
+def _avatar_of(d):
+    return yshim._image_url(yshim._first(d, "avatar_url", "avatarUrl", "avatar", "image_url", "author_avatar_url"))
+
+
+def _person(d):
+    """A flat, UI-friendly version of a member/user dict (some APIs nest the user under "user")."""
+    inner = d.get("user") if isinstance(d.get("user"), dict) else {}
+    merged = {**inner, **{k: v for k, v in d.items() if k != "user"}}
+    uid = yshim._first(merged, "user_id", "id")
+    return {
+        "id": str(uid), "name": yshim._first(merged, "username", "name") or str(uid),
+        "display": yshim._first(merged, "display_name", "displayName", "nickname", "nick") or yshim._first(merged, "username", "name") or str(uid),
+        "avatar": _avatar_of(merged), "bot": yshim.YUser(uid, data=merged).is_bot,
+        "roles": [str(r.get("id") if isinstance(r, dict) else r) for r in (merged.get("roles") or merged.get("role_ids") or [])],
+        "joined": yshim._first(merged, "joined_at", "joinedAt", "created_at"),
+    }
+
+
+def _group_channels(channels):
+    """Categories with their channels (and the channels that have no category), whatever the field names are."""
+    cats, by_cat, loose = {}, {}, []
+    rows = [dict(c) for c in channels]
+    for c in rows:
+        kind = str(yshim._first(c, "type", "kind") or "").lower()
+        if kind in ("category", "4", "group"):
+            cats[str(c.get("id"))] = c
+    for c in rows:
+        if str(c.get("id")) in cats:
+            continue
+        parent = yshim._first(c, "category_id", "categoryId", "parent_id", "parentId", "category")
+        if isinstance(parent, dict):
+            parent = parent.get("id")
+        row = {"id": str(c.get("id")), "name": c.get("name") or str(c.get("id")), "type": str(yshim._first(c, "type", "kind") or "text").lower(),
+               "topic": c.get("topic") or ""}
+        if parent is not None and str(parent) in cats:
+            by_cat.setdefault(str(parent), []).append(row)
+        else:
+            loose.append(row)
+    out = [{"id": cid, "name": c.get("name") or "Category", "channels": by_cat.get(cid, [])}
+           for cid, c in sorted(cats.items(), key=lambda kv: (kv[1].get("position") is None, kv[1].get("position") or 0))]
+    if loose:
+        out.insert(0, {"id": "", "name": "", "channels": loose})
+    return out
+
+
+def _is_text(ch_type):
+    return ch_type in ("text", "0", "announcement", "news", "")
+
+
+def _api_error(e):
+    return jsonify({"error": str(e)}), (e.status if getattr(e, "status", None) in (400, 401, 403, 404, 429) else 502)
 
 
 @app.route("/api/overview")
@@ -4714,10 +4733,14 @@ def api_overview():
     """Everything the API gives us about the bot, in one place."""
     if not bot_ready:
         return jsonify({"ready": False}), 503
+    servers = []
+    for s in cached("servers", 15, bot.servers):
+        n = yshim._first(s, "member_count", "members_count", "memberCount")
+        servers.append({**dict(s), "id": str(s.get("id")), "name": s.get("name") or str(s.get("id")), "member_count": n,
+                        "icon": yshim._image_url(yshim._first(s, "icon_url", "iconUrl", "icon", "avatar_url", "image_url"))})
     return jsonify({
-        "ready": True, "me": dict(bot.me or {}), "uptime_seconds": int(time.time() - started_at),
-        "storage": __import__("cfstore").backend_summary(), "commands": sorted(bot.commands),
-        "servers": [dict(s) for s in cached("servers", 15, bot.servers)],
+        "ready": True, "me": {**dict(bot.me or {}), "avatar": _avatar_of(dict(bot.me or {}))}, "uptime_seconds": int(time.time() - started_at),
+        "storage": __import__("cfstore").backend_summary(), "commands": sorted(bot.commands), "servers": servers,
     })
 
 
@@ -4725,14 +4748,54 @@ def api_overview():
 @admin_required
 def api_server(server_id):
     try:
+        channels = cached(f"channels:{server_id}", 20, lambda: bot.channels(server_id))
+        roles = cached(f"roles:{server_id}", 30, lambda: bot.roles(server_id))
+        info = cached(f"server:{server_id}", 30, lambda: bot.server(server_id))
         return jsonify({
-            "server": dict(bot.server(server_id)),
-            "channels": [dict(c) for c in bot.channels(server_id)],
-            "roles": [dict(r) for r in bot.roles(server_id)],
-            "members": [dict(m) for m in bot.members(server_id)],
+            "server": dict(info), "categories": _group_channels(channels),
+            "roles": sorted(({"id": str(r.get("id")), "name": r.get("name") or "role", "color": yshim._first(r, "color", "colour"),
+                              "position": r.get("position") or 0, "admin": yshim._has_admin(r)} for r in roles),
+                            key=lambda r: -int(r["position"] or 0)),
         })
     except yapper.YapperError as e:
-        return jsonify({"error": str(e)}), e.status or 502
+        return _api_error(e)
+
+
+@app.route("/api/servers/<server_id>/members")
+@admin_required
+def api_members(server_id):
+    after = request.args.get("after") or None
+    try:
+        rows = bot.members(server_id, after=after)
+        people = [_person(dict(m)) for m in rows]
+        return jsonify({"members": people, "next": people[-1]["id"] if len(rows) >= 200 and people else None})
+    except yapper.YapperError as e:
+        return _api_error(e)
+
+
+def _message_row(m):
+    m = dict(m)
+    author = m.get("author") if isinstance(m.get("author"), dict) else {}
+    person = _person({**author, "id": author.get("id") or m.get("author_id")}) if (author or m.get("author_id")) else {"id": "", "name": "?", "display": "?", "avatar": None}
+    name = yshim._first(m, "author_display_name", "author_username", "author_name") or person["display"]
+    images = []
+    for e in (m.get("embeds") or []):
+        if isinstance(e, dict):
+            for key in ("image", "thumbnail"):
+                u = e.get(key)
+                u = yshim._image_url(u.get("url") if isinstance(u, dict) else u)
+                if u:
+                    images.append(u)
+    for att in (m.get("attachments") or m.get("files") or []):
+        if isinstance(att, dict):
+            u = yshim._image_url(yshim._first(att, "url", "proxy_url", "src"))
+            ctype = str(att.get("content_type") or att.get("type") or "")
+            if u and (ctype.startswith("image") or re.search(r"\.(png|jpe?g|gif|webp|avif)(\?|$)", u, re.I)):
+                images.append(u)
+    return {"id": str(m.get("id")), "author": name, "author_id": person["id"], "avatar": person["avatar"] or yshim._image_url(m.get("author_avatar_url")),
+            "bot": bool(m.get("author_bot")), "content": m.get("content") or "", "created_at": m.get("created_at"),
+            "embeds": [{"title": e.get("title"), "description": e.get("description"), "url": e.get("url")}
+                       for e in (m.get("embeds") or []) if isinstance(e, dict)], "images": images[:6]}
 
 
 @app.route("/api/channels/<channel_id>/messages")
@@ -4740,26 +4803,214 @@ def api_server(server_id):
 def api_messages(channel_id):
     limit = max(1, min(100, request.args.get("limit", 50, type=int)))
     try:
-        out = []
-        for m in bot.messages(channel_id, limit=limit):
-            author = m.get("author") if isinstance(m.get("author"), dict) else {}
-            out.append({**dict(m), "author": _name(author) if author else str(m.get("author_id")), "content": m.get("content") or ""})
-        return jsonify({"messages": out})
+        return jsonify({"messages": [_message_row(m) for m in bot.messages(channel_id, limit=limit)]})
     except yapper.YapperError as e:
-        return jsonify({"error": str(e)}), e.status or 502
+        return _api_error(e)
+
+
+def _announcement_embed(title, text, image_url):
+    embed = {"description": text}
+    if title:
+        embed["title"] = title
+    if image_url:
+        embed["image"] = {"url": image_url}
+    return embed
+
+
+def _post_with_optional_image(channel_id, text, image_url, title=None):
+    """Plain text when there is no image or title; otherwise an embed. If the server refuses embeds, falls back to
+    text with the image link (which the dashboard and Yapin turn into a link)."""
+    if not image_url and not title:
+        return bot.send(channel_id, text)
+    try:
+        return bot.send(channel_id, "", embeds=[_announcement_embed(title, text, image_url)])
+    except yapper.YapperError as e:
+        if e.status not in (400, 422):
+            raise
+        parts = [p for p in (f"**{title}**" if title else "", text, image_url) if p]
+        return bot.send(channel_id, "\n\n".join(parts))
+
+
+def _valid_image(url):
+    url = (url or "").strip()
+    if not url:
+        return None
+    clean = yshim._image_url(url)
+    if not clean:
+        raise ValueError("The image link must be a public https address.")
+    return clean
 
 
 @app.route("/api/channels/<channel_id>/send", methods=["POST"])
 @admin_required
 def api_send(channel_id):
-    text = (request.get_json(silent=True) or {}).get("message", "").strip()
-    if not text:
-        return jsonify({"error": "empty message"}), 400
+    body = request.get_json(silent=True) or {}
+    text = str(body.get("message", "")).strip()
     try:
-        bot.send(channel_id, text)
+        image = _valid_image(body.get("image_url"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not text and not image:
+        return jsonify({"error": "Write a message or add an image link."}), 400
+    try:
+        _post_with_optional_image(channel_id, text, image)
         return jsonify({"ok": True})
     except yapper.YapperError as e:
-        return jsonify({"error": str(e)}), e.status or 502
+        return _api_error(e)
+
+
+# --- direct messages ---
+
+def track_dm(msg):
+    """Remember who has messaged the bot so their DM shows up in the dashboard."""
+    if msg.get("author_bot"):
+        return
+    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    if sid:
+        return
+    uid = str(msg.get("author_id"))
+    name = yshim._first(msg, "author_display_name", "author_username", "author_name") or uid
+    dmDB.set(uid, {"user_id": uid, "channel_id": str(msg.get("channel_id")), "name": name,
+                   "last": int(time.time()), "preview": str(msg.get("content") or "")[:80]})
+
+
+@app.route("/api/dms")
+@admin_required
+def api_dms():
+    rows = [v for v in dmDB.items().values() if isinstance(v, dict)]
+    return jsonify({"dms": sorted(rows, key=lambda r: -int(r.get("last") or 0))})
+
+
+def _all_people():
+    """Members of every server the bot is in (first page each), for finding someone to DM."""
+    def load():
+        seen = {}
+        for s in bot.servers():
+            try:
+                for m in bot.members(s.get("id")):
+                    p = _person(dict(m))
+                    seen.setdefault(p["id"], p)
+            except Exception:
+                continue
+        return list(seen.values())
+    return cached("people", 120, load)
+
+
+@app.route("/api/users/search")
+@admin_required
+def api_user_search():
+    q = request.args.get("q", "").strip().lower().lstrip("@")
+    if len(q) < 2:
+        return jsonify({"users": []})
+    hits = [p for p in _all_people() if q in p["name"].lower() or q in p["display"].lower() or q == p["id"]]
+    return jsonify({"users": hits[:15]})
+
+
+@app.route("/api/dms", methods=["POST"])
+@admin_required
+def api_dm_open():
+    body = request.get_json(silent=True) or {}
+    user_id = str(body.get("user_id", "")).strip().strip("<@!>")
+    if not user_id:
+        return jsonify({"error": "Pick a person first."}), 400
+    try:
+        channel_id = bot.dm(user_id)
+        try:
+            profile = _person(dict(bot.user(user_id)))
+        except Exception:
+            profile = {"display": str(body.get("name") or user_id)}
+        row = dmDB.get(user_id) or {}
+        row.update({"user_id": user_id, "channel_id": str(channel_id), "name": profile["display"], "last": row.get("last") or int(time.time())})
+        dmDB.set(user_id, row)
+        return jsonify({"dm": row})
+    except yapper.YapperError as e:
+        return _api_error(e)
+
+
+# --- announcements to every server ---
+
+_ANNOUNCE_NAMES = ("announcements", "announcement", "news", "updates", "general", "chat", "main", "lobby")
+_jobs = {}
+
+
+def _default_channel(channels):
+    texts = [c for ch in _group_channels(channels) for c in ch["channels"] if _is_text(c["type"])]
+    for wanted in _ANNOUNCE_NAMES:
+        for c in texts:
+            if wanted in c["name"].lower():
+                return c["id"]
+    return texts[0]["id"] if texts else None
+
+
+@app.route("/api/announce/targets")
+@admin_required
+def api_announce_targets():
+    out = []
+    for s in cached("servers", 15, bot.servers):
+        sid = str(s.get("id"))
+        try:
+            channels = cached(f"channels:{sid}", 20, lambda sid=sid: bot.channels(sid))
+        except Exception:
+            continue
+        texts = [c for ch in _group_channels(channels) for c in ch["channels"] if _is_text(c["type"])]
+        out.append({"id": sid, "name": s.get("name") or sid, "default": _default_channel(channels),
+                    "channels": [{"id": c["id"], "name": c["name"]} for c in texts]})
+    return jsonify({"servers": out})
+
+
+def _run_announcement(job_id, text, title, image, targets):
+    job = _jobs[job_id]
+    for sid, channel_id in targets.items():
+        try:
+            _post_with_optional_image(channel_id, text, image, title)
+            job["results"].append({"server": sid, "ok": True})
+        except Exception as e:
+            job["results"].append({"server": sid, "ok": False, "error": str(e)})
+        time.sleep(0.4)     # stay friendly with the rate limit
+    job["done"] = True
+
+
+@app.route("/api/announce", methods=["POST"])
+@admin_required
+def api_announce():
+    body = request.get_json(silent=True) or {}
+    text, title = str(body.get("message", "")).strip(), str(body.get("title", "")).strip()
+    try:
+        image = _valid_image(body.get("image_url"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not text:
+        return jsonify({"error": "Write the announcement first."}), 400
+    targets = {str(k): str(v) for k, v in (body.get("targets") or {}).items() if v}
+    if not targets:
+        return jsonify({"error": "Pick at least one server."}), 400
+    job_id = secrets_token()
+    _jobs[job_id] = {"total": len(targets), "results": [], "done": False, "started": time.time()}
+    for old in [k for k, v in _jobs.items() if time.time() - v["started"] > 3600]:
+        _jobs.pop(old, None)
+    threading.Thread(target=_run_announcement, args=(job_id, text, title, image, targets), daemon=True, name="announce").start()
+    return jsonify({"job": job_id, "total": len(targets)})
+
+
+@app.route("/api/announce/<job_id>")
+@admin_required
+def api_announce_job(job_id):
+    job = _jobs.get(job_id)
+    return (jsonify(job), 200) if job else (jsonify({"error": "unknown job"}), 404)
+
+
+def secrets_token():
+    return base64.urlsafe_b64encode(os.urandom(9)).decode()
+
+
+# --- automod from the dashboard ---
+
+@app.route("/api/servers/<server_id>/automod", methods=["GET", "POST"])
+@admin_required
+def api_automod(server_id):
+    if request.method == "POST":
+        return jsonify(save_automod(server_id, request.get_json(silent=True) or {}))
+    return jsonify(get_automod(server_id))
 
 
 @app.route("/commands", methods=["GET"])
