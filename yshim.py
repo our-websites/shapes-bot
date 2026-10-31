@@ -196,16 +196,22 @@ class Embed:
         if color is not None:
             d["color"] = color
         if self.fields:
-            d["fields"] = [{"name": (clean(str(f.name))[:256] or "​"), "value": (clean(str(f.value))[:1024] or "​"),
-                            "inline": bool(f.inline)} for f in self.fields[:25]]
-        if self._footer and (self._footer.get("text") or self._footer.get("icon_url")):
-            d["footer"] = {k: (clean(v) if k == "text" else v) for k, v in self._footer.items() if v}
+            # Yapin allows 10 fields per embed (Discord allowed 25): the rest go into the description as lines.
+            rows = [{"name": (clean(str(f.name))[:256] or "\u200b"), "value": (clean(str(f.value))[:1024] or "\u200b"),
+                     "inline": bool(f.inline)} for f in self.fields]
+            d["fields"] = rows[:10]
+            if len(rows) > 10:
+                extra = "\n".join(f"**{r['name']}**: {r['value']}" for r in rows[10:])
+                d["description"] = ((d.get("description", "") + "\n\n") if d.get("description") else "") + extra
+                d["description"] = d["description"][:4096]
+        if self._footer and self._footer.get("text"):           # footer.text is required, an icon alone is invalid
+            d["footer"] = {k: (clean(v)[:2048] if k == "text" else v) for k, v in self._footer.items() if v}
         if self._thumbnail:
             d["thumbnail"] = {"url": self._thumbnail}
         if self._image:
             d["image"] = {"url": self._image}
         if self._author and self._author.get("name"):
-            d["author"] = {k: v for k, v in self._author.items() if v}
+            d["author"] = {k: (str(v)[:256] if k == "name" else v) for k, v in self._author.items() if v}
         if isinstance(self.timestamp, datetime):
             d["timestamp"] = self.timestamp.astimezone(timezone.utc).isoformat()
         return d
@@ -543,12 +549,24 @@ class SentMessage:
         BOT.delete(self.channel_id, self.id)
 
 
+_embed_failures = 0
+
+
 def _disable_embeds(err):
-    global _embeds_ok
-    if _embeds_ok:
+    """One refused embed (too long, a bad link…) only costs that message its embed. If embeds keep being refused,
+    something is wrong with the format itself, so after a few in a row the shim stops trying them for this run."""
+    global _embeds_ok, _embed_failures
+    _embed_failures += 1
+    print(f"[yshim] Yapin refused an embed ({err}); sending that message as plain text.")
+    if _embed_failures >= 5 and _embeds_ok:
         _embeds_ok = False
-        print(f"[yshim] Yapper rejected the embed format ({err}). Falling back to plain text for this run. "
-              f"Set YAPPER_EMBED_MODE=text to skip the attempt, or fix Embed.to_dict() in yshim.py.")
+        print("[yshim] Embeds were refused 5 times in a row, so the rest of this run uses plain text. "
+              "Set YAPPER_EMBED_MODE=text to skip the attempt, or fix Embed.to_dict() in yshim.py.")
+
+
+def _embed_worked():
+    global _embed_failures
+    _embed_failures = 0
 
 
 def _components(view):
@@ -563,9 +581,12 @@ def _join(*parts):
 
 
 def _send_msg(channel_id, text, embeds=None, comps=None, reply_to=None, ephemeral=False):
+    text = str(text or "")
+    if len(text) > 2000:       # Yapin's limit for message content
+        text = text[:1997] + "…"
     if not ephemeral:
         return BOT.send(channel_id, text, embeds=embeds, components=comps, reply_to=reply_to)
-    body = {"content": str(text or ""), "ephemeral": True}   # only the person who ran the command sees it
+    body = {"content": text, "ephemeral": True}   # only the person who ran the command sees it
     if reply_to:
         body["reply_to"] = reply_to
     if embeds:
@@ -580,7 +601,9 @@ def _post(channel_id, content=None, embed=None, view=None, reply_to=None, epheme
     text = clean(content) if content else ""
     if embed is not None and _embeds_ok:
         try:
-            return SentMessage(channel_id, _send_msg(channel_id, text, [embed.to_dict()], comps, reply_to, ephemeral))
+            sent = SentMessage(channel_id, _send_msg(channel_id, text, [embed.to_dict()], comps, reply_to, ephemeral))
+            _embed_worked()
+            return sent
         except YapperError as e:
             if EMBED_MODE == "embed" or e.status not in (400, 422):
                 raise
