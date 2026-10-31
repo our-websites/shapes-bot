@@ -489,7 +489,7 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="Utility", value=(
         "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI\n• /github - GitHub user\n"
         "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp, /yapin2spook - spook.bio"), inline=False)
-    embed.add_field(name="Yapper profile", value="• /yapperuser - Info about a user\n• /yapinavatar - Avatar\n• /yapinbanner - Banner", inline=False)
+    embed.add_field(name="Yapper profile", value="• /yapinuser - Info about a user\n• /yapinavatar - Avatar\n• /yapinbanner - Banner", inline=False)
     embed.set_footer(text="Right-click context menus from the Discord bot are not available on Yapper; use the slash commands.")
     await interaction.response.send_message(embed=embed)
 
@@ -972,7 +972,7 @@ async def lastfm(interaction: discord.Interaction, action: str = "", user: disco
     await interaction.response.send_message(embed=embed)
 
 
-# --- Yapper profile commands (/yapperuser, /yapinavatar, /yapinbanner; these were the Discord user/avatar/banner commands) ---
+# --- Yapper profile commands (/yapinuser, /yapinavatar, /yapinbanner; these were the Discord user/avatar/banner commands) ---
 
 def _profile_target(interaction, user):
     """The user to look up. Fills in the full profile from Yapper so avatar/banner/bio are available."""
@@ -985,8 +985,8 @@ def _profile_target(interaction, user):
     return target
 
 
-@bot.tree.command(name="yapperuser", description="Get information about a user")
-async def yapperuser(interaction: discord.Interaction, user: discord.User = None):
+@bot.tree.command(name="yapinuser", description="Get information about a user")
+async def yapinuser(interaction: discord.Interaction, user: discord.User = None):
     target = _profile_target(interaction, user)
     embed = discord.Embed(title=f"{target.display_name}" + (f" (@{target.name})" if target.display_name != target.name else ""),
                           color=ecolor(interaction.user.id))

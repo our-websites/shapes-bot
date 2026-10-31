@@ -34,6 +34,6 @@ To copy old data across, run `python migrate_pickledb.py`.
 
 1. Create an API account at https://www.last.fm/api/account/create. Set its **Callback URL** to `<PUBLIC_URL>/lastfm/callback`.
 2. Set `LASTFM_API_KEY`, `LASTFM_API_SECRET` and `PUBLIC_URL` (where this bot's web server, port 5004, is reachable over https).
-3. Users run `/lastfm link`, tap the button, approve on Last.fm. `/lastfm unlink` removes it. `/lastfm [@user]` shows now playing, and the link shows on `/yapperuser`.
+3. Users run `/lastfm link`, tap the button, approve on Last.fm. `/lastfm unlink` removes it. `/lastfm [@user]` shows now playing, and the link shows on `/yapinuser`.
 
 Profile lookups are cached for 60 seconds, so heavy use stays well under Last.fm's rate limit.
