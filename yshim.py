@@ -263,6 +263,25 @@ def _image_url(value):
     return value.replace(" ", "%20")
 
 
+FILES_URL = (os.environ.get("YAPPER_FILES_URL") or "https://files.yapper.website").rstrip("/")
+
+
+def _asset_url(value, bucket):
+    """Yapin gives pictures as a PATH, not a link (OpenAPI: avatar_path, banner_path, icon_path, attachment_path):
+    https://files.yapper.website/<bucket>/<path>, and a path starting with / lives on https://www.yapin.gg.
+    A full https link is passed through, so older/other fields that already hold a URL keep working."""
+    if isinstance(value, dict):
+        value = _first(value, "url", "path")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if value.startswith(("http://", "https://", "//")):
+        return _image_url(value)
+    if value.startswith("/"):
+        return SITE_URL + value.replace(" ", "%20")
+    return f"{FILES_URL}/{bucket}/{value.lstrip('/')}".replace(" ", "%20")
+
+
 def fetch_user(user_id):
     """The raw Yapper user dict (cached for 5 minutes), or {}."""
     key = str(user_id)
@@ -314,11 +333,14 @@ class YUser:
 
     @property
     def is_bot(self):
-        """Read live from the profile data, because the full profile is merged in after the user is created."""
+        """Yapin's user object has no bot flag in its API description, so this looks at every sign: the message event's
+        author_bot, a "bot" badge, a bot object/flag (the bot's own /me has one), or a type of "bot"."""
         d = self.data
         kind = str(_first(d, "type", "kind", "account_type", "user_type") or "").lower()
-        return bool(self._bot_hint or d.get("bot") is True or d.get("is_bot") is True or d.get("isBot") is True
-                    or d.get("author_bot") is True or kind == "bot")
+        badges = {str(b).lower().replace(" ", "_") for b in (d.get("badges") or []) if isinstance(b, str)}
+        flag = d.get("bot")
+        return bool(self._bot_hint or flag is True or isinstance(flag, dict) or d.get("is_bot") is True or d.get("isBot") is True
+                    or d.get("author_bot") is True or kind == "bot" or badges & {"bot", "verified_bot", "app"})
 
     @property
     def bot(self):
@@ -345,11 +367,22 @@ class YUser:
 
     @property
     def avatar_url(self):
-        return _image_url(_first(self.data, "avatar_url", "avatarUrl", "avatar", "image_url", "author_avatar_url", "profile_picture"))
+        return (_image_url(_first(self.data, "avatar_url", "avatarUrl", "image_url", "author_avatar_url"))
+                or _asset_url(_first(self.data, "avatar_path", "author_avatar_path", "avatar"), "avatars"))
 
     @property
     def banner_url(self):
-        return _image_url(_first(self.data, "banner_url", "bannerUrl", "banner", "profile_banner"))
+        return (_image_url(_first(self.data, "banner_url", "bannerUrl"))
+                or _asset_url(_first(self.data, "banner_path", "banner"), "banners"))
+
+    @property
+    def badges(self):
+        b = self.data.get("badges")
+        return [str(x) for x in b] if isinstance(b, (list, tuple)) else []
+
+    @property
+    def pronouns(self):
+        return _first(self.data, "pronouns")
 
     @property
     def display_avatar(self):

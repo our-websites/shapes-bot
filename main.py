@@ -998,6 +998,10 @@ async def yapinuser(interaction: discord.Interaction, user: discord.User = None)
     created = target.created_at
     if created:
         embed.add_field(name="Created", value=f"<t:{int(created.timestamp())}:D>", inline=True)
+    if target.pronouns:
+        embed.add_field(name="Pronouns", value=str(target.pronouns), inline=True)
+    if target.badges:
+        embed.add_field(name="Badges", value=", ".join(target.badges[:12]), inline=False)
     if target.avatar_url:
         embed.set_thumbnail(url=target.avatar_url)
     if target.banner_url:
@@ -4721,7 +4725,14 @@ def dashboard():
 
 
 def _avatar_of(d):
-    return yshim._image_url(yshim._first(d, "avatar_url", "avatarUrl", "avatar", "image_url", "author_avatar_url"))
+    """Profile picture link: Yapin sends a path (avatar_path), the bot's own /me sends a full avatar_url."""
+    return (yshim._image_url(yshim._first(d, "avatar_url", "avatarUrl", "image_url", "author_avatar_url"))
+            or yshim._asset_url(yshim._first(d, "avatar_path", "author_avatar_path", "avatar"), "avatars"))
+
+
+def _icon_of(d):
+    return (yshim._image_url(yshim._first(d, "icon_url", "iconUrl", "image_url"))
+            or yshim._asset_url(yshim._first(d, "icon_path", "icon"), "icons"))
 
 
 def _person(d):
@@ -4731,7 +4742,7 @@ def _person(d):
     uid = yshim._first(merged, "user_id", "id")
     return {
         "id": str(uid), "name": yshim._first(merged, "username", "name") or str(uid),
-        "display": yshim._first(merged, "display_name", "displayName", "nickname", "nick") or yshim._first(merged, "username", "name") or str(uid),
+        "display": yshim._first(merged, "nickname", "display_name", "displayName", "nick") or yshim._first(merged, "username", "name") or str(uid),
         "avatar": _avatar_of(merged),
         "bot": yshim.YUser(uid, data=merged).is_bot or str(uid) == str((bot.me or {}).get("id")),
         "roles": [str(r.get("id") if isinstance(r, dict) else r) for r in (merged.get("roles") or merged.get("role_ids") or [])],
@@ -4740,27 +4751,26 @@ def _person(d):
 
 
 def _group_channels(channels):
-    """Categories with their channels (and the channels that have no category), whatever the field names are."""
-    cats, by_cat, loose = {}, {}, []
-    rows = [dict(c) for c in channels]
-    for c in rows:
-        kind = str(yshim._first(c, "type", "kind") or "").lower()
-        if kind in ("category", "4", "group"):
-            cats[str(c.get("id"))] = c
-    for c in rows:
-        if str(c.get("id")) in cats:
-            continue
-        parent = yshim._first(c, "category_id", "categoryId", "parent_id", "parentId", "category")
-        if isinstance(parent, dict):
-            parent = parent.get("id")
-        row = {"id": str(c.get("id")), "name": c.get("name") or str(c.get("id")), "type": str(yshim._first(c, "type", "kind") or "text").lower(),
-               "topic": c.get("topic") or ""}
-        if parent is not None and str(parent) in cats:
-            by_cat.setdefault(str(parent), []).append(row)
-        else:
+    """Categories with their channels. Each Yapin channel carries its category ({id, name, position}) and category_id,
+    channels without one are listed first with no heading."""
+    cats, loose = {}, []
+    for c in channels:
+        c = dict(c)
+        row = {"id": str(c.get("id")), "name": c.get("name") or str(c.get("id")),
+               "type": str(yshim._first(c, "type", "kind") or "text").lower(), "topic": c.get("topic") or "",
+               "private": bool(c.get("private")), "position": c.get("position") or 0}
+        cat = c.get("category") if isinstance(c.get("category"), dict) else None
+        cid = yshim._first(cat or {}, "id") or c.get("category_id")
+        if cid is None:
             loose.append(row)
-    out = [{"id": cid, "name": c.get("name") or "Category", "channels": by_cat.get(cid, [])}
-           for cid, c in sorted(cats.items(), key=lambda kv: (kv[1].get("position") is None, kv[1].get("position") or 0))]
+            continue
+        entry = cats.setdefault(str(cid), {"id": str(cid), "name": (cat or {}).get("name") or "Category",
+                                           "position": (cat or {}).get("position") or 0, "channels": []})
+        entry["channels"].append(row)
+    out = sorted(cats.values(), key=lambda e: e["position"])
+    for e in out:
+        e["channels"].sort(key=lambda r: r["position"])
+    loose.sort(key=lambda r: r["position"])
     if loose:
         out.insert(0, {"id": "", "name": "", "channels": loose})
     return out
@@ -4784,7 +4794,7 @@ def api_overview():
     for s in cached("servers", 15, bot.servers):
         n = yshim._first(s, "member_count", "members_count", "memberCount")
         servers.append({**dict(s), "id": str(s.get("id")), "name": s.get("name") or str(s.get("id")), "member_count": n,
-                        "icon": yshim._image_url(yshim._first(s, "icon_url", "iconUrl", "icon", "avatar_url", "image_url"))})
+                        "icon": _icon_of(s)})
     return jsonify({
         "ready": True, "me": {**dict(bot.me or {}), "avatar": _avatar_of(dict(bot.me or {}))}, "uptime_seconds": int(time.time() - started_at),
         "storage": __import__("cfstore").backend_summary(), "commands": sorted(bot.commands), "servers": servers,
@@ -4822,9 +4832,11 @@ def api_members(server_id):
 
 def _message_row(m):
     m = dict(m)
-    author = m.get("author") if isinstance(m.get("author"), dict) else {}
-    person = _person({**author, "id": author.get("id") or m.get("author_id")}) if (author or m.get("author_id")) else {"id": "", "name": "?", "display": "?", "avatar": None}
-    name = yshim._first(m, "author_display_name", "author_username", "author_name") or person["display"]
+    author = dict(m.get("author")) if isinstance(m.get("author"), dict) else {}
+    if not author and m.get("author_id"):
+        author = dict(yshim.fetch_user(m.get("author_id")) or {})      # messages only carry author_id; profiles are cached
+    person = _person({**author, "id": author.get("id") or m.get("author_id")}) if (author or m.get("author_id")) else {"id": "", "name": "?", "display": "?", "avatar": None, "bot": False}
+    name = person["display"] if author else (yshim._first(m, "author_display_name", "author_username", "author_name") or person["display"])
     images = []
     for e in (m.get("embeds") or []):
         if isinstance(e, dict):
@@ -4839,8 +4851,13 @@ def _message_row(m):
             ctype = str(att.get("content_type") or att.get("type") or "")
             if u and (ctype.startswith("image") or re.search(r"\.(png|jpe?g|gif|webp|avif)(\?|$)", u, re.I)):
                 images.append(u)
+    pic = yshim._asset_url(m.get("attachment_path"), "attachments")
+    if pic and re.search(r"\.(png|jpe?g|gif|webp|avif)(\?|$)", pic, re.I):
+        images.append(pic)
+    elif pic:
+        m["content"] = (m.get("content") or "") + ("\n" if m.get("content") else "") + pic      # shows as a link
     return {"id": str(m.get("id")), "author": name, "author_id": person["id"], "avatar": person["avatar"] or yshim._image_url(m.get("author_avatar_url")),
-            "bot": bool(m.get("author_bot")), "content": m.get("content") or "", "created_at": m.get("created_at"),
+            "bot": bool(m.get("author_bot")) or person["bot"], "content": m.get("content") or "", "created_at": m.get("created_at"),
             "embeds": [{"title": e.get("title"), "description": e.get("description"), "url": e.get("url")}
                        for e in (m.get("embeds") or []) if isinstance(e, dict)], "images": images[:6]}
 
@@ -5102,7 +5119,7 @@ def _entity(kind, entity_id):
     if kind == "server":
         info = dict(cached(f"server:{entity_id}", 30, lambda: bot.server(entity_id)))
         return {"kind": "server", "id": entity_id, "name": info.get("name") or entity_id,
-                "avatar": yshim._image_url(yshim._first(info, "icon_url", "iconUrl", "icon", "image_url")),
+                "avatar": _icon_of(info),
                 "note": f"{yshim._first(info, 'member_count', 'members_count', 'memberCount') or '?'} members"}
     p = _person(dict(bot.user(entity_id)))
     return {"kind": "user", "id": entity_id, "name": p["display"], "avatar": p["avatar"], "note": f"@{p['name']}" + (" · bot" if p["bot"] else "")}
@@ -5241,7 +5258,7 @@ def mutualservers():
         for s in bot.servers():
             sid = s.get("id")
             try:
-                entry = {"name": s.get("name"), "iconurl": yshim._image_url(yshim._first(s, "icon_url", "iconUrl", "icon", "image_url")),
+                entry = {"name": s.get("name"), "iconurl": _icon_of(s),
                          "owner": yshim._first(s, "owner_id", "ownerId", "owner"), "channels": len(bot.channels(sid)),
                          "roles": len(bot.roles(sid)), "members": [], "bots": []}
                 for p in _all_members(sid):
