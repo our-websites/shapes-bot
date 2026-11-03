@@ -428,50 +428,159 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="autorole", description="Automatically give new members a role: /autorole <role> [true|false]")
-async def autorole(interaction: discord.Interaction, role: discord.Role, enable: bool = True):
+# --- Autorole: a role for new members, with people who are left out ---
+
+AUTOROLE_DEFAULT = {"role_id": "", "enabled": False, "exempt_users": [], "include_bots": True}
+
+
+def get_autorole(server_id):
+    cfg = {**AUTOROLE_DEFAULT, **(autoroleDB.get(str(server_id)) or {})}
+    cfg["exempt_users"] = [str(u) for u in cfg.get("exempt_users") or []]
+    return cfg
+
+
+def save_autorole(server_id, cfg):
+    cfg = {**AUTOROLE_DEFAULT, **cfg}
+    out = {"role_id": str(cfg["role_id"] or ""), "enabled": bool(cfg["enabled"]), "include_bots": bool(cfg["include_bots"]),
+           "exempt_users": sorted({str(u).strip() for u in cfg["exempt_users"] if str(u).strip()})[:200]}
+    autoroleDB.set(str(server_id), out)
+    return out
+
+
+def _user_ids(text):
+    """User ids out of <@id> mentions, bare ids, or a comma/space separated mix."""
+    ids = re.findall(r"<@!?([^>\s]+)>", text or "")
+    rest = re.sub(r"<@!?[^>\s]+>", " ", text or "")
+    ids += [t.strip("@,") for t in re.split(r"[\s,]+", rest) if t.strip("@,")]
+    return list(dict.fromkeys(ids))
+
+
+def autorole_applies(cfg, server_id, user_id):
+    """Should this person get the role? Not when they are exempt, or a bot while bots are switched off."""
+    if not cfg["enabled"] or not cfg["role_id"] or str(user_id) in cfg["exempt_users"]:
+        return False
+    if not cfg["include_bots"]:
+        return not yshim.YUser(user_id, data=yshim.fetch_user(user_id) or {}).is_bot
+    return True
+
+
+def assign_autorole_to_existing(server_id, cfg):
+    """Gives the role to everyone who is not exempt and does not have it yet. Returns how many got it."""
+    count = 0
+    for m in _all_members(server_id):
+        if m["id"] in cfg["exempt_users"] or cfg["role_id"] in m["roles"] or (m["bot"] and not cfg["include_bots"]):
+            continue
+        try:
+            bot.add_role(server_id, m["id"], cfg["role_id"])
+            count += 1
+        except Exception as e:
+            print(f"[autorole] could not give the role to {m['id']}: {e}")
+    return count
+
+
+def _autorole_embed(cfg, user, role_name=None, note=None):
+    on = cfg["enabled"] and cfg["role_id"]
+    embed = discord.Embed(title="Autorole", color=discord.Color.green() if on else discord.Color.red(),
+                          description=(f"✅ {note}\n\n" if note else "") + (f"New members get <@&{cfg['role_id']}>." if on else "Autorole is **off**."))
+    embed.add_field(name="Role", value=f"<@&{cfg['role_id']}>" if cfg["role_id"] else "Not set", inline=True)
+    embed.add_field(name="Bots", value="Get the role" if cfg["include_bots"] else "Skipped", inline=True)
+    exempt = cfg["exempt_users"]
+    embed.add_field(name=f"Left out ({len(exempt)})", inline=False,
+                    value=" ".join(f"<@{u}>" for u in exempt[:20]) + (f" and {len(exempt) - 20} more" if len(exempt) > 20 else "") if exempt else "Nobody. Add people with `/autorole exempt @user`.")
+    embed.set_footer(text="/autorole <role> · exempt <@users> · unexempt <@users> · bots <on|off> · off")
+    return embed
+
+
+def _autorole_view(server_id, owner_id):
+    cfg = get_autorole(server_id)
+    view = discord.ui.View(timeout=300)
+
+    def add(label, style, action):
+        button = discord.ui.Button(label=label, style=style)
+
+        async def pressed(click):
+            if str(click.user.id) != str(owner_id) or not yshim.is_admin(server_id, click.user.id):
+                await click.response.send_message("Only the admin who opened this panel can use it.", ephemeral=True)
+                return
+            current = get_autorole(server_id)
+            note = action(current)
+            current = save_autorole(server_id, current)
+            await click.response.edit_message(embed=_autorole_embed(current, click.user, note=note), view=_autorole_view(server_id, owner_id))
+        button.callback = pressed
+        view.add_item(button)
+
+    def toggle(c):
+        c["enabled"] = not c["enabled"]
+        return "Autorole is now " + ("on." if c["enabled"] else "off.")
+
+    def bots(c):
+        c["include_bots"] = not c["include_bots"]
+        return "Bots " + ("get the role." if c["include_bots"] else "are skipped.")
+
+    def existing(c):
+        return f"Gave the role to {assign_autorole_to_existing(server_id, c)} existing members."
+    add("Turn off" if cfg["enabled"] else "Turn on", discord.ButtonStyle.danger if cfg["enabled"] else discord.ButtonStyle.primary, toggle)
+    add("Skip bots" if cfg["include_bots"] else "Include bots", discord.ButtonStyle.secondary, bots)
+    if cfg["role_id"]:
+        add("Give to existing members", discord.ButtonStyle.secondary, existing)
+    return view
+
+
+@bot.tree.command(name="autorole", description="Give new members a role: /autorole <role> | exempt <@users> | unexempt <@users> | bots <on|off> | off")
+async def autorole(interaction: discord.Interaction, action: str = "status", *, rest: str = ""):
     if not await need_admin(interaction):
         return
     sid = str(interaction.guild_id)
-    autoroleDB.set(sid, {"role_id": str(role.id), "enabled": enable})
-    server_id = interaction.guild_id
+    cfg = get_autorole(sid)
+    word = action.lower().strip()
+    note = None
 
-    class AutoroleView(discord.ui.View):
-        def __init__(self):
-            super().__init__(timeout=300)
+    async def say(text):
+        await interaction.response.send_message(text, ephemeral=True)
 
-        async def interaction_check(self, click):
-            if not yshim.is_admin(server_id, click.user.id):
-                await click.response.send_message("Only server admins can do this.", ephemeral=True)
-                return False
-            return True
-
-        @discord.ui.button(label="Assign to Existing Members", style=discord.ButtonStyle.primary)
-        async def assign_existing(self, click, button):
-            await click.response.send_message("Working on it...", ephemeral=True)
-            count, after, seen = 0, None, set()
-            while True:
-                page = bot.members(server_id, after=after)
-                fresh = [m for m in page if str(yshim._first(m, "user_id", "id")) not in seen]
-                if not fresh:
-                    break
-                for m in fresh:
-                    uid = str(yshim._first(m, "user_id", "id"))
-                    seen.add(uid)
-                    if m.get("bot") or m.get("is_bot") or str(role.id) in {str(r.get("id") if isinstance(r, dict) else r) for r in (m.get("roles") or [])}:
-                        continue
-                    try:
-                        bot.add_role(server_id, uid, role.id)
-                        count += 1
-                    except Exception:
-                        pass
-                after = yshim._first(fresh[-1], "user_id", "id")
-                if len(page) < 200:
-                    break
-            yshim.post(click.channel_id, f"Assigned {role.name} to {count} existing members.")
-
-    status = "enabled" if enable else "disabled"
-    await interaction.response.send_message(f"Autorole {status} for {role.name}. Assign to existing members?", view=AutoroleView(), ephemeral=True)
+    if word in ("status", "", "panel"):
+        pass
+    elif word in ("off", "disable"):
+        cfg["enabled"], note = False, "Autorole is off."
+    elif word in ("on", "enable"):
+        if not cfg["role_id"]:
+            return await say("Pick a role first: `/autorole <role>`")
+        cfg["enabled"], note = True, "Autorole is on."
+    elif word in ("exempt", "skip", "ignore"):
+        ids = _user_ids(rest)
+        if not ids:
+            return await say("Usage: `/autorole exempt @user @other` (one person or several)")
+        cfg["exempt_users"] = list(dict.fromkeys(cfg["exempt_users"] + ids))
+        note = f"Left out {len(ids)} {'person' if len(ids) == 1 else 'people'}."
+    elif word in ("unexempt", "include", "unskip"):
+        ids = set(_user_ids(rest))
+        if not ids:
+            return await say("Usage: `/autorole unexempt @user`")
+        cfg["exempt_users"] = [u for u in cfg["exempt_users"] if u not in ids]
+        note = f"Removed {len(ids)} from the left-out list."
+    elif word == "bots":
+        state = rest.strip().lower()
+        if state not in ("on", "off", "true", "false"):
+            return await say("Usage: `/autorole bots on` (bots get the role) or `/autorole bots off`")
+        cfg["include_bots"] = state in ("on", "true")
+        note = "Bots " + ("get the role." if cfg["include_bots"] else "are skipped.")
+    else:
+        # /autorole <role> [true|false]: the original form, the role name is the first word (or in quotes)
+        token = (action + " " + rest).strip()
+        enable = True
+        if token.lower().endswith((" false", " off")):
+            enable, token = False, token.rsplit(" ", 1)[0]
+        elif token.lower().endswith((" true", " on")):
+            token = token.rsplit(" ", 1)[0]
+        try:
+            role = yshim.resolve_role(token.strip().strip('"'), sid)
+        except ValueError as e:
+            return await say(f"{e}. Use `/autorole <role name>`, or `/autorole status` to see the settings.")
+        cfg.update(role_id=str(role.id), enabled=enable)
+        note = f"Autorole {'on' if enable else 'off'} for {role.name}."
+    cfg = save_autorole(sid, cfg)
+    await interaction.response.send_message(embed=_autorole_embed(cfg, interaction.user, note=note),
+                                            view=_autorole_view(sid, interaction.user.id), ephemeral=True)
 
 
 @bot.tree.command(name="help", description="Get help with all available commands")
@@ -4592,8 +4701,8 @@ def on_message(msg):
 @bot.on("member_join")
 def on_member_join(ev):
     try:
-        cfg = autoroleDB.get(f"{ev.server_id}")
-        if cfg and cfg.get("enabled") and cfg.get("role_id"):
+        cfg = get_autorole(ev.server_id)
+        if autorole_applies(cfg, ev.server_id, ev.user_id):
             bot.add_role(ev.server_id, ev.user_id, cfg["role_id"])
     except Exception as e:
         print(f"[autorole] {type(e).__name__}: {e}")
@@ -5087,8 +5196,12 @@ def _vcounting(v):
 
 def _vautorole(v):
     if not isinstance(v, dict) or not isinstance(v.get("enabled"), bool):
-        raise ValueError('Autorole needs {"role_id": "…", "enabled": true/false}.')
-    return {"role_id": str(v.get("role_id") or ""), "enabled": v["enabled"]}
+        raise ValueError('Autorole needs {"role_id": "…", "enabled": true/false} (optional: "exempt_users": [ids], "include_bots": true/false).')
+    exempt = v.get("exempt_users", [])
+    if not isinstance(exempt, list):
+        raise ValueError('"exempt_users" must be a list of user ids.')
+    return {"role_id": str(v.get("role_id") or ""), "enabled": v["enabled"], "include_bots": bool(v.get("include_bots", True)),
+            "exempt_users": [str(u) for u in exempt]}
 
 
 def _vcolor(v):
