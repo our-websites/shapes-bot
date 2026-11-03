@@ -589,7 +589,7 @@ async def help_command(interaction: discord.Interaction):
                           description="Use `/command` or `!command`. Put names with spaces in quotes.")
     embed.add_field(name="Counting", value="• /counting - Counting settings (`toggle`, `channel #channel`)\n• /countingleaderboard - Leaderboard website", inline=False)
     embed.add_field(name="User Settings", value="• /settings - Customize your embed color\n• /autorole - Give new members a role\n• /lastfm - Link Last.fm", inline=False)
-    embed.add_field(name="Moderation", value="• /automod - Block words, links, invites, spam, caps and mass mentions (admins)", inline=False)
+    embed.add_field(name="Moderation", value="• /automod - Block words, links, invites, spam, caps and mass mentions (admins)\n• /serverinfo - Server information", inline=False)
     embed.add_field(name="Roblox", value=(
         "• /robloxinfo - User information\n• /roblox2yapin - Find a Roblox user's linked account\n• /yapin2roblox - Find a user's Roblox\n"
         "• /britishuser - Check if a user is British\n• /iteminfo - Item information\n• /placeinfo - Place/game information\n"
@@ -900,6 +900,51 @@ async def automod_command(interaction: discord.Interaction, action: str = "statu
     await panel("Saved.")
 
 
+@bot.tree.command(name="serverinfo", description="Show information about this server")
+async def serverinfo(interaction: discord.Interaction):
+    if interaction.is_dm:
+        await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
+        return
+    sid = str(interaction.guild_id)
+    try:
+        info = dict(bot.server(sid))
+        channels = bot.channels(sid)
+        roles = bot.roles(sid)
+        members = cached(f"allmembers:{sid}", 120, lambda: _all_members(sid))
+    except Exception as e:
+        await interaction.response.send_message(f"Couldn't load the server information: {e}", ephemeral=True)
+        return
+    bots = sum(1 for m in members if m["bot"])
+    humans = len(members) - bots
+    total = int(yshim._first(info, "member_count", "members_count", "memberCount") or len(members))
+    texts = sum(1 for c in channels if str(yshim._first(c, "type", "kind") or "text") == "text")
+    voices = len(channels) - texts
+    categories = {str(yshim._first(c.get("category") or {}, "id") or c.get("category_id")) for c in channels if c.get("category") or c.get("category_id")}
+    owner = yshim._first(info, "owner_id", "ownerId")
+    embed = discord.Embed(title=info.get("name") or "Server", color=ecolor(interaction.user.id))
+    if info.get("description"):
+        embed.description = str(info["description"])[:400]
+    embed.add_field(name="Owner", value=f"<@{owner}>" if owner else "Unknown", inline=True)
+    embed.add_field(name="Server ID", value=f"`{sid}`", inline=True)
+    embed.add_field(name="Members", inline=False,
+                    value=f"**{max(total, len(members)):,}** total (people and bots)\n**{humans:,}** people · **{bots:,}** bots")
+    embed.add_field(name="Channels", value=f"{len(channels):,} total\n{texts:,} text · {voices:,} voice\n{len(categories):,} categories", inline=True)
+    embed.add_field(name="Roles", value=f"{len(roles):,}", inline=True)
+    for key, label in (("verified", "Verified"), ("public", "Public"), ("boost_level", "Boost level")):
+        if info.get(key) not in (None, "", False):
+            embed.add_field(name=label, value=str(info[key]), inline=True)
+    icon = _icon_of(info)
+    banner = yshim._asset_url(yshim._first(info, "banner_path", "banner_url", "banner"), "banners")
+    if icon:
+        embed.set_thumbnail(url=icon)
+    if banner:
+        embed.set_image(url=banner)
+    elif icon:
+        embed.set_image(url=icon)      # Yapin gives servers no banner, so the picture is shown large instead
+    embed.set_footer(text=f"Requested by {interaction.user.name} | {MainURL}")
+    await interaction.response.send_message(embed=embed)
+
+
 # --- Last.fm (linked with Last.fm's web auth, so the account is verified by Last.fm itself) ---
 # Flow: /lastfm link -> private message with a Last.fm authorize button -> Last.fm sends the person back to
 # PUBLIC_URL/lastfm/callback/<state>?token=... -> we trade the token for a session (name + key) and save it.
@@ -1094,45 +1139,53 @@ def _profile_target(interaction, user):
     return target
 
 
+def _mutual_servers(user_id):
+    """Names of the servers the bot shares with this person (looked up side by side, one request per server)."""
+    from concurrent.futures import ThreadPoolExecutor
+    servers = list(cached("servers", 15, bot.servers))
+
+    def check(s):
+        try:
+            bot.member(s.get("id"), user_id)
+            return s.get("name") or str(s.get("id"))
+        except Exception:
+            return None      # not a member of that server
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            return [n for n in pool.map(check, servers) if n]
+    except Exception as e:
+        print(f"mutual server lookup failed: {e}")
+        return []
+
+
 @bot.tree.command(name="yapinuser", description="Get information about a user")
 async def yapinuser(interaction: discord.Interaction, user: discord.User = None):
     target = _profile_target(interaction, user)
-    embed = discord.Embed(title=f"{target.display_name}" + (f" (@{target.name})" if target.display_name != target.name else ""),
-                          color=ecolor(interaction.user.id))
+    handle = f"@{target.name}"
+    embed = discord.Embed(title=target.display_name + ("  ·  🤖 Bot" if target.is_bot else ""), color=ecolor(interaction.user.id))
     bio = yshim._first(target.data, "bio", "about", "description")
+    lines = [f"{handle}" + (f" · {target.pronouns}" if target.pronouns else "")]
     if bio:
-        embed.description = str(bio)
-    embed.add_field(name="ID", value=f"`{target.id}`", inline=True)
-    embed.add_field(name="Bot", value="Yes" if target.is_bot else "No", inline=True)
+        lines.append("> " + str(bio).strip().replace("\n", "\n> ")[:400])
+    embed.description = "\n".join(lines)
     created = target.created_at
-    if created:
-        embed.add_field(name="Created", value=f"<t:{int(created.timestamp())}:D>", inline=True)
-    if target.pronouns:
-        embed.add_field(name="Pronouns", value=str(target.pronouns), inline=True)
+    embed.add_field(name="Joined Yapin", value=f"<t:{int(created.timestamp())}:D>\n<t:{int(created.timestamp())}:R>" if created else "Unknown", inline=True)
+    embed.add_field(name="ID", value=f"`{target.id}`", inline=True)
     if target.badges:
-        embed.add_field(name="Badges", value=", ".join(target.badges[:12]), inline=False)
+        embed.add_field(name="Badges", value="  ".join(f"`{b}`" for b in target.badges[:10]), inline=False)
+    mutual = _mutual_servers(target.id)
+    if mutual:
+        shown = "\n".join(f"• {n}" for n in mutual[:8]) + (f"\n…and {len(mutual) - 8} more" if len(mutual) > 8 else "")
+        embed.add_field(name=f"Servers with Shapes ({len(mutual)})", value=shown, inline=False)
+    linked = get_lastfm(target.id)
+    if linked:
+        p = lastfm_profile(linked)
+        embed.add_field(name="Last.fm", value=lastfm_line(p) if p else f"[{linked}](https://www.last.fm/user/{linked})", inline=False)
     if target.avatar_url:
         embed.set_thumbnail(url=target.avatar_url)
     if target.banner_url:
         embed.set_image(url=target.banner_url)
-
-    mutual = []
-    try:
-        for s in bot.servers():
-            try:
-                bot.member(s.get("id"), target.id)
-                mutual.append(s.get("name") or str(s.get("id")))
-            except Exception:
-                continue   # not a member of that server
-    except Exception as e:
-        print(f"mutual server lookup failed: {e}")
-    if mutual:
-        embed.add_field(name=f"Mutual Servers ({len(mutual)})", value="\n".join(mutual[:15]) + ("\n..." if len(mutual) > 15 else ""), inline=False)
-    linked = get_lastfm(target.id)
-    if linked:
-        p = lastfm_profile(linked)
-        embed.add_field(name="LastFM", value=lastfm_line(p) if p else f"[{linked}](https://www.last.fm/user/{linked})", inline=False)
-    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
+    embed.set_footer(text=f"Requested by {interaction.user.name} | {MainURL}")
     await interaction.response.send_message(embed=embed)
 
 
