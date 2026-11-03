@@ -633,7 +633,7 @@ async def help_command(interaction: discord.Interaction):
         "• /robloxinfo - User information\n• /roblox2yapin - Find a Roblox user's linked account\n• /yapin2roblox - Find a user's Roblox\n"
         "• /britishuser - Check if a user is British\n• /iteminfo - Item information\n• /placeinfo - Place/game information\n"
         "• /badge - Badge information\n• /badges - Check a user's badges\n• /recentbadges - Latest badges\n• /outfits - A user's outfits\n"
-        "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox"), inline=False)
+        "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox\n• /vortexgame, /vortexuser - PlayVortex lookups"), inline=False)
     embed.add_field(name="Utility", value=(
         "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI\n• /github - GitHub user\n"
         "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp, /yapin2spook - spook.bio"), inline=False)
@@ -4034,6 +4034,190 @@ async def linkroblox(interaction: discord.Interaction, action: str = "link"):
     view = discord.ui.View(timeout=600)
     view.add_item(discord.ui.Button(label="Link with Roblox", style=discord.ButtonStyle.link, url=started["url"]))
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# --- PlayVortex (https://playvortex.io) ---
+# The site's API isn't documented. Known so far: /api/games/<id> and /api/users/<id>. Field names aren't known either, so
+# the readers below look for the usual names and show whatever they find; unknown fields are listed, not dropped.
+VORTEX_URL = os.environ.get("PLAYVORTEX_URL", "https://playvortex.io").rstrip("/")
+_vortex_cache = {}
+
+
+def vortex_get(kind, ident):
+    """The JSON object for /api/<kind>/<ident>, 'missing' when it doesn't exist, None when the site can't be reached."""
+    ident = str(ident).strip()
+    if not re.fullmatch(r"[\w.-]{1,64}", ident):
+        return "missing"
+    key = (kind, ident.lower())
+    hit = _vortex_cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        r = requests.get(f"{VORTEX_URL}/api/{kind}/{urllib.parse.quote(ident)}", timeout=10, headers={"Accept": "application/json", "User-Agent": "ShapesBot"})
+        if r.status_code in (400, 404):
+            result = "missing"
+        else:
+            r.raise_for_status()
+            data = r.json()
+            for wrap in ("data", "game", "user", "result"):           # {"data": {...}} style wrappers
+                if isinstance(data, dict) and isinstance(data.get(wrap), dict) and len(data) <= 3:
+                    data = data[wrap]
+                    break
+            result = data if isinstance(data, dict) and data else "missing"
+    except (requests.RequestException, ValueError):
+        return None
+    _vortex_cache[key] = (time.time() + 120, result)
+    if len(_vortex_cache) > 300:
+        _vortex_cache.pop(next(iter(_vortex_cache)))
+    return result
+
+
+def _vpick(data, *names):
+    """The first present value among names (case-insensitive, also looks one level down in nested objects)."""
+    lowered = {str(k).lower(): v for k, v in data.items()}
+    for n in names:
+        v = lowered.get(n.lower())
+        if v not in (None, "", [], {}):
+            return v
+    for v in data.values():
+        if isinstance(v, dict):
+            found = _vpick(v, *names)
+            if found is not None:
+                return found
+    return None
+
+
+def _vtext(value, limit=300):
+    if isinstance(value, dict):
+        value = _vpick(value, "name", "display_name", "username", "title", "id")
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (int, float)):
+        return f"{value:,}"
+    text = str(value if value is not None else "").strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _vdate(value):
+    try:
+        number = float(value)
+        if number > 1e12:
+            number /= 1000
+        return f"<t:{int(number)}:D>"
+    except (TypeError, ValueError):
+        return _vtext(value, 40) if value else None
+
+
+def _vimage(value):
+    if isinstance(value, dict):
+        value = _vpick(value, "url", "src")
+    if isinstance(value, str):
+        if value.startswith("//"):
+            value = "https:" + value
+        elif value.startswith("/"):
+            value = VORTEX_URL + value
+        if value.startswith("https://"):
+            return value
+    return None
+
+
+_VORTEX_SKIP = {"id", "name", "title", "description", "bio", "about", "username", "display_name", "displayname", "avatar", "icon", "thumbnail",
+                "image", "banner", "avatar_url", "icon_url", "thumbnail_url", "banner_url", "created_at", "updated_at"}
+
+
+def vortex_embed(kind, ident, data, color):
+    """An embed for a game or user object, whatever its field names turn out to be."""
+    game = kind == "games"
+    name = _vpick(data, "name", "title") if game else (_vpick(data, "display_name", "displayName", "name") or _vpick(data, "username"))
+    username = None if game else _vpick(data, "username")
+    embed = discord.Embed(title=_vtext(name or f"{'Game' if game else 'User'} {ident}", 200), color=color,
+                          url=f"{VORTEX_URL}/{'games' if game else 'users'}/{urllib.parse.quote(str(ident))}")
+    about = _vpick(data, "description", "about") if game else _vpick(data, "bio", "description", "about")
+    lines = []
+    if username and _vtext(username) != _vtext(name):
+        lines.append(f"@{_vtext(username)}")
+    if about:
+        lines.append(_vtext(about, 600))
+    embed.description = "\n".join(lines) or None
+    shown = set(_VORTEX_SKIP)
+    fields = []
+
+    def add(label, *keys, date=False, inline=True):
+        for k in keys:
+            shown.add(k.lower())
+        v = _vpick(data, *keys)
+        if v is None:
+            return
+        text = _vdate(v) if date else _vtext(v)
+        if text:
+            fields.append((label, text, inline))
+    add("ID", "id")
+    if game:
+        add("Creator", "creator", "owner", "author", "developer")
+        add("Playing", "playing", "players", "active_players", "online", "ccu")
+        add("Visits", "visits", "plays", "play_count", "total_plays")
+        add("Likes", "likes", "upvotes", "likes_count")
+        add("Dislikes", "dislikes", "downvotes")
+        add("Favorites", "favorites", "favourites", "favorites_count")
+        add("Genre", "genre", "category", "type")
+        add("Max Players", "max_players", "maxplayers")
+    else:
+        add("Rank", "rank", "role", "level")
+        add("Followers", "followers", "followers_count")
+        add("Following", "following", "following_count")
+        add("Friends", "friends", "friends_count")
+        add("Games", "games", "games_count", "places")
+        add("Visits", "visits", "total_visits")
+        add("Status", "status", "online", "presence")
+        add("Verified", "verified", "is_verified")
+        add("Banned", "banned", "is_banned")
+    add("Created", "created_at", "created", "createdat", date=True)
+    add("Updated", "updated_at", "updated", "updatedat", date=True)
+    # anything else that is a plain value is listed too, so a field I didn't know about is still visible
+    extras = [(k, v) for k, v in data.items() if str(k).lower() not in shown and isinstance(v, (str, int, float, bool)) and v not in ("", None)]
+    for k, v in extras[:max(0, 9 - len(fields))]:
+        text = _vtext(v, 120)
+        if text:
+            fields.append((str(k).replace("_", " ").title()[:40], text, True))
+    for label, text, inline in fields:
+        embed.add_field(name=label, value=text, inline=inline)
+    thumb = _vimage(_vpick(data, "thumbnail", "thumbnail_url", "icon", "icon_url", "avatar", "avatar_url", "image", "image_url"))
+    banner = _vimage(_vpick(data, "banner", "banner_url", "cover", "cover_url"))
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    if banner:
+        embed.set_image(url=banner)
+    return embed
+
+
+async def _vortex_command(interaction, kind, ident):
+    await interaction.response.defer()
+    data = await asyncio.to_thread(vortex_get, kind, ident)
+    what = "game" if kind == "games" else "user"
+    if data is None:
+        await interaction.edit_original_response(embed=discord.Embed(title="PlayVortex didn't answer", description="Try again in a moment.", color=discord.Color.red()))
+        return
+    if data == "missing":
+        await interaction.edit_original_response(embed=discord.Embed(title=f"No {what} found for `{_vtext(ident, 60)}`", color=discord.Color.red()))
+        return
+    color = embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
+    embed = vortex_embed(kind, ident, data, color)
+    embed.set_footer(text=f"Requested By {interaction.user.name} | playvortex.io")
+    await interaction.edit_original_response(embed=embed)
+
+
+@bot.tree.command(name="vortexgame", description="Look up a game on PlayVortex")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def vortexgame(interaction: discord.Interaction, game: str):
+    await _vortex_command(interaction, "games", game)
+
+
+@bot.tree.command(name="vortexuser", description="Look up a user on PlayVortex")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def vortexuser(interaction: discord.Interaction, user: str):
+    await _vortex_command(interaction, "users", user)
 
 
 roblox_colors = {
