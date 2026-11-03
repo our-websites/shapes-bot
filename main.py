@@ -4818,6 +4818,58 @@ def _web_file(name):
         return f.read()
 
 
+# --- activities: the activity/ folder is public under /activity ---
+
+ACTIVITY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "activity")
+
+
+def _activity_list():
+    out = []
+    if os.path.isdir(ACTIVITY_DIR):
+        for name in sorted(os.listdir(ACTIVITY_DIR)):
+            folder = os.path.join(ACTIVITY_DIR, name)
+            if name.startswith((".", "_")) or not os.path.isfile(os.path.join(folder, "index.html")):
+                continue
+            meta = {}
+            try:
+                with open(os.path.join(folder, "activity.json"), "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                pass
+            out.append({"slug": name, "name": str(meta.get("name") or name), "description": str(meta.get("description") or "")})
+    return out
+
+
+@app.route("/activity/")
+@app.route("/activity")
+def activity_index():
+    if os.path.isfile(os.path.join(ACTIVITY_DIR, "index.html")):
+        from flask import send_from_directory
+        return send_from_directory(ACTIVITY_DIR, "index.html")
+    rows = "".join(f'<li><a href="/activity/{urllib.parse.quote(a["slug"])}/"><b>{_html_escape(a["name"])}</b></a>'
+                   f'{"<br><span>" + _html_escape(a["description"]) + "</span>" if a["description"] else ""}</li>' for a in _activity_list())
+    return Response("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Activities</title>"
+                    "<style>:root{color-scheme:light dark}body{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem}"
+                    "li{margin:.8rem 0}span{opacity:.7}a{text-decoration:none}</style><h1>Activities</h1>"
+                    f"<ul>{rows or '<li>No activities yet.</li>'}</ul>", mimetype="text/html")
+
+
+@app.route("/activity/<path:subpath>")
+def activity_files(subpath):
+    from flask import abort, send_from_directory
+    parts = [p for p in subpath.split("/") if p]
+    if not parts or any(p.startswith((".", "_")) for p in parts):
+        abort(404)
+    target = os.path.join(ACTIVITY_DIR, *parts)
+    if os.path.isdir(target):
+        subpath = "/".join(parts + ["index.html"])
+    return send_from_directory(ACTIVITY_DIR, subpath)      # send_from_directory refuses anything outside the folder
+
+
+def _html_escape(text):
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
 @app.route("/lastfm/callback/<state>")
 def lastfm_callback(state):
     name = lastfm_finish_link(state, request.args.get("token", ""))
