@@ -534,6 +534,19 @@ def is_admin(server_id, user_id):
 
 # --------------------------------------------------------------------------- sending
 
+_PRIVATE_TEXT = re.compile(r"^\s*(?::x:|❌|⚠️|:warning:|usage:|only\b|you (?:need|can't|cannot|haven't|do not|don't)|couldn't|could not|i couldn't|invalid|no such|not found|unknown|this command only)", re.I)
+_PRIVATE_TITLE = re.compile(r"\b(error|failed|not found|invalid|couldn't|could not|unable|no results|missing|denied|private)\b", re.I)
+
+
+def looks_private(content, embed):
+    """Replies that only matter to the person who ran the command (errors, usage hints, 'not found') are sent
+    privately, so a typo doesn't leave a pile of error messages in the channel."""
+    if isinstance(content, str) and _PRIVATE_TEXT.match(content):
+        return True
+    title = getattr(embed, "title", None) if embed is not None else None
+    return bool(title and _PRIVATE_TITLE.search(str(title)))
+
+
 class SentMessage:
     def __init__(self, channel_id, data):
         data = data or {}
@@ -885,6 +898,8 @@ class Interaction:
     # -- internals used by response / followup
     def _send(self, content, embed, view, ephemeral):
         self._responded = True
+        if not ephemeral and not self._sent_first and looks_private(content, embed):
+            ephemeral = True
         if self._click is not None:
             embeds = None
             text = clean(content) if content else ""
