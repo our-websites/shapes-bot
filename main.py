@@ -2025,7 +2025,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
 
             try:
                 avatar_url = f"https://thumbnails.roblox.com/v1/users/avatar?userIds={UserID}&size=420x420&format=Png&isCircular=false"
-                response = requests.get(avatar_url)
+                response = await asyncio.to_thread(requests.get, avatar_url, timeout=10)
                 response.raise_for_status()
                 data = response.json()
                 if data and data.get("data") and len(data["data"]) > 0:
@@ -2129,14 +2129,13 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 badge_names = [b.get("name", "") for b in roblox_badges if b.get("name")]
                 badges_display = ", ".join(badge_names) if badge_names else "None"
 
-            presence_status_map = {
-                0: {'icon_url': 'https://files.catbox.moe/tjiecu.png', 'text': 'Offline'},
-                1: {'icon_url': 'https://files.catbox.moe/h69xeq.png', 'text': 'Online'},
-                2: {'icon_url': 'https://files.catbox.moe/80ta5t.png', 'text': 'In Game'},
-                3: {'icon_url': 'https://files.catbox.moe/72opoa.png', 'text': 'In Studio'}
+            presence_status_map = {      # the status shows as an emoji in the footer text (footer pictures from other hosts do not load)
+                0: {'text': '⚫ Offline'},
+                1: {'text': '🟢 Online'},
+                2: {'text': '🎮 In Game'},
+                3: {'text': '🛠️ In Studio'},
+                None: {'text': '⚪ Status unknown'},
             }
-
-            presence_status_map[None] = {'icon_url': presence_status_map[0]['icon_url'], 'text': 'Status unknown'}
             current_status = presence_status_map.get(presence_type, presence_status_map[None])
 
             def num(n):
@@ -2209,8 +2208,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 embed.set_thumbnail(url=avatar_image)
 
             embed.set_footer(
-                text=f"{current_status['text']} | Requested by {interaction.user.name} | https://our-websites.github.io/shapes.lol",
-                icon_url=current_status['icon_url']
+                text=f"{current_status['text']} | Requested by {interaction.user.name} | {MainURL}"
             )
 
             await interaction.edit_original_response(embed=embed, view=view)
