@@ -93,8 +93,47 @@ InviteURL = os.environ.get("YAPPER_INVITE_URL", "https://our-websites.github.io/
 searchengine = "621a38269031b4e89"  # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
 APIBaseURL_Key = _secret("Shapes_API_Key")
-APIBaseURL_Headers = {"Authorization": f"Bearer {APIBaseURL_Key}"}
-APIBaseURL = os.environ.get("SHAPES_API_URL", "http://localhost:25574")
+APIBaseURL = os.environ.get("SHAPES_API_URL", "http://127.0.0.1:1337").rstrip("/")
+# The token for the API's /internal routes (its INTERNAL_TOKEN). The older Shapes_API_Key secret still works.
+API_INTERNAL_TOKEN = os.environ.get("SHAPES_API_TOKEN", "").strip() or APIBaseURL_Key
+APIBaseURL_Headers = {"Authorization": f"Bearer {API_INTERNAL_TOKEN}"}
+_api_session = requests.Session()
+
+
+def api_ready():
+    return bool(API_INTERNAL_TOKEN)
+
+
+def shapes_api(method, path, body=None, timeout=5):
+    """Call the Shapes API on this machine. Returns its JSON (a dict) or None when it can't be reached.
+    A short timeout: it is on localhost, so if it doesn't answer quickly something is wrong."""
+    if not api_ready():
+        return None
+    try:
+        r = _api_session.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=timeout)
+        data = r.json()
+        return data if isinstance(data, dict) else None
+    except (requests.RequestException, ValueError):
+        return None
+
+
+_ROBLOX_LINK_CACHE = {}
+
+
+def roblox_of_yapin(yapin_id):
+    """(roblox_id, roblox_name, hidden) for a Yapin user, or None when not linked / API down."""
+    data = shapes_api("GET", f"/internal/lookup/yapin/{yapin_id}")
+    if not data or not data.get("success"):
+        return None
+    return (data.get("data"), data.get("roblox_name"), bool(data.get("hidden")))
+
+
+def yapin_of_roblox(roblox):
+    """(yapin_id, hidden) for a Roblox id or username, or None."""
+    data = shapes_api("GET", f"/internal/lookup/roblox/{urllib.parse.quote(str(roblox), safe='')}")
+    if not data or not data.get("success"):
+        return None
+    return (data.get("data"), bool(data.get("hidden")))
 GoogleAPIKey = _secret("GOOGLE_API_KEY", "GoogleToken.txt")
 SPOOK_API_KEY = _secret("SPOOK_API_KEY", "SpookToken.txt") or ""
 ADMIN_KEY = _secret("ADMIN_KEY", "akey.txt")
@@ -1031,7 +1070,12 @@ def lastfm_finish_link(state, token):
 
 
 def get_lastfm(user_id):
-    """The linked (verified) Last.fm username for a Yapin user id, or None."""
+    """The linked (verified) Last.fm username for a Yapin user id, or None. The API is the source of truth when it
+    is set up; the local copy is what older links (and a down API) fall back to."""
+    if api_ready():
+        data = shapes_api("GET", f"/internal/links/{user_id}")
+        if data and data.get("success"):
+            return (data.get("lastfm") or {}).get("name")
     entry = usersDB.get(str(user_id))
     value = entry.get("lastfm") if isinstance(entry, dict) else None
     return value.get("name") if isinstance(value, dict) else value
@@ -1039,6 +1083,8 @@ def get_lastfm(user_id):
 
 def set_lastfm(user_id, name, session_key=None):
     """Link (or with name=None, unlink) a Last.fm account; keeps whatever else is stored for the user."""
+    if not name and api_ready():
+        shapes_api("DELETE", f"/internal/links/{user_id}/lastfm")
     entry = usersDB.get(str(user_id))
     entry = dict(entry) if isinstance(entry, dict) else {}
     if name:
@@ -1097,11 +1143,17 @@ async def lastfm(interaction: discord.Interaction, action: str = "", user: disco
     action = action.lower().strip()
     uid = interaction.user.id
     if action == "link":
-        if not lastfm_ready():
-            await interaction.response.send_message("Last.fm linking isn't set up on this bot yet (the owner needs LASTFM_API_KEY, LASTFM_API_SECRET and PUBLIC_URL).", ephemeral=True)
+        link = None
+        if api_ready():
+            started = shapes_api("POST", "/internal/link/start", {"provider": "lastfm", "yapin_id": str(uid), "yapin_name": interaction.user.name})
+            link = (started or {}).get("url")
+        if not link and lastfm_ready():
+            link = lastfm_auth_url(uid)            # the bot's own flow, when the API isn't there
+        if not link:
+            await interaction.response.send_message("Last.fm linking isn't set up on this bot yet (the owner needs the Shapes API with LASTFM_API_KEY and LASTFM_API_SECRET).", ephemeral=True)
             return
         view = discord.ui.View(timeout=LASTFM_STATE_TTL)
-        view.add_item(discord.ui.Button(label="Authorize on Last.fm", style=discord.ButtonStyle.link, url=lastfm_auth_url(uid)))
+        view.add_item(discord.ui.Button(label="Authorize on Last.fm", style=discord.ButtonStyle.link, url=link))
         await interaction.response.send_message("Tap the button, approve access on Last.fm and you're linked. The link works for 10 minutes and only for you.", view=view, ephemeral=True)
         return
     if action == "unlink":
@@ -1317,41 +1369,26 @@ async def roblox2yapin(interaction: discord.Interaction, user: str):
         await interaction.edit_original_response(embed=failedembed8)
         return
 
-    url = f"{APIBaseURL}/r2d/{UserID}"
-
-    try:
-        response = requests.get(url, headers=APIBaseURL_Headers)
-        response.raise_for_status()
-        APIData = response.json()
-        print(APIData)
-        Discord = None
-        if APIData.get("data") and APIData.get("success", False) == True:
-            successembed2 = discord.Embed(
-                title=f"Discord User for {Username}",
-                description=f"[View Discord Profile](https://discord.com/users/{APIData['data']})",
-                color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
-            )
-
-            successembed2.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-            await interaction.edit_original_response(embed=successembed2)
-            return
-        else:
-            #print(f"No matching Discord user found for {Username}")
-            failedembed1 = discord.Embed(
-                title=f"No Discord User found for {Username}",
-                color=discord.Color.red()
-            )
-            await interaction.edit_original_response(embed=failedembed1)
-            return
-    except requests.exceptions.RequestException as e:
-        #print(f"Error fetching data for ID {UserID}: {e}")
-        failedembed2 = discord.Embed(
-            title=f"Error retrieving Discord User from {Username}",
-            color=discord.Color.red()
-        )
-        await interaction.edit_original_response(embed=failedembed2)
-        # await interaction.edit_original_response(f"Error retrieving Discord User from {url}")
+    found = await asyncio.to_thread(yapin_of_roblox, UserID)
+    color = embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
+    if found is None and not api_ready():
+        await interaction.edit_original_response(embed=discord.Embed(title="Linking isn't set up on this bot yet", color=discord.Color.red()))
         return
+    if found is None:
+        await interaction.edit_original_response(embed=discord.Embed(
+            title=f"No Yapin user found for {Username}",
+            description="They haven't linked their Roblox account with `/linkroblox`.", color=discord.Color.red()))
+        return
+    yapin_id, hidden = found
+    if hidden or not yapin_id:
+        await interaction.edit_original_response(embed=discord.Embed(
+            title=f"{Username} has hidden their Yapin link", color=discord.Color.red()))
+        return
+    person = await asyncio.to_thread(yshim.fetch_user, yapin_id)
+    handle = f"@{person.get('username')}" if person.get("username") else yapin_id
+    embed = discord.Embed(title=f"Yapin user for {Username}", description=f"**{person.get('display_name') or handle}** ({handle})", color=color)
+    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
+    await interaction.edit_original_response(embed=embed)
 
 
 # --- yapin2roblox ---
@@ -1369,39 +1406,21 @@ async def yapin2roblox(interaction: discord.Interaction, user: discord.User):
 
     await interaction.followup.send(embed=loading)
 
-    url = f"{APIBaseURL}/d2r/{userid}"
-
-    try:
-        response = requests.get(url, headers=APIBaseURL_Headers)
-        response.raise_for_status()
-        APIData = response.json()
-        print(APIData)
-        Roblox = None
-        if APIData.get("data") and APIData.get("success", False) == True:
-            successembed = discord.Embed(
-                title=f"Roblox Profile for {user.name}",
-                description=f"[View Roblox Profile](https://www.roblox.com/users/{APIData['data']}/profile)",
-                color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
-            )
-            successembed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-            await interaction.edit_original_response(embed=successembed)
-            return
-        else:
-            #print(f"No Roblox Profile found for {user.name}")
-            failedembed = discord.Embed(
-                title=f"No Roblox Profile found for {user.name}",
-                color=discord.Color.red()
-            )
-            await interaction.edit_original_response(embed=failedembed)
-            return
-    except requests.exceptions.RequestException as e:
-        #print(f"Error fetching data for Discord ID: {userid}: {e}")
-        failedembed3 = discord.Embed(
-            title=f"Error retrieving Roblox Profile from {user.name}",
-            color=discord.Color.red()
-        )
-        await interaction.edit_original_response(embed=failedembed3)
+    found = await asyncio.to_thread(roblox_of_yapin, userid)
+    color = embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
+    if found is None:
+        text = "Linking isn't set up on this bot yet" if not api_ready() else f"No Roblox Profile found for {user.name}"
+        await interaction.edit_original_response(embed=discord.Embed(
+            title=text, description="" if not api_ready() else "They haven't linked their Roblox account with `/linkroblox`.", color=discord.Color.red()))
         return
+    roblox_id, roblox_name, hidden = found
+    if hidden or not roblox_id:
+        await interaction.edit_original_response(embed=discord.Embed(title=f"{user.name} has hidden their Roblox link", color=discord.Color.red()))
+        return
+    embed = discord.Embed(title=f"Roblox Profile for {user.name}", color=color,
+                          description=f"[{roblox_name or roblox_id}](https://www.roblox.com/users/{roblox_id}/profile)")
+    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
+    await interaction.edit_original_response(embed=embed)
 
 
 # --- ai ---
@@ -2062,21 +2081,11 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 except Exception as e:
                     print(f"Error fetching terminated user data: {e}")
 
-            url = f"{APIBaseURL}/r2d/{UserID}"
-            try:
-                response = requests.get(url, headers={"Authorization": f"Bearer {APIBaseURL_Key}"})
-                response.raise_for_status()
-                Data = response.json()
-
-                if Data["success"] == False:
-                    Discord = None
-                elif Data["success"] == True:
-                    Discord = Data["data"]
-                else:
-                    Discord = None
-            except requests.exceptions.RequestException as e:
-                #print(f"Error fetching data for ID: {UserID}: {e}")
-                Discord = None
+            Discord = None
+            found = await asyncio.to_thread(yapin_of_roblox, UserID)
+            if found and found[0] and not found[1]:
+                person = await asyncio.to_thread(yshim.fetch_user, found[0])
+                Discord = f"@{person['username']}" if person.get("username") else found[0]
 
             profileurl = f"https://www.roblox.com/users/{UserID}/profile"
 
@@ -2199,7 +2208,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
 
             if Discord != None:
                 embed.add_field(
-                    name="Discord",
+                    name="Yapin",
                     value=f"```txt\n{Discord}\n```",
                     inline=False
                 )
@@ -3972,16 +3981,61 @@ async def asset(interaction: discord.Interaction, id: str):
 
 
 # --- linkroblox..instagram ---
-@bot.tree.command(name="linkroblox", description="Link your Roblox account to Discord")
+@bot.tree.command(name="linkroblox", description="Link your Roblox account to your Yapin account")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def linkroblox(interaction: discord.Interaction):
-    embed = discord.Embed(
-        description=f"[Click here to link your Roblox account](https://api.shapes.lol/login?type=discord)",
-        color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=False)
-    
+async def linkroblox(interaction: discord.Interaction, action: str = "link"):
+    """/linkroblox [link | status | unlink | hide | show]. Everything is private to the person using it."""
+    action = (action or "link").lower().strip()
+    uid = str(interaction.user.id)
+    color = embedDB.get(uid) if embedDB.get(uid) else discord.Color.blue()
+    if not api_ready():
+        await interaction.response.send_message("Linking isn't set up on this bot yet (the owner needs to connect it to the Shapes API).", ephemeral=True)
+        return
+    if action in ("unlink", "remove"):
+        data = await asyncio.to_thread(shapes_api, "DELETE", f"/internal/links/{uid}/roblox")
+        if data is None:
+            text = "Couldn't reach the linking service. Try again in a moment."
+        else:
+            text = "Unlinked your Roblox account." if data.get("removed") else "You didn't have a Roblox account linked."
+        await interaction.response.send_message(text, ephemeral=True)
+        return
+    if action in ("hide", "show"):
+        data = await asyncio.to_thread(shapes_api, "PATCH", f"/internal/links/{uid}/roblox", {"enabled": action == "show"})
+        if data is None:
+            text = "Couldn't reach the linking service. Try again in a moment."
+        elif not data.get("success"):
+            text = "You have no linked Roblox account. Use `/linkroblox` first."
+        else:
+            text = "Other people can now look up your link." if action == "show" else "Your link is now hidden from lookups."
+        await interaction.response.send_message(text, ephemeral=True)
+        return
+    links = await asyncio.to_thread(shapes_api, "GET", f"/internal/links/{uid}")
+    current = (links or {}).get("roblox")
+    if action in ("status", "info"):
+        if links is None:
+            text = "Couldn't reach the linking service. Try again in a moment."
+        elif not current:
+            text = "No Roblox account linked. Use `/linkroblox` to link one."
+        else:
+            text = (f"Linked to [{current.get('name') or current['id']}](https://www.roblox.com/users/{current['id']}/profile). "
+                    f"Lookups: {'on' if current.get('enabled', True) else 'hidden'}.")
+        await interaction.response.send_message(text, ephemeral=True)
+        return
+    started = await asyncio.to_thread(shapes_api, "POST", "/internal/link/start", {"provider": "roblox", "yapin_id": uid, "yapin_name": interaction.user.name})
+    if not started or not started.get("url"):
+        reason = (started or {}).get("data") or "Couldn't reach the linking service. Try again in a moment."
+        await interaction.response.send_message(str(reason), ephemeral=True)
+        return
+    embed = discord.Embed(title="Link your Roblox account", color=color, description=(
+        "Tap the button and approve access on Roblox. You'll be linked to your Yapin account as soon as you do.\n"
+        "The link works for 10 minutes and only for you."
+        + (f"\n\nCurrently linked to **{current.get('name') or current['id']}**; linking again replaces it." if current else "")))
+    view = discord.ui.View(timeout=600)
+    view.add_item(discord.ui.Button(label="Link with Roblox", style=discord.ButtonStyle.link, url=started["url"]))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
 roblox_colors = {
     1: "F2F3F3", 2: "A1A5A2", 3: "F9E999", 5: "D7C59A", 6: "C2DAB8", 9: "E8BAC8",
     11: "80BBDB", 12: "CB8442", 18: "CC8E69", 21: "C4281C", 22: "C470A0", 23: "0D69AC",
