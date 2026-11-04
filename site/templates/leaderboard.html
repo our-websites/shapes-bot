@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Counting Leaderboard - Shapes</title>
+  <link rel="icon" type="image/png" href="https://our-websites.github.io/cdn.shapes.lol/shapes/favicon.ico">
+  <meta name="theme-color" content="#111111">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Stack+Sans+Notch:wght@200..700&family=Poppins:wght@300;400;600;800&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/counting-lb.css">
+</head><body>
+<div class="leaderboard-container">
+  <h1>Counting Leaderboard</h1>
+  <p style="text-align:center"><a href="/" style="color:inherit">Home</a> · <a href="/dashboard" style="color:inherit">Dashboard</a></p>
+  {% include "_pager.html" %}
+  <table id="leaderboard"><thead><tr><th>Server name</th><th>Current number</th><th>Highest number</th></tr></thead>
+  <tbody>{% for s in items %}<tr><td data-label="server name">{{ s.name }}</td><td data-label="current number">{{ "{:,}".format(s.current) }}</td><td data-label="highest number">{{ "{:,}".format(s.highest) }}</td></tr>
+  {% else %}<tr><td colspan="3">No servers are counting yet.</td></tr>{% endfor %}</tbody></table>
+</div></body></html>

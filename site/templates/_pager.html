@@ -1,0 +1,5 @@
+<div class="pagination-controls">
+  {% if page > 1 %}<a class="nav-button" href="?page={{ page - 1 }}">&larr; Previous</a>{% else %}<button class="nav-button" disabled>&larr; Previous</button>{% endif %}
+  <span id="page-info">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a class="nav-button" href="?page={{ page + 1 }}">Next &rarr;</a>{% else %}<button class="nav-button" disabled>Next &rarr;</button>{% endif %}
+</div>

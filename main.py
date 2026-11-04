@@ -5112,9 +5112,23 @@ def cached(key, ttl, fn):
     return value
 
 
+# Yapin user ids that may open the bot-owner dashboard (the /admin tab); defaults to the bot owners.
+ADMIN_USER_IDS = {x.strip() for x in (os.environ.get("ADMIN_USER_IDS") or os.environ.get("OWNER_IDS", "")).split(",") if x.strip()}
+
+
+def is_staff_user(user_id):
+    return str(user_id) in ADMIN_USER_IDS
+
+
+def _is_admin_session():
+    """The admin key was entered, or this is a signed-in Yapin user whose id is on the staff list."""
+    user = session.get("yuser")
+    return session.get("admin") is True or (isinstance(user, dict) and is_staff_user(user.get("id")))
+
+
 def admin_required(f):
     def wrapped(*args, **kwargs):
-        if session.get("admin") is not True:
+        if not _is_admin_session():
             if request.path.startswith("/api/") or request.path == "/mutuals":
                 return jsonify({"error": "login required"}), 401
             return redirect(url_for("admin_login"))
@@ -5215,7 +5229,7 @@ def _too_many_logins(ip):
 
 @app.route("/login", methods=["GET", "POST"])
 def admin_login():
-    if session.get("admin") is True:
+    if _is_admin_session():
         return redirect(url_for("dashboard"))
     error = None
     if request.method == "POST":
@@ -5247,7 +5261,7 @@ def _server_rows():
     return rows
 
 
-@app.route("/", methods=["GET"])
+@app.route("/admin", methods=["GET"])
 @admin_required
 def dashboard():
     if not bot_ready:
@@ -5719,15 +5733,6 @@ def api_automod(server_id):
     return jsonify(get_automod(server_id))
 
 
-@app.route("/commands", methods=["GET"])
-def send_commands():
-    out = {}
-    for name, spec in yshim.tree.commands.items():
-        out[name] = {"name": name, "description": spec.description, "usage": spec.usage,
-                     "options": [p.name for p in spec.params], "type": "slash_command"}
-    return jsonify({"Commands": out, "success": True}), 200
-
-
 @app.route("/count/commands", methods=["GET"])
 def get_command_count():
     return {"Commands": str(len(yshim.tree.commands))}, 200
@@ -5808,6 +5813,10 @@ def mutualservers():
             servers[sid] = entry
         return servers
     return {"Servers": cached("mutuals", 60, build)}, 200
+
+
+import userdash
+userdash.register(sys.modules[__name__])      # the public website and the user dashboard
 
 
 # =====================================================================================

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Commands - Shapes</title>
+  <link rel="icon" type="image/png" href="https://our-websites.github.io/cdn.shapes.lol/shapes/favicon.ico">
+  <meta name="theme-color" content="#111111">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Stack+Sans+Notch:wght@200..700&family=Poppins:wght@300;400;600;800&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/command-list.css">
+</head><body>
+<div id="command-container">
+  <h1>Command List</h1>
+  <p style="text-align:center"><a href="/" style="color:inherit">Home</a> · <a href="/dashboard" style="color:inherit">Dashboard</a></p>
+  {% include "_pager.html" %}
+  <div id="commands" class="commands-grid">
+    {% for c in items %}
+    <div class="command-card"><h2 class="command-name">/{{ c.name }}</h2><p class="command-description">{{ c.description }}</p><p class="command-type">{{ c.usage or "Slash" }}</p></div>
+    {% endfor %}
+  </div>
+</div></body></html>

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard · Shapes</title>
+<link rel="icon" type="image/png" href="https://our-websites.github.io/cdn.shapes.lol/shapes/favicon.ico">
+<style>
+  :root { --bg:#f4f3f0; --panel:#fff; --ink:#1d1c1a; --muted:#6d6a64; --line:#dcd9d2; --accent:#2f4fd1; --accent-ink:#fff; --danger:#b3261e; --ok:#1f7a3d; --field:#fbfaf8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#151514; --panel:#1d1d1b; --ink:#ecebe7; --muted:#9a978f; --line:#33322f; --accent:#7c93f5; --accent-ink:#11131c; --danger:#f2877f; --ok:#6fcf8d; --field:#171716; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color: var(--accent); }
+  header { display:flex; align-items:center; gap:12px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+  header .brand { font-weight:650; letter-spacing:-.01em; text-decoration:none; color:inherit; }
+  header .grow { flex:1; }
+  .me { display:flex; align-items:center; gap:8px; font-size:14px; }
+  .avatar { width:28px; height:28px; border-radius:50%; background:var(--line); object-fit:cover; }
+  nav.tabs { display:flex; gap:4px; padding:0 20px; border-bottom:1px solid var(--line); background:var(--panel); overflow-x:auto; }
+  nav.tabs button { font:inherit; background:none; border:0; border-bottom:2px solid transparent; padding:11px 12px; color:var(--muted); cursor:pointer; white-space:nowrap; }
+  nav.tabs button[aria-selected=true] { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+  main { max-width:960px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; letter-spacing:-.015em; } h2 { font-size:17px; margin:0 0 10px; } p.sub { margin:0 0 18px; color:var(--muted); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .server { display:flex; align-items:center; gap:12px; cursor:pointer; text-align:left; font:inherit; color:inherit; width:100%; }
+  .server:hover { border-color:var(--accent); } .server .meta { min-width:0; } .server .name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .server .small { color:var(--muted); font-size:13px; }
+  .icon { width:44px; height:44px; border-radius:12px; background:var(--line); flex:none; object-fit:cover; display:grid; place-items:center; font-weight:700; color:var(--muted); }
+  .back { background:none; border:0; color:var(--accent); font:inherit; cursor:pointer; padding:0; margin-bottom:12px; }
+  section.panel { margin-bottom:16px; } .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:10px 0; }
+  label { font-size:13px; font-weight:600; display:block; margin-bottom:4px; } .field { flex:1 1 200px; min-width:160px; }
+  input[type=text], input[type=number], select, textarea { width:100%; font:inherit; color:inherit; background:var(--field); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  textarea { min-height:70px; resize:vertical; } input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .check { display:flex; align-items:center; gap:8px; font-weight:500; } .check input { width:auto; }
+  .rules { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; } .rule { border:1px solid var(--line); border-radius:10px; padding:10px; } .rule .row { margin:6px 0 0; }
+  button.primary { font:inherit; font-weight:600; background:var(--accent); color:var(--accent-ink); border:0; border-radius:8px; padding:8px 14px; cursor:pointer; }
+  button.ghost { font:inherit; background:none; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:8px 14px; cursor:pointer; }
+  .status { font-size:14px; min-height:1.4em; } .status.ok { color:var(--ok); } .status.err { color:var(--danger); }
+  .stat { display:inline-block; margin-right:16px; } .stat b { font-size:18px; display:block; }
+  .empty { color:var(--muted); padding:24px 0; text-align:center; }
+  .badge { font-size:12px; border:1px solid var(--line); border-radius:999px; padding:1px 8px; color:var(--muted); }
+  iframe#admin { width:100%; height:calc(100vh - 130px); border:1px solid var(--line); border-radius:12px; background:var(--panel); }
+  .login { max-width:380px; margin:12vh auto; text-align:center; } .login p { color:var(--muted); }
+  .login a.btn { display:inline-block; margin-top:8px; text-decoration:none; font-weight:600; background:var(--accent); color:var(--accent-ink); padding:11px 18px; border-radius:10px; }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">Shapes</a><span class="badge">Dashboard</span><span class="grow"></span>
+  <div class="me" id="me"></div>
+</header>
+<div id="app"></div>
+<script>
+const BOOT = __BOOT__;
+const $ = (s, el = document) => el.querySelector(s);
+function h(tag, props = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') el.className = v; else if (k.startsWith('on')) { if (v) el.addEventListener(k.slice(2), v); }
+    else if (v !== false && v != null) el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : document.createTextNode(kid));
+  return el;
+}
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401) { location.href = '/dashboard'; throw new Error('signed out'); }
+  if (!r.ok) throw new Error(data.error || ('Request failed (' + r.status + ')'));
+  return data;
+}
+const app = $('#app');
+const icon = s => s.icon ? h('img', { class: 'icon', src: s.icon, alt: '', loading: 'lazy' }) : h('div', { class: 'icon' }, (s.name || '?')[0].toUpperCase());
+
+function renderHeader() {
+  const me = $('#me'); me.replaceChildren();
+  if (!BOOT.user) return;
+  const u = BOOT.user;
+  me.append(u.avatar ? h('img', { class: 'avatar', src: u.avatar, alt: '' }) : h('div', { class: 'avatar' }), h('span', {}, u.display || u.name), h('a', { href: '/dashboard/logout' }, 'Sign out'));
+}
+
+function loginPage() {
+  app.replaceChildren(h('div', { class: 'login' },
+    h('h1', {}, 'Shapes dashboard'),
+    h('p', {}, 'Sign in with Yapin’ to manage your servers’ automod, counting and autorole, or see how the servers you’re in are doing.'),
+    BOOT.login ? h('a', { class: 'btn', href: '/dashboard/login' }, 'Login with Yapin’') : h('p', { class: 'status err' }, 'Login isn’t set up on this bot yet.')));
+}
+
+let tab = 'manage', listing = null;
+function tabs() {
+  const defs = [['manage', 'My servers'], ['other', 'Other servers']];
+  if (BOOT.staff) defs.push(['admin', 'Admin']);
+  return h('nav', { class: 'tabs', role: 'tablist' }, defs.map(([id, label]) =>
+    h('button', { role: 'tab', 'aria-selected': tab === id, onclick: () => { tab = id; show(); } }, label)));
+}
+
+async function show() {
+  app.replaceChildren(tabs(), h('main', {}, h('div', { id: 'view' }, h('div', { class: 'empty' }, 'Loading…'))));
+  const view = $('#view');
+  if (tab === 'admin') { view.replaceWith(h('iframe', { id: 'admin', src: '/admin', title: 'Admin dashboard' })); $('main').style.maxWidth = 'none'; return; }
+  try { listing = listing || await api('/me/servers'); } catch (e) { view.replaceChildren(h('div', { class: 'empty status err' }, e.message)); return; }
+  const rows = listing[tab];
+  const head = tab === 'manage'
+    ? [h('h1', {}, 'My servers'), h('p', { class: 'sub' }, 'Servers with Shapes where you’re the owner, an administrator, or have a role with manage server.')]
+    : [h('h1', {}, 'Other servers'), h('p', { class: 'sub' }, 'Servers with Shapes where you’re a member without manage-server access. You can see how their counting is going, but not change settings.')];
+  view.replaceChildren(...head, rows.length
+    ? h('div', { class: 'grid' }, rows.map(s => h(tab === 'manage' ? 'button' : 'div', { class: 'card server', onclick: tab === 'manage' ? () => openServer(s) : null },
+        icon(s), h('div', { class: 'meta' }, h('div', { class: 'name' }, s.name),
+          h('div', { class: 'small' }, [s.members ? s.members.toLocaleString() + ' members' : null, s.counting ? ('Counting: ' + s.counting.current.toLocaleString() + ' (best ' + s.counting.highest.toLocaleString() + ')') : null].filter(Boolean).join(' · '))))))
+    : h('div', { class: 'empty' }, tab === 'manage' ? 'You don’t manage any server that has Shapes.' : 'No other servers with Shapes.'));
+}
+
+function field(label, input, cls = 'field') { return h('div', { class: cls }, h('label', {}, label), input); }
+function check(label, checked, id) { const i = h('input', { type: 'checkbox', id }); i.checked = !!checked; return [h('label', { class: 'check' }, i, label), i]; }
+function select(options, value, empty) {
+  const s = h('select', {}, empty != null ? h('option', { value: '' }, empty) : null, options.map(o => h('option', { value: o.id }, o.label)));
+  s.value = value || ''; return s;
+}
+function num(value, min, max) { return h('input', { type: 'number', min, max, value }); }
+function lines(arr) { return (arr || []).join('\n'); }
+function save(btn, status, fn) {
+  btn.addEventListener('click', async () => {
+    btn.disabled = true; status.className = 'status'; status.textContent = 'Saving…';
+    try { await fn(); status.className = 'status ok'; status.textContent = 'Saved.'; } catch (e) { status.className = 'status err'; status.textContent = e.message; }
+    btn.disabled = false;
+  });
+}
+function panel(title, about, ...body) { return h('section', { class: 'card panel' }, h('h2', {}, title), about ? h('p', { class: 'sub' }, about) : null, ...body); }
+
+async function openServer(s) {
+  const view = $('#view'); view.replaceChildren(h('div', { class: 'empty' }, 'Loading…'));
+  let d; try { d = await api('/me/servers/' + encodeURIComponent(s.id)); } catch (e) { view.replaceChildren(h('div', { class: 'empty status err' }, e.message)); return; }
+  const sid = encodeURIComponent(s.id), chans = d.channels.map(c => ({ id: c.id, label: '#' + c.name + (c.category ? ' · ' + c.category : '') })), roles = d.roles.map(r => ({ id: r.id, label: r.name }));
+  const back = h('button', { class: 'back', onclick: () => show() }, '← All servers');
+  const title = h('div', { class: 'row' }, icon(d.server), h('div', {}, h('h1', {}, d.server.name), h('div', { class: 'small' }, d.server.members ? d.server.members.toLocaleString() + ' members' : '')));
+
+  // --- counting
+  const c = d.counting;
+  const [cEnLabel, cEn] = check('Counting enabled', c.enabled);
+  const cCh = select(chans, c.channel, 'No channel');
+  const em = { correct: h('input', { type: 'text', value: c.emojis.correct, maxlength: 64 }), warning: h('input', { type: 'text', value: c.emojis.warning, maxlength: 64 }), wrong: h('input', { type: 'text', value: c.emojis.wrong, maxlength: 64 }) };
+  const cSave = h('button', { class: 'primary' }, 'Save counting'), cReset = h('button', { class: 'ghost' }, 'Reset count to 0'), cStatus = h('div', { class: 'status' });
+  const cStats = h('div', {}, h('span', { class: 'stat' }, 'Current', h('b', {}, c.number.toLocaleString())), h('span', { class: 'stat' }, 'Highest', h('b', {}, c.highestnumber.toLocaleString())),
+    h('span', { class: 'stat' }, 'Warnings', h('b', {}, c.warnings + '/3')), c.lastcounter ? h('span', { class: 'stat' }, 'Last counter', h('b', {}, c.last_name ? '@' + c.last_name : c.lastcounter)) : null);
+  const countingBody = () => ({ enabled: cEn.checked, channel: cCh.value, emojis: { correct: em.correct.value, warning: em.warning.value, wrong: em.wrong.value } });
+  save(cSave, cStatus, async () => { await api('/me/servers/' + sid + '/counting', countingBody()); });
+  save(cReset, cStatus, async () => { const r = await api('/me/servers/' + sid + '/counting', { reset: true }); cStats.replaceWith(h('div', {}, 'Count reset to 0. Reload to see it.')); });
+  const counting = panel('Counting', 'Pick the channel and the emoji the bot reacts with.', cStats,
+    h('div', { class: 'row' }, cEnLabel, field('Channel', cCh)),
+    h('div', { class: 'row' }, field('Correct emoji', em.correct, 'field'), field('Warning emoji', em.warning, 'field'), field('Wrong emoji', em.wrong, 'field')),
+    h('div', { class: 'row' }, cSave, cReset, cStatus));
+
+  // --- autorole
+  const a = d.autorole;
+  const [aEnLabel, aEn] = check('Autorole enabled', a.enabled), [aBotLabel, aBots] = check('Also give it to bots', a.include_bots);
+  const aRole = select(roles, a.role_id, 'No role'), aEx = h('textarea', { placeholder: 'One user id per line' }, lines(a.exempt_users));
+  const aSave = h('button', { class: 'primary' }, 'Save autorole'), aStatus = h('div', { class: 'status' });
+  save(aSave, aStatus, () => api('/me/servers/' + sid + '/autorole', { enabled: aEn.checked, role_id: aRole.value, include_bots: aBots.checked, exempt_users: aEx.value.split(/[\s,]+/).filter(Boolean) }));
+  const autorole = panel('Autorole', 'A role new members get when they join. Exempt people never get it.',
+    h('div', { class: 'row' }, aEnLabel, aBotLabel, field('Role', aRole)), field('Exempt user ids', aEx, 'row'), h('div', { class: 'row' }, aSave, aStatus));
+
+  // --- automod
+  const m = d.automod, r = m.rules, act = m.actions;
+  const [mEnLabel, mEn] = check('Automod enabled', m.enabled);
+  const mLog = select(chans, m.log_channel, 'No log channel');
+  const ruleOn = {}, rule = (key, title, ...inner) => { const [l, i] = check(title, r[key].on); ruleOn[key] = i; return h('div', { class: 'rule' }, l, ...inner); };
+  const words = h('textarea', { placeholder: 'One blocked word per line' }, lines(r.words.list)), allow = h('textarea', { placeholder: 'Allowed domains, one per line' }, lines(r.links.allow));
+  const capsP = num(r.caps.percent, 30, 100), capsM = num(r.caps.min_length, 1, 200), spamC = num(r.spam.count, 2, 30), spamS = num(r.spam.seconds, 1, 120), menL = num(r.mentions.limit, 1, 50);
+  const [delL, delI] = check('Delete the message', act.delete), [warnL, warnI] = check('Warn the person', act.warn);
+  const toA = num(act.timeout_after, 0, 50), toM = num(act.timeout_minutes, 1, 40320), kA = num(act.kick_after, 0, 50), stM = num(act.strike_minutes, 1, 1440);
+  const exRoles = h('select', { multiple: true, size: 5 }, roles.map(o => h('option', { value: o.id }, o.label)));
+  [...exRoles.options].forEach(o => { o.selected = m.exempt_roles.includes(o.value); });
+  const exCh = h('select', { multiple: true, size: 5 }, chans.map(o => h('option', { value: o.id }, o.label)));
+  [...exCh.options].forEach(o => { o.selected = m.exempt_channels.includes(o.value); });
+  const mSave = h('button', { class: 'primary' }, 'Save automod'), mStatus = h('div', { class: 'status' });
+  save(mSave, mStatus, () => api('/me/servers/' + sid + '/automod', {
+    enabled: mEn.checked, log_channel: mLog.value || null,
+    exempt_roles: [...exRoles.selectedOptions].map(o => o.value), exempt_channels: [...exCh.selectedOptions].map(o => o.value),
+    rules: { words: { on: ruleOn.words.checked, list: words.value }, links: { on: ruleOn.links.checked, allow: allow.value }, invites: { on: ruleOn.invites.checked },
+      caps: { on: ruleOn.caps.checked, percent: capsP.value, min_length: capsM.value }, spam: { on: ruleOn.spam.checked, count: spamC.value, seconds: spamS.value }, mentions: { on: ruleOn.mentions.checked, limit: menL.value } },
+    actions: { delete: delI.checked, warn: warnI.checked, timeout_after: toA.value, timeout_minutes: toM.value, kick_after: kA.value, strike_minutes: stM.value } }));
+  const automod = panel('Automod', 'Rule breakers get their message removed and a strike; enough strikes in a short time means a timeout or kick.',
+    h('div', { class: 'row' }, mEnLabel, field('Log channel', mLog)),
+    h('div', { class: 'rules' },
+      rule('words', 'Blocked words', words), rule('links', 'Links', allow), rule('invites', 'Server invites'),
+      rule('caps', 'Too many capitals', h('div', { class: 'row' }, field('Percent', capsP), field('Min length', capsM))),
+      rule('spam', 'Spam', h('div', { class: 'row' }, field('Messages', spamC), field('In seconds', spamS))),
+      rule('mentions', 'Mass mentions', h('div', { class: 'row' }, field('Max mentions', menL)))),
+    h('h2', { style: 'margin-top:16px' }, 'Punishments'), h('div', { class: 'row' }, delL, warnL),
+    h('div', { class: 'row' }, field('Timeout after (strikes, 0 = never)', toA), field('Timeout minutes', toM), field('Kick after (strikes, 0 = never)', kA), field('Strikes expire after (minutes)', stM)),
+    h('div', { class: 'row' }, field('Exempt roles (hold Ctrl/Cmd to pick several)', exRoles), field('Exempt channels', exCh)),
+    h('div', { class: 'row' }, mSave, mStatus));
+
+  view.replaceChildren(back, title, counting, autorole, automod);
+}
+
+renderHeader();
+if (!BOOT.user) loginPage(); else show();
+</script>
+</body>
+</html>

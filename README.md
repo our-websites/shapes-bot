@@ -37,3 +37,14 @@ To copy old data across, run `python migrate_pickledb.py`.
 3. Users run `/lastfm link`, tap the button, approve on Last.fm. `/lastfm unlink` removes it. `/lastfm [@user]` shows now playing, and the link shows on `/yapinuser`.
 
 Profile lookups are cached for 60 seconds, so heavy use stays well under Last.fm's rate limit.
+
+## Website and dashboard
+
+The bot's web server now serves the public site (`/`, `/commands`, `/about`, `/counting/leaderboard/`) straight from the
+bot's own data, and a dashboard at `/dashboard`:
+
+- **Login with Yapin'** goes through the Shapes API (`api.shapes.lol` repo). Put `YAPIN_CLIENT_ID` / `YAPIN_CLIENT_SECRET` in the API's `.env`, register `${API PUBLIC_URL}/auth/yapin/callback` as the redirect, and list this site's host in the API's `YAPIN_RETURN_HOSTS`.
+- **My servers**: owners, administrators and people with a manage-server role can edit automod, counting (channel, emoji) and autorole.
+- **Other servers**: servers you're in with Shapes but can't manage (read-only counting stats).
+- **Admin** (only for `ADMIN_USER_IDS`): the bot-owner dashboard, also reachable at `/admin` (the `ADMIN_KEY` login still works).
+- Activities live in `activity/` and are public under `/activity`.
