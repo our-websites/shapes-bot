@@ -138,6 +138,7 @@ def register(m):
         ticket = request.args.get("ticket", "")
         data = m.shapes_api("GET", f"/internal/yapin/ticket/{urllib.parse.quote(ticket, safe='')}") if ticket else None
         info = (data or {}).get("user")
+        print(data)
         if not info or not info.get("id"):
             return Response("<!doctype html><meta charset=utf-8><body style='font-family:system-ui;max-width:28rem;margin:4rem auto'>"
                             "<h2>Login failed</h2><p>The login expired. <a href='/dashboard/login'>Try again</a>.</p>", status=400, mimetype="text/html")
@@ -361,8 +362,8 @@ def register(m):
         ids = list(dict.fromkeys(str(i).strip() for i in (body.get("user_ids") or []) if str(i).strip()))
         if not text or len(text) > 1500:
             return jsonify({"error": "Write a message (1500 characters at most)."}), 400
-        if not ids or len(ids) > 25:
-            return jsonify({"error": "Pick between 1 and 25 members."}), 400
+        if not ids or len(ids) > 50:
+            return jsonify({"error": "Pick between 1 and 50 members."}), 400
         if too_fast("dm", 10, 3600):
             return jsonify({"error": "You've sent a lot of DMs this hour. Try again later."}), 429
         people = {p["id"] for p in m.cached(f"people:{sid}", 60, lambda: m._all_members(sid, limit=3000))}

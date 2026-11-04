@@ -430,7 +430,7 @@ def _color_view(user_id):
 
 @bot.tree.command(name="status", description=f"Get the {MainURL} status")
 async def status_command(interaction: discord.Interaction):
-    await interaction.response.send_message(f"[shapes.lol Status Page](https://shapes.lol/status)")
+    await interaction.response.send_message(f"[Shapes Status](https://status.lecanact.me)")
 
 
 def _save_everything():
@@ -493,7 +493,7 @@ async def restart(interaction: discord.Interaction):
     await interaction.response.send_message(":white_check_mark: Restarting...", ephemeral=True)
     _save_everything()
     print("Bot restart initiated by command")
-    _shutdown_services()    # frees port 5004 first: starting a second server on it was what broke restarts
+    _shutdown_services()    # frees port first: starting a second server on it was what broke restarts
 
     def relaunch():
         try:
@@ -531,7 +531,7 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
     if action == "toggle":
         data["enabled"] = not data["enabled"]
         countingDB.set(sid, data)
-        await interaction.response.send_message(f"Counting {'enabled' if data['enabled'] else 'disabled'}.")
+        await interaction.response.send_message(f"Counting {'enabled' if data['enabled'] else 'disabled'}.", ephemeral=True)
         return
     if action == "channel":
         ch = resolve_channel(sid, value) if value else None
@@ -540,7 +540,7 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
             return
         data["channel"] = str(ch.get("id"))
         countingDB.set(sid, data)
-        await interaction.response.send_message(f"Counting channel set to <#{ch.get('id')}>.")
+        await interaction.response.send_message(f"Counting channel set to <#{ch.get('id')}>.", ephemeral=True)
         return
     if action in ("emoji", "emojis"):
         parts = value.split(None, 1)
@@ -977,7 +977,7 @@ def _latency_ms():
 
 
 def _quality(ms):
-    return "Good" if ms < 200 else "Average" if ms < 400 else "Poor"
+    return "Great" if ms < 100 else "Good" if ms < 200 else "Average" if ms < 400 else "Poor"
 
 
 @bot.tree.command(name="ping", description="Check the bot's latency.")
@@ -5314,7 +5314,7 @@ def on_ready(me):
     global bot_ready
     bot_ready = True
     try:
-        bot.set_status("online", "🔗 our-websites.github.io/shapes.lol")
+        bot.set_status("online", "🔗 shapes-yapper.oriaxen.com")
     except Exception as e:
         print(f"could not set status: {e}")
     print(f"[SYSTEM] Logged in as {me.username}, watching {len(bot.servers())} servers. Storage: {__import__('cfstore').backend_summary()}")
