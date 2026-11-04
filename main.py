@@ -115,6 +115,7 @@ autoroleDB = CloudflareD1("autorole")
 AI_DB = CloudflareD1("ai")
 automodDB = CloudflareD1("automod")
 auditDB = CloudflareD1("audit")     # who changed what from the dashboard
+actionsDB = CloudflareD1("actions")   # who did what from the dashboard: sends, DMs, settings, with username and time
 dmDB = CloudflareD1("dms")       # DM channels the dashboard knows about: user id -> {channel_id, name, last}
 DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "autoroleDB": autoroleDB, "AI_DB": AI_DB,
              "automodDB": automodDB, "dmDB": dmDB, "auditDB": auditDB}
@@ -5492,27 +5493,79 @@ def api_messages(channel_id):
         return _api_error(e)
 
 
-def _announcement_embed(title, text, image_url):
+def current_actor():
+    """(id, name, is_bot_staff) of whoever is using the dashboard right now. The admin key has no identity of its own."""
+    user = session.get("yuser")
+    if isinstance(user, dict) and user.get("id"):
+        return str(user["id"]), str(user.get("name") or user["id"]), is_staff_user(user["id"])
+    if session.get("admin") is True:
+        return "admin-key", "admin key", True
+    return "unknown", "unknown", False
+
+
+_ACTION_KEEP = 2000
+_last_trim = 0.0
+
+
+def log_action(kind, detail, server_id=None, target=None):
+    """Write down who did what and when (shown in the dashboards, so people can refer back to it)."""
+    uid, name, _ = current_actor()
+    stamp = time.time()
+    actionsDB.set(f"{int(stamp * 1000)}-{os.urandom(2).hex()}", {
+        "at": int(stamp), "actor_id": uid, "actor": name, "kind": kind, "detail": str(detail)[:500],
+        "server_id": str(server_id) if server_id else None, "target": str(target)[:200] if target else None})
+    print(f"[action] @{name} {kind}: {str(detail)[:120]}" + (f" (server {server_id})" if server_id else ""))
+    global _last_trim
+    if time.time() - _last_trim < 3600:
+        return
+    _last_trim = time.time()
+    rows = sorted(actionsDB.items().items())
+    for key, _row in rows[:max(0, len(rows) - _ACTION_KEEP)]:         # keep the newest 2000
+        actionsDB.remove(key)
+
+
+def action_rows(server_id=None, limit=100):
+    rows = [v for v in actionsDB.items().values() if isinstance(v, dict) and (server_id is None or v.get("server_id") == str(server_id))]
+    return sorted(rows, key=lambda r: -int(r.get("at") or 0))[:limit]
+
+
+def _stamp_text(name, where=None):
+    return f"Sent by @{name}" + (f" from {where}" if where else "") + " · " + time.strftime("%b %d, %Y %H:%M UTC", time.gmtime())
+
+
+def _announcement_embed(title, text, image_url, footer=None):
     embed = {"description": text}
     if title:
         embed["title"] = title
     if image_url:
         embed["image"] = {"url": image_url}
+    if footer:
+        embed["footer"] = {"text": footer}
     return embed
 
 
-def _post_with_optional_image(channel_id, text, image_url, title=None):
-    """Plain text when there is no image or title; otherwise an embed. If the server refuses embeds, falls back to
-    text with the image link (which the dashboard and Yapin turn into a link)."""
-    if not image_url and not title:
+def _post_with_optional_image(channel_id, text, image_url, title=None, footer=None):
+    """Plain text when there is no image, title or sender line; otherwise an embed. If the server refuses embeds, falls
+    back to text with the image link and the sender line."""
+    if not image_url and not title and not footer:
         return bot.send(channel_id, text)
     try:
-        return bot.send(channel_id, "", embeds=[_announcement_embed(title, text, image_url)])
+        return bot.send(channel_id, "", embeds=[_announcement_embed(title, text, image_url, footer)])
     except yapper.YapperError as e:
         if e.status not in (400, 422):
             raise
-        parts = [p for p in (f"**{title}**" if title else "", text, image_url) if p]
+        parts = [p for p in (f"**{title}**" if title else "", text, image_url, f"*{footer}*" if footer else "") if p]
         return bot.send(channel_id, "\n\n".join(parts))
+
+
+def send_as_bot(channel_id, text, image=None, title=None, where=None, hidden=False):
+    """Post as the bot and, unless a bot admin chose to hide it, say who it is from (and when). Returns the footer used."""
+    uid, name, staff = current_actor()
+    if hidden and not staff:
+        raise PermissionError("Only bot admins can hide who a message is from.")
+    footer = None if hidden else _stamp_text(name, where)
+    _post_with_optional_image(channel_id, text, image, title, footer)
+    return footer
 
 
 def _valid_image(url):
@@ -5536,9 +5589,14 @@ def api_send(channel_id):
         return jsonify({"error": str(e)}), 400
     if not text and not image:
         return jsonify({"error": "Write a message or add an image link."}), 400
+    hidden = body.get("hidden") is True
     try:
-        _post_with_optional_image(channel_id, text, image)
+        # A DM channel is only ever a bot admin's doing here, so it follows the same hidden option.
+        send_as_bot(channel_id, text, image, hidden=hidden)
+        log_action("send", ("(hidden sender) " if hidden else "") + text[:200], target=f"channel {channel_id}")
         return jsonify({"ok": True})
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
     except yapper.YapperError as e:
         return _api_error(e)
 
@@ -5611,6 +5669,54 @@ def api_dm_open():
         return _api_error(e)
 
 
+def dm_people(user_ids, text, title=None, image=None, where=None, hidden=False, delay=0.5):
+    """DM each person as the bot. Returns [{user_id, ok, error?}]; one failure (DMs closed) never stops the rest."""
+    uid, name, staff = current_actor()
+    if hidden and not staff:
+        raise PermissionError("Only bot admins can hide who a message is from.")
+    footer = None if hidden else _stamp_text(name, where)
+    results = []
+    for target in user_ids:
+        try:
+            _post_with_optional_image(bot.dm(target), text, image, title, footer)
+            results.append({"user_id": target, "ok": True})
+        except Exception as e:
+            results.append({"user_id": target, "ok": False, "error": str(e)[:120]})
+        time.sleep(delay)
+    return results
+
+
+@app.route("/api/dm/send", methods=["POST"])
+@admin_required
+def api_dm_send():
+    """Bot staff: DM one person, a pasted list, or everyone you pick, e.g. for an announcement that matters more."""
+    body = request.get_json(silent=True) or {}
+    text, title = str(body.get("message", "")).strip(), str(body.get("title", "")).strip()
+    ids = body.get("user_ids")
+    ids = _user_ids(ids) if isinstance(ids, str) else [str(i).strip().strip("<@!>") for i in (ids or []) if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not text:
+        return jsonify({"error": "Write the message first."}), 400
+    if not ids:
+        return jsonify({"error": "Pick at least one person."}), 400
+    if len(ids) > 200:
+        return jsonify({"error": "That's more than 200 people at once; split it up."}), 400
+    try:
+        image = _valid_image(body.get("image_url"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    hidden = body.get("hidden") is True
+    results = dm_people(ids, text, title or None, image, hidden=hidden, delay=0.5)
+    log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], target=f"{len(ids)} people: " + ", ".join(ids[:8]) + ("…" if len(ids) > 8 else ""))
+    return jsonify({"sent": sum(r["ok"] for r in results), "failed": [r for r in results if not r["ok"]]})
+
+
+@app.route("/api/actions")
+@admin_required
+def api_actions():
+    return jsonify({"actions": action_rows(request.args.get("server") or None, 200)})
+
+
 # --- announcements to every server ---
 
 _ANNOUNCE_NAMES = ("announcements", "announcement", "news", "updates", "general", "chat", "main", "lobby")
@@ -5642,11 +5748,11 @@ def api_announce_targets():
     return jsonify({"servers": out})
 
 
-def _run_announcement(job_id, text, title, image, targets):
+def _run_announcement(job_id, text, title, image, targets, footer=None):
     job = _jobs[job_id]
     for sid, channel_id in targets.items():
         try:
-            _post_with_optional_image(channel_id, text, image, title)
+            _post_with_optional_image(channel_id, text, image, title, footer)
             job["results"].append({"server": sid, "ok": True})
         except Exception as e:
             job["results"].append({"server": sid, "ok": False, "error": str(e)})
@@ -5668,11 +5774,15 @@ def api_announce():
     targets = {str(k): str(v) for k, v in (body.get("targets") or {}).items() if v}
     if not targets:
         return jsonify({"error": "Pick at least one server."}), 400
+    hidden = body.get("hidden") is True
+    _, name, staff = current_actor()
+    footer = None if hidden and staff else _stamp_text(name)
+    log_action("announce", ("(hidden sender) " if hidden and staff else "") + (title + ": " if title else "") + text[:200], target=f"{len(targets)} servers")
     job_id = secrets_token()
     _jobs[job_id] = {"total": len(targets), "results": [], "done": False, "started": time.time()}
     for old in [k for k, v in _jobs.items() if time.time() - v["started"] > 3600]:
         _jobs.pop(old, None)
-    threading.Thread(target=_run_announcement, args=(job_id, text, title, image, targets), daemon=True, name="announce").start()
+    threading.Thread(target=_run_announcement, args=(job_id, text, title, image, targets, footer), daemon=True, name="announce").start()
     return jsonify({"job": job_id, "total": len(targets)})
 
 
@@ -5772,6 +5882,10 @@ def _audit(db, key, action, before, after):
     auditDB.set(f"{int(stamp * 1000)}", {"at": int(stamp), "db": db, "key": key, "action": action,
                                           "before": json.dumps(before)[:2000], "after": json.dumps(after)[:2000]})
     print(f"[data edit] {action} {db}[{key}] from the dashboard")
+    try:
+        log_action("data", f"{action} {db}", server_id=key if db in ("countingDB", "autoroleDB", "automodDB") or db.startswith("dashboard:") else None, target=f"{db}[{key}]")
+    except Exception as e:
+        print(f"[action] couldn't log: {e}")
 
 
 @app.route("/api/data/<kind>/<entity_id>/<db>", methods=["PUT", "DELETE"])
