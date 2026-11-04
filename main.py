@@ -115,6 +115,9 @@ autoroleDB = CloudflareD1("autorole")
 AI_DB = CloudflareD1("ai")
 automodDB = CloudflareD1("automod")
 auditDB = CloudflareD1("audit")     # who changed what from the dashboard
+cmdlogDB = CloudflareD1("cmdlog")     # command log lines: "<server>:<ms>-<rand>" -> who ran what, where, when
+cmdlogcfgDB = CloudflareD1("cmdlogcfg")   # per server: where the command log goes
+actionsDB = CloudflareD1("actions")   # who did what from the dashboard: sends, DMs, settings, with username and time
 dmDB = CloudflareD1("dms")       # DM channels the dashboard knows about: user id -> {channel_id, name, last}
 DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "autoroleDB": autoroleDB, "AI_DB": AI_DB,
              "automodDB": automodDB, "dmDB": dmDB, "auditDB": auditDB}
@@ -567,6 +570,212 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# --- Command log: the server owner picks a channel and every command run in the server is written there ---
+
+CMDLOG_DEFAULT = {"enabled": False, "channel": None, "public_ok": None, "mode": None, "webhook_id": None}
+CMDLOG_KEEP = 300                   # lines kept per server for the dashboard
+_cmdlog_queue = None
+_cmdlog_sent = {}                   # server -> recent post times (a busy server can't flood Yapin' or the log channel)
+
+
+def get_cmdlog(server_id):
+    return {**CMDLOG_DEFAULT, **(cmdlogcfgDB.get(str(server_id)) or {})}
+
+
+def server_owner_id(server_id):
+    server = dict(cached(f"server:{server_id}", 30, lambda: bot.server(server_id)))
+    owner = server.get("owner_id")
+    return str(owner.get("id") if isinstance(owner, dict) else owner) if owner is not None else None
+
+
+def is_server_owner(server_id, user_id):
+    """Only the owner, not administrators. (Bot owners aren't automatically owners of anyone's server.)"""
+    try:
+        return server_owner_id(server_id) == str(user_id)
+    except Exception:
+        return False
+
+
+def channel_is_public(server_id, channel_id):
+    """True when everybody in the server can read this channel (Yapin' marks restricted ones private)."""
+    for c in bot.channels(server_id):
+        if str(c.get("id")) == str(channel_id):
+            return not c.get("private")
+    return True
+
+
+def cmdlog_configure(server_id, channel_id=None, enabled=None, confirm_public=False):
+    """Change the command log settings. Returns (config, warning): a warning (and no change to the channel) when the new
+    channel can be read by everyone and the owner hasn't said that's fine."""
+    cfg = get_cmdlog(server_id)
+    warning = None
+    if channel_id is not None and str(channel_id) != str(cfg["channel"] or ""):
+        channel_id = str(channel_id)
+        if channel_is_public(server_id, channel_id) and not confirm_public:
+            warning = ("Everyone in this server can read that channel, so everyone would see who runs which command. "
+                       "Pick a private channel, or confirm that you want public logs.")
+        else:
+            if cfg.get("webhook_id"):
+                try:
+                    bot.delete_webhook(cfg["webhook_id"])
+                except Exception:
+                    pass
+            cfg.update(channel=channel_id, mode=None, webhook_id=None,
+                       public_ok=channel_id if channel_is_public(server_id, channel_id) else None)
+    elif confirm_public and cfg["channel"] and channel_is_public(server_id, cfg["channel"]):
+        cfg["public_ok"] = cfg["channel"]
+    if enabled is not None:
+        cfg["enabled"] = bool(enabled) and bool(cfg["channel"])
+    cmdlogcfgDB.set(str(server_id), cfg)
+    return cfg, warning
+
+
+def cmdlog_rows(server_id, limit=100):
+    prefix = f"{server_id}:"
+    rows = [v for k, v in cmdlogDB.items().items() if k.startswith(prefix) and isinstance(v, dict)]
+    return sorted(rows, key=lambda r: -int(r.get("at") or 0))[:limit]
+
+
+def _cmdlog_embed(row):
+    args = row.get("args") or ""
+    fields = [{"name": "User", "value": f"<@{row['user_id']}> (@{row['username']})", "inline": True},
+              {"name": "Channel", "value": f"<#{row['channel_id']}>", "inline": True},
+              {"name": "When", "value": f"<t:{row['at']}:F>", "inline": False}]
+    if args:
+        fields.insert(2, {"name": "Arguments", "value": "```\n" + args.replace("```", "'''")[:200] + "\n```", "inline": False})
+    return {"title": f"/{row['command']}", "fields": fields, "footer": {"text": "Shapes command log"}}
+
+
+def cmdlog_deliver(server_id, row):
+    """Post one log line to the server's log channel: through a webhook when Yapin' lets the bot make one, otherwise as the bot."""
+    cfg = get_cmdlog(server_id)
+    if not cfg["enabled"] or not cfg["channel"]:
+        return
+    embed = _cmdlog_embed(row)
+    if cfg["mode"] != "bot":
+        try:
+            if not cfg["webhook_id"]:
+                hook = bot.create_webhook(cfg["channel"], "Shapes Command Log")
+                cfg.update(mode="webhook", webhook_id=str(hook.id))
+                cmdlogcfgDB.set(str(server_id), cfg)
+            bot.send_webhook(cfg["webhook_id"], "", username="Shapes Command Log", embeds=[embed])
+            return
+        except Exception as e:
+            print(f"[cmdlog] webhook unavailable in {server_id} ({e}); posting as the bot instead")
+            cfg.update(mode="bot", webhook_id=None)
+            cmdlogcfgDB.set(str(server_id), cfg)
+    try:
+        bot.send(cfg["channel"], "", embeds=[embed])
+    except Exception as e:
+        print(f"[cmdlog] couldn't post in {server_id}: {e}")
+
+
+def _cmdlog_worker():
+    while True:
+        server_id, row = _cmdlog_queue.get()
+        now = time.time()
+        recent = [t for t in _cmdlog_sent.get(server_id, []) if now - t < 60]
+        if len(recent) >= 20:                 # the dashboard still has every line; only the channel post is skipped
+            _cmdlog_sent[server_id] = recent
+            continue
+        _cmdlog_sent[server_id] = recent + [now]
+        try:
+            cmdlog_deliver(server_id, row)
+        except Exception as e:
+            print(f"[cmdlog] delivery failed: {e}")
+        time.sleep(0.3)
+
+
+def cmdlog_record(command, msg):
+    """yshim hook: runs for every command. Cheap when the server has no log; otherwise stores the line and queues the post."""
+    global _cmdlog_queue
+    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    if not sid or command == "cmdlog":
+        return
+    cfg = cmdlogcfgDB.get(str(sid))
+    if not cfg or not cfg.get("enabled"):
+        return
+    row = {"at": int(time.time()), "user_id": str(msg.get("author_id")), "username": str(msg.get("author_username") or msg.get("author_id")),
+           "command": command, "args": str(msg.get("args") or "")[:200], "channel_id": str(msg.get("channel_id")), "server_id": str(sid)}
+    cmdlogDB.set(f"{sid}:{int(time.time() * 1000)}-{os.urandom(2).hex()}", row)
+    mine = sorted(k for k in cmdlogDB.items() if k.startswith(f"{sid}:"))
+    for old in mine[:max(0, len(mine) - CMDLOG_KEEP)]:
+        cmdlogDB.remove(old)
+    if _cmdlog_queue is None:
+        import queue
+        _cmdlog_queue = queue.Queue()
+        threading.Thread(target=_cmdlog_worker, daemon=True, name="cmdlog").start()
+    _cmdlog_queue.put((str(sid), row))
+
+
+yshim.COMMAND_HOOKS.append(cmdlog_record)
+
+
+def _cmdlog_status_embed(sid, color, note=None):
+    cfg = get_cmdlog(sid)
+    embed = discord.Embed(title="Command log", color=color)
+    state = "on" if cfg["enabled"] else "off"
+    embed.description = (f"✅ {note}\n\n" if note else "") + (
+        f"Logging is **{state}**" + (f" in <#{cfg['channel']}>" if cfg["channel"] else " (no channel chosen)") + ".")
+    if cfg["channel"]:
+        how = {"webhook": "through a webhook", "bot": "as the bot (Yapin' wouldn't let me make a webhook)"}.get(cfg["mode"], "through a webhook if possible, otherwise as the bot")
+        embed.add_field(name="Posts", value=how, inline=False)
+        if channel_is_public(sid, cfg["channel"]):
+            embed.add_field(name="⚠️ Public channel", value="Everyone in the server can read this channel, so everyone can see who runs which command.", inline=False)
+    embed.add_field(name="Change it", value="`/cmdlog channel #private-logs` · `/cmdlog on` · `/cmdlog off` · the dashboard shows the same log with names and times", inline=False)
+    return embed
+
+
+@bot.tree.command(name="cmdlog", description="Log every command used in this server (server owner only): /cmdlog [channel #channel | on | off]")
+async def cmdlog(interaction: discord.Interaction, action: str = "status", value: str = ""):
+    if interaction.is_dm:
+        await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
+        return
+    sid, uid = str(interaction.guild_id), str(interaction.user.id)
+    if not is_server_owner(sid, uid):
+        await interaction.response.send_message("Only the server owner can set up command logs.", ephemeral=True)
+        return
+    color, action = ecolor(uid), (action or "status").lower()
+    if action in ("on", "off"):
+        cfg, _ = cmdlog_configure(sid, enabled=action == "on")
+        if action == "on" and not cfg["enabled"]:
+            await interaction.response.send_message("Pick a channel first: `/cmdlog channel #private-logs`", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=_cmdlog_status_embed(sid, color, f"Command logging is now {action}."), ephemeral=True)
+        return
+    if action == "channel":
+        ch = resolve_channel(sid, value) if value else None
+        if not ch:
+            await interaction.response.send_message("Tell me which text channel: `/cmdlog channel #private-logs`", ephemeral=True)
+            return
+        cfg, warning = cmdlog_configure(sid, channel_id=str(ch.get("id")), enabled=True)
+        if warning:
+            view = discord.ui.View(timeout=300)
+            use = discord.ui.Button(label="Log publicly anyway", style=discord.ButtonStyle.danger)
+            cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+
+            async def confirm(click):
+                if str(click.user.id) != uid:
+                    await click.response.send_message("Only the owner who ran the command can answer this.", ephemeral=True)
+                    return
+                cmdlog_configure(sid, channel_id=str(ch.get("id")), enabled=True, confirm_public=True)
+                await click.response.edit_message(embed=_cmdlog_status_embed(sid, color, "Public logging is on."), view=None)
+
+            async def nope(click):
+                if str(click.user.id) == uid:
+                    await click.response.edit_message(embed=discord.Embed(title="Command log", description="Okay, nothing changed.", color=color), view=None)
+            use.callback, cancel.callback = confirm, nope
+            view.add_item(use)
+            view.add_item(cancel)
+            await interaction.response.send_message(embed=discord.Embed(title="⚠️ That channel is public", color=discord.Color.orange(), description=(
+                f"<#{ch.get('id')}> can be read by everyone in the server, so everyone would see who runs which command.\n"
+                "Choose a private channel, or log publicly if that's what you want.")), view=view, ephemeral=True)
+            return
+        await interaction.response.send_message(embed=_cmdlog_status_embed(sid, color, f"Logging to <#{ch.get('id')}>."), ephemeral=True)
+        return
+    await interaction.response.send_message(embed=_cmdlog_status_embed(sid, color), ephemeral=True)
+
+
 # --- Autorole: a role for new members, with people who are left out ---
 
 AUTOROLE_DEFAULT = {"role_id": "", "enabled": False, "exempt_users": [], "include_bots": True}
@@ -726,7 +935,7 @@ async def autorole(interaction: discord.Interaction, action: str = "status", *, 
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="Bot Help & Commands", color=ecolor(interaction.user.id),
                           description="Use `/command` or `!command`. Put names with spaces in quotes.")
-    embed.add_field(name="Counting", value="• /counting - Count stats for everyone; admins also get settings (`toggle`, `channel #channel`, `emoji <correct|warning|wrong> <emoji>`)\n• /countingleaderboard - Leaderboard website", inline=False)
+    embed.add_field(name="Counting", value="• /counting - Count stats for everyone; admins also get settings (`toggle`, `channel #channel`, `emoji <correct|warning|wrong> <emoji>`)\n• /countingleaderboard - Leaderboard website\n• /cmdlog - Command log (server owner)", inline=False)
     embed.add_field(name="User Settings", value="• /settings - Customize your embed color\n• /autorole - Give new members a role\n• /lastfm - Link Last.fm", inline=False)
     embed.add_field(name="Moderation", value="• /automod - Block words, links, invites, spam, caps and mass mentions (admins)\n• /serverinfo - Server information", inline=False)
     embed.add_field(name="Roblox", value=(
@@ -5184,8 +5393,19 @@ def rate_limited(limit=60, window=60):
     return deco
 
 
+def _is_shapes_api_call():
+    """The Shapes API (same machine) presenting the internal token. It is how api.shapes.lol reads /mutuals for its keyed
+    route; nothing that arrives through a proxy counts."""
+    if not API_INTERNAL_TOKEN or request.remote_addr not in ("127.0.0.1", "::1") or request.headers.get("X-Forwarded-For"):
+        return False
+    header = request.headers.get("Authorization", "")
+    return header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip(), API_INTERNAL_TOKEN)
+
+
 def admin_required(f):
     def wrapped(*args, **kwargs):
+        if request.path == "/mutuals" and _is_shapes_api_call():
+            return f(*args, **kwargs)
         if not _is_admin_session():
             if request.path.startswith("/api/") or request.path == "/mutuals":
                 return jsonify({"error": "login required"}), 401
@@ -5481,27 +5701,79 @@ def api_messages(channel_id):
         return _api_error(e)
 
 
-def _announcement_embed(title, text, image_url):
+def current_actor():
+    """(id, name, is_bot_staff) of whoever is using the dashboard right now. The admin key has no identity of its own."""
+    user = session.get("yuser")
+    if isinstance(user, dict) and user.get("id"):
+        return str(user["id"]), str(user.get("name") or user["id"]), is_staff_user(user["id"])
+    if session.get("admin") is True:
+        return "admin-key", "admin key", True
+    return "unknown", "unknown", False
+
+
+_ACTION_KEEP = 2000
+_last_trim = 0.0
+
+
+def log_action(kind, detail, server_id=None, target=None):
+    """Write down who did what and when (shown in the dashboards, so people can refer back to it)."""
+    uid, name, _ = current_actor()
+    stamp = time.time()
+    actionsDB.set(f"{int(stamp * 1000)}-{os.urandom(2).hex()}", {
+        "at": int(stamp), "actor_id": uid, "actor": name, "kind": kind, "detail": str(detail)[:500],
+        "server_id": str(server_id) if server_id else None, "target": str(target)[:200] if target else None})
+    print(f"[action] @{name} {kind}: {str(detail)[:120]}" + (f" (server {server_id})" if server_id else ""))
+    global _last_trim
+    if time.time() - _last_trim < 3600:
+        return
+    _last_trim = time.time()
+    rows = sorted(actionsDB.items().items())
+    for key, _row in rows[:max(0, len(rows) - _ACTION_KEEP)]:         # keep the newest 2000
+        actionsDB.remove(key)
+
+
+def action_rows(server_id=None, limit=100):
+    rows = [v for v in actionsDB.items().values() if isinstance(v, dict) and (server_id is None or v.get("server_id") == str(server_id))]
+    return sorted(rows, key=lambda r: -int(r.get("at") or 0))[:limit]
+
+
+def _stamp_text(name, where=None):
+    return f"Sent by @{name}" + (f" from {where}" if where else "") + " · " + time.strftime("%b %d, %Y %H:%M UTC", time.gmtime())
+
+
+def _announcement_embed(title, text, image_url, footer=None):
     embed = {"description": text}
     if title:
         embed["title"] = title
     if image_url:
         embed["image"] = {"url": image_url}
+    if footer:
+        embed["footer"] = {"text": footer}
     return embed
 
 
-def _post_with_optional_image(channel_id, text, image_url, title=None):
-    """Plain text when there is no image or title; otherwise an embed. If the server refuses embeds, falls back to
-    text with the image link (which the dashboard and Yapin turn into a link)."""
-    if not image_url and not title:
+def _post_with_optional_image(channel_id, text, image_url, title=None, footer=None):
+    """Plain text when there is no image, title or sender line; otherwise an embed. If the server refuses embeds, falls
+    back to text with the image link and the sender line."""
+    if not image_url and not title and not footer:
         return bot.send(channel_id, text)
     try:
-        return bot.send(channel_id, "", embeds=[_announcement_embed(title, text, image_url)])
+        return bot.send(channel_id, "", embeds=[_announcement_embed(title, text, image_url, footer)])
     except yapper.YapperError as e:
         if e.status not in (400, 422):
             raise
-        parts = [p for p in (f"**{title}**" if title else "", text, image_url) if p]
+        parts = [p for p in (f"**{title}**" if title else "", text, image_url, f"*{footer}*" if footer else "") if p]
         return bot.send(channel_id, "\n\n".join(parts))
+
+
+def send_as_bot(channel_id, text, image=None, title=None, where=None, hidden=False):
+    """Post as the bot and, unless a bot admin chose to hide it, say who it is from (and when). Returns the footer used."""
+    uid, name, staff = current_actor()
+    if hidden and not staff:
+        raise PermissionError("Only bot admins can hide who a message is from.")
+    footer = None if hidden else _stamp_text(name, where)
+    _post_with_optional_image(channel_id, text, image, title, footer)
+    return footer
 
 
 def _valid_image(url):
@@ -5525,9 +5797,14 @@ def api_send(channel_id):
         return jsonify({"error": str(e)}), 400
     if not text and not image:
         return jsonify({"error": "Write a message or add an image link."}), 400
+    hidden = body.get("hidden") is True
     try:
-        _post_with_optional_image(channel_id, text, image)
+        # A DM channel is only ever a bot admin's doing here, so it follows the same hidden option.
+        send_as_bot(channel_id, text, image, hidden=hidden)
+        log_action("send", ("(hidden sender) " if hidden else "") + text[:200], target=f"channel {channel_id}")
         return jsonify({"ok": True})
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
     except yapper.YapperError as e:
         return _api_error(e)
 
@@ -5600,6 +5877,54 @@ def api_dm_open():
         return _api_error(e)
 
 
+def dm_people(user_ids, text, title=None, image=None, where=None, hidden=False, delay=0.5):
+    """DM each person as the bot. Returns [{user_id, ok, error?}]; one failure (DMs closed) never stops the rest."""
+    uid, name, staff = current_actor()
+    if hidden and not staff:
+        raise PermissionError("Only bot admins can hide who a message is from.")
+    footer = None if hidden else _stamp_text(name, where)
+    results = []
+    for target in user_ids:
+        try:
+            _post_with_optional_image(bot.dm(target), text, image, title, footer)
+            results.append({"user_id": target, "ok": True})
+        except Exception as e:
+            results.append({"user_id": target, "ok": False, "error": str(e)[:120]})
+        time.sleep(delay)
+    return results
+
+
+@app.route("/api/dm/send", methods=["POST"])
+@admin_required
+def api_dm_send():
+    """Bot staff: DM one person, a pasted list, or everyone you pick, e.g. for an announcement that matters more."""
+    body = request.get_json(silent=True) or {}
+    text, title = str(body.get("message", "")).strip(), str(body.get("title", "")).strip()
+    ids = body.get("user_ids")
+    ids = _user_ids(ids) if isinstance(ids, str) else [str(i).strip().strip("<@!>") for i in (ids or []) if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not text:
+        return jsonify({"error": "Write the message first."}), 400
+    if not ids:
+        return jsonify({"error": "Pick at least one person."}), 400
+    if len(ids) > 200:
+        return jsonify({"error": "That's more than 200 people at once; split it up."}), 400
+    try:
+        image = _valid_image(body.get("image_url"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    hidden = body.get("hidden") is True
+    results = dm_people(ids, text, title or None, image, hidden=hidden, delay=0.5)
+    log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], target=f"{len(ids)} people: " + ", ".join(ids[:8]) + ("…" if len(ids) > 8 else ""))
+    return jsonify({"sent": sum(r["ok"] for r in results), "failed": [r for r in results if not r["ok"]]})
+
+
+@app.route("/api/actions")
+@admin_required
+def api_actions():
+    return jsonify({"actions": action_rows(request.args.get("server") or None, 200)})
+
+
 # --- announcements to every server ---
 
 _ANNOUNCE_NAMES = ("announcements", "announcement", "news", "updates", "general", "chat", "main", "lobby")
@@ -5631,11 +5956,11 @@ def api_announce_targets():
     return jsonify({"servers": out})
 
 
-def _run_announcement(job_id, text, title, image, targets):
+def _run_announcement(job_id, text, title, image, targets, footer=None):
     job = _jobs[job_id]
     for sid, channel_id in targets.items():
         try:
-            _post_with_optional_image(channel_id, text, image, title)
+            _post_with_optional_image(channel_id, text, image, title, footer)
             job["results"].append({"server": sid, "ok": True})
         except Exception as e:
             job["results"].append({"server": sid, "ok": False, "error": str(e)})
@@ -5657,11 +5982,15 @@ def api_announce():
     targets = {str(k): str(v) for k, v in (body.get("targets") or {}).items() if v}
     if not targets:
         return jsonify({"error": "Pick at least one server."}), 400
+    hidden = body.get("hidden") is True
+    _, name, staff = current_actor()
+    footer = None if hidden and staff else _stamp_text(name)
+    log_action("announce", ("(hidden sender) " if hidden and staff else "") + (title + ": " if title else "") + text[:200], target=f"{len(targets)} servers")
     job_id = secrets_token()
     _jobs[job_id] = {"total": len(targets), "results": [], "done": False, "started": time.time()}
     for old in [k for k, v in _jobs.items() if time.time() - v["started"] > 3600]:
         _jobs.pop(old, None)
-    threading.Thread(target=_run_announcement, args=(job_id, text, title, image, targets), daemon=True, name="announce").start()
+    threading.Thread(target=_run_announcement, args=(job_id, text, title, image, targets, footer), daemon=True, name="announce").start()
     return jsonify({"job": job_id, "total": len(targets)})
 
 
@@ -5761,6 +6090,10 @@ def _audit(db, key, action, before, after):
     auditDB.set(f"{int(stamp * 1000)}", {"at": int(stamp), "db": db, "key": key, "action": action,
                                           "before": json.dumps(before)[:2000], "after": json.dumps(after)[:2000]})
     print(f"[data edit] {action} {db}[{key}] from the dashboard")
+    try:
+        log_action("data", f"{action} {db}", server_id=key if db in ("countingDB", "autoroleDB", "automodDB") or db.startswith("dashboard:") else None, target=f"{db}[{key}]")
+    except Exception as e:
+        print(f"[action] couldn't log: {e}")
 
 
 @app.route("/api/data/<kind>/<entity_id>/<db>", methods=["PUT", "DELETE"])

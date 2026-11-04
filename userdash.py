@@ -232,7 +232,8 @@ def register(m):
         counting["last_name"] = (yshim.fetch_user(counting["lastcounter"]).get("username") if counting.get("lastcounter") else None)
         return {"server": {"id": sid, "name": server.get("name") or sid, "icon": m._icon_of(server),
                            "members": yshim._first(server, "member_count", "members_count", "memberCount")},
-                "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting}
+                "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
+                "owner": m.is_server_owner(sid, current_user()["id"]), "staff": m.is_staff_user(current_user()["id"])}
 
     @app.route("/me/servers/<sid>")
     @login_required
@@ -296,3 +297,116 @@ def register(m):
         audit(sid, "counting", before, data)
         data["emojis"] = m.counting_emojis(data)
         return jsonify(data)
+
+    # ------------------------------------------------------------------ speak as the bot, DM members, and the log
+
+    _sent = {}
+
+    def too_fast(kind, limit, window):
+        """True once this person has done `kind` more than `limit` times inside `window` seconds."""
+        key, now = (kind, current_user()["id"]), time.time()
+        recent = [t for t in _sent.get(key, []) if now - t < window] + [now]
+        _sent[key] = recent
+        return len(recent) > limit
+
+    def text_channels(sid):
+        return {str(c.get("id")): c.get("name") for c in bot.channels(sid) if m._is_text(str(yshim._first(c, "type", "kind") or "text").lower())}
+
+    @app.route("/me/servers/<sid>/say", methods=["POST"])
+    @login_required
+    def me_say(sid):
+        """Send a message as Shapes into a channel. It always says who it is from; only bot admins can hide that."""
+        require_manage(sid)
+        body = request.get_json(silent=True) or {}
+        text, channel = str(body.get("message", "")).strip(), str(body.get("channel", ""))
+        if not text:
+            return jsonify({"error": "Write a message first."}), 400
+        if len(text) > 1800:
+            return jsonify({"error": "That's too long (1800 characters at most)."}), 400
+        chans = text_channels(sid)
+        if channel not in chans:
+            return jsonify({"error": "Pick a text channel from this server."}), 400
+        try:
+            image = m._valid_image(body.get("image_url"))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if too_fast("say", 15, 60):
+            return jsonify({"error": "Slow down a little, then try again."}), 429
+        try:
+            footer = m.send_as_bot(channel, text, image, str(body.get("title", "")).strip() or None, hidden=body.get("hidden") is True)
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        except Exception as e:
+            return jsonify({"error": f"Yapin' wouldn't take it: {e}"}), 502
+        m.log_action("send", ("(hidden sender) " if body.get("hidden") is True else "") + text[:200], server_id=sid, target=f"#{chans[channel]}")
+        return jsonify({"ok": True, "footer": footer})
+
+    @app.route("/me/servers/<sid>/members")
+    @login_required
+    def me_members(sid):
+        """People in this server, to pick who to DM (search by name)."""
+        require_manage(sid)
+        q = request.args.get("q", "").strip().lower().lstrip("@")
+        people = m.cached(f"people:{sid}", 60, lambda: m._all_members(sid, limit=3000))
+        hits = [p for p in people if not p["bot"] and (not q or q in p["name"].lower() or q in p["display"].lower() or q == p["id"])]
+        return jsonify({"members": [{k: p[k] for k in ("id", "name", "display", "avatar")} for p in hits[:25]], "total": len(people)})
+
+    @app.route("/me/servers/<sid>/dm", methods=["POST"])
+    @login_required
+    def me_dm(sid):
+        """DM chosen members of this server as Shapes. The message says who sent it and from which server."""
+        require_manage(sid)
+        body = request.get_json(silent=True) or {}
+        text = str(body.get("message", "")).strip()
+        ids = list(dict.fromkeys(str(i).strip() for i in (body.get("user_ids") or []) if str(i).strip()))
+        if not text or len(text) > 1500:
+            return jsonify({"error": "Write a message (1500 characters at most)."}), 400
+        if not ids or len(ids) > 25:
+            return jsonify({"error": "Pick between 1 and 25 members."}), 400
+        if too_fast("dm", 10, 3600):
+            return jsonify({"error": "You've sent a lot of DMs this hour. Try again later."}), 429
+        people = {p["id"] for p in m.cached(f"people:{sid}", 60, lambda: m._all_members(sid, limit=3000))}
+        outside = [i for i in ids if i not in people]
+        if outside:
+            return jsonify({"error": "Some of those people aren't members of this server."}), 400
+        server = dict(m.cached(f"server:{sid}", 30, lambda: bot.server(sid)))
+        hidden = body.get("hidden") is True
+        try:
+            results = m.dm_people(ids, text, where=server.get("name") or None, hidden=hidden)
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        m.log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], server_id=sid, target=f"{len(ids)} members: " + ", ".join(ids[:8]))
+        return jsonify({"sent": sum(r["ok"] for r in results), "failed": [r for r in results if not r["ok"]]})
+
+    @app.route("/me/servers/<sid>/log")
+    @login_required
+    def me_log(sid):
+        require_manage(sid)
+        return jsonify({"actions": m.action_rows(sid, 100)})
+
+    # ------------------------------------------------------------------ command log (owner sets it up, managers can read it)
+
+    def cmdlog_view(sid):
+        cfg = m.get_cmdlog(sid)
+        return {"config": cfg, "channel_public": bool(cfg["channel"]) and m.channel_is_public(sid, cfg["channel"]),
+                "owner": m.is_server_owner(sid, current_user()["id"]), "rows": m.cmdlog_rows(sid, 100)}
+
+    @app.route("/me/servers/<sid>/cmdlog", methods=["GET", "POST"])
+    @login_required
+    def me_cmdlog(sid):
+        require_manage(sid)
+        if request.method == "GET":
+            return jsonify(cmdlog_view(sid))
+        if not m.is_server_owner(sid, current_user()["id"]):
+            return jsonify({"error": "Only the server owner can change command logging."}), 403
+        body = request.get_json(silent=True) or {}
+        channel = str(body["channel"]) if body.get("channel") else None
+        if channel and channel not in text_channels(sid):
+            return jsonify({"error": "Pick a text channel from this server."}), 400
+        before = m.get_cmdlog(sid)
+        cfg, warning = m.cmdlog_configure(sid, channel_id=channel, enabled=body.get("enabled") if isinstance(body.get("enabled"), bool) else None,
+                                          confirm_public=body.get("confirm_public") is True)
+        if warning:
+            return jsonify({"warning": warning, "needs_confirm": True}), 409
+        m.log_action("settings", f"command log {'on' if cfg['enabled'] else 'off'}" + (f" in #{text_channels(sid).get(cfg['channel'])}" if cfg["channel"] else ""), server_id=sid)
+        return jsonify(cmdlog_view(sid))
