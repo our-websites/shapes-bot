@@ -1027,6 +1027,8 @@ def _parse(spec, raw, inter):
 
 def _run_command(spec, msg):
     inter = Interaction(msg=msg)
+    print(f"[cmd] /{spec.name} by @{msg.get('author_username') or msg.get('author_id')} "
+          f"in {msg.get('server_id') or 'a DM'}")
     try:
         kwargs = _parse(spec, msg.get("args"), inter)
     except _Usage as e:
@@ -1038,6 +1040,7 @@ def _run_command(spec, msg):
     try:
         asyncio.run(spec.fn(inter, **kwargs))
     except Exception:
+        print(f"[cmd] /{spec.name} failed:")
         traceback.print_exc()
         _safe_reply(inter, f"⚠️ Something went wrong running /{spec.name}.")
 

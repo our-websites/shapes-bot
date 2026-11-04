@@ -38,6 +38,42 @@ from slpp import slpp as lua
 
 import yshim
 import automod
+
+
+class _Stamped:
+    """Wraps stdout/stderr so every line is timestamped and flushed at once. Hosting panels buffer a plain print
+    until the output fills up, which is why logs showed up late (or never) before."""
+
+    def __init__(self, stream):
+        self._s, self._new = stream, True
+        self._lock = threading.Lock()
+
+    def write(self, text):
+        if not text:
+            return 0
+        with self._lock:
+            out = []
+            for chunk in text.splitlines(keepends=True):
+                if self._new:
+                    out.append(time.strftime("%H:%M:%S "))
+                out.append(chunk)
+                self._new = chunk.endswith("\n")
+            self._s.write("".join(out))
+            self._s.flush()
+        return len(text)
+
+    def flush(self):
+        self._s.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+if not isinstance(sys.stdout, _Stamped):
+    sys.stdout, sys.stderr = _Stamped(sys.stdout), _Stamped(sys.stderr)
+import logging
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="[%(levelname)s] %(name)s: %(message)s")
+logging.getLogger("werkzeug").setLevel(logging.WARNING)     # one line per web request drowned everything else
 from cfstore import CloudflareD1
 from yshim import app_commands, commands, discord
 
@@ -5076,6 +5112,14 @@ def on_member_join(ev):
             bot.add_role(ev.server_id, ev.user_id, cfg["role_id"])
     except Exception as e:
         print(f"[autorole] {type(e).__name__}: {e}")
+
+
+@bot.on("test")
+def on_test(ev):
+    """The "Send test event" button in Yapin's developer settings."""
+    note = yshim._first(dict(ev), "message", "note")
+    print(f"[test] ✅ Test event received{f': {note}' if note else ''}. The bot is connected and getting events. "
+          f"(event id {yshim._first(dict(ev), 'id') or '?'}, bot ready: {bot_ready})")
 
 
 @bot.on("ready")
