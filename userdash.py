@@ -29,7 +29,7 @@ def register(m):
     app.jinja_loader = jinja2.ChoiceLoader([app.jinja_loader, jinja2.FileSystemLoader(os.path.join(SITE_DIR, "templates"))])
     app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
     app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
-    api_public = os.environ.get("API_PUBLIC_URL", "https://api.shapes.lol").rstrip("/")
+    api_public = os.environ.get("API_PUBLIC_URL", "https://api.shapes-yapper.oriaxen.com").rstrip("/")
 
     # ------------------------------------------------------------------ numbers for the public pages (no HTTP)
 
@@ -57,7 +57,7 @@ def register(m):
     @app.route("/", methods=["GET"])
     @m.rate_limited(120, 60)
     def home():
-        users, servers = stats()
+        servers, users = stats()
         return render_template("home.html", users=users, servers=servers, top=leaderboard()[:3])
 
     @app.route("/about")
@@ -74,6 +74,7 @@ def register(m):
         return redirect(os.environ.get("SUPPORT_URL", "https://www.yapin.gg/invite/shapes"), 302)
 
     @app.route("/counting/leaderboard/")
+    @app.route("/counting")
     @app.route("/leaderboard")
     @m.rate_limited(120, 60)
     def leaderboard_page():
