@@ -1025,8 +1025,16 @@ def _parse(spec, raw, inter):
     return kwargs
 
 
+COMMAND_HOOKS = []      # functions called as hook(command_name, msg) whenever someone runs a command (e.g. command logging)
+
+
 def _run_command(spec, msg):
     inter = Interaction(msg=msg)
+    for hook in COMMAND_HOOKS:
+        try:
+            hook(spec.name, msg)
+        except Exception:
+            traceback.print_exc()
     print(f"[cmd] /{spec.name} by @{msg.get('author_username') or msg.get('author_id')} "
           f"in {msg.get('server_id') or 'a DM'}")
     try:

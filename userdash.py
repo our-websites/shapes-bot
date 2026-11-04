@@ -231,7 +231,8 @@ def register(m):
         counting["last_name"] = (yshim.fetch_user(counting["lastcounter"]).get("username") if counting.get("lastcounter") else None)
         return {"server": {"id": sid, "name": server.get("name") or sid, "icon": m._icon_of(server),
                            "members": yshim._first(server, "member_count", "members_count", "memberCount")},
-                "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting}
+                "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
+                "owner": m.is_server_owner(sid, current_user()["id"]), "staff": m.is_staff_user(current_user()["id"])}
 
     @app.route("/me/servers/<sid>")
     @login_required
@@ -381,3 +382,30 @@ def register(m):
     def me_log(sid):
         require_manage(sid)
         return jsonify({"actions": m.action_rows(sid, 100)})
+
+    # ------------------------------------------------------------------ command log (owner sets it up, managers can read it)
+
+    def cmdlog_view(sid):
+        cfg = m.get_cmdlog(sid)
+        return {"config": cfg, "channel_public": bool(cfg["channel"]) and m.channel_is_public(sid, cfg["channel"]),
+                "owner": m.is_server_owner(sid, current_user()["id"]), "rows": m.cmdlog_rows(sid, 100)}
+
+    @app.route("/me/servers/<sid>/cmdlog", methods=["GET", "POST"])
+    @login_required
+    def me_cmdlog(sid):
+        require_manage(sid)
+        if request.method == "GET":
+            return jsonify(cmdlog_view(sid))
+        if not m.is_server_owner(sid, current_user()["id"]):
+            return jsonify({"error": "Only the server owner can change command logging."}), 403
+        body = request.get_json(silent=True) or {}
+        channel = str(body["channel"]) if body.get("channel") else None
+        if channel and channel not in text_channels(sid):
+            return jsonify({"error": "Pick a text channel from this server."}), 400
+        before = m.get_cmdlog(sid)
+        cfg, warning = m.cmdlog_configure(sid, channel_id=channel, enabled=body.get("enabled") if isinstance(body.get("enabled"), bool) else None,
+                                          confirm_public=body.get("confirm_public") is True)
+        if warning:
+            return jsonify({"warning": warning, "needs_confirm": True}), 409
+        m.log_action("settings", f"command log {'on' if cfg['enabled'] else 'off'}" + (f" in #{text_channels(sid).get(cfg['channel'])}" if cfg["channel"] else ""), server_id=sid)
+        return jsonify(cmdlog_view(sid))
