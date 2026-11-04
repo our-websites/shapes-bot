@@ -69,6 +69,38 @@
   .login { background:rgba(255,255,255,.03); border:1px solid var(--line); border-radius:16px; padding:32px 24px; }
   ::-webkit-scrollbar { width:12px; } ::-webkit-scrollbar-track { background:#050505; } ::-webkit-scrollbar-thumb { background:rgba(99,102,241,.4); border-radius:6px; border:3px solid #050505; }
   * { scrollbar-width:thin; scrollbar-color:rgba(99,102,241,.4) #050505; }
+
+  /* Discord/Yapin-style shell: server rail, section menu, content */
+  .shell { display:grid; grid-template-columns:72px 236px minmax(0,1fr); gap:12px; max-width:1180px; margin:0 auto; padding:0 16px 40px; align-items:start; }
+  .shell.nomenu { grid-template-columns:72px minmax(0,1fr); }
+  .rail { display:flex; flex-direction:column; align-items:center; gap:8px; padding:10px 0; border-radius:20px; background:rgba(255,255,255,.03); border:1px solid var(--line); position:sticky; top:12px; max-height:calc(100vh - 24px); overflow-y:auto; scrollbar-width:none; }
+  .rail::-webkit-scrollbar { display:none; }
+  .rail .sep { width:32px; height:2px; border-radius:2px; background:var(--line); margin:2px 0; }
+  .pip { position:relative; width:48px; height:48px; border-radius:50%; border:0; padding:0; cursor:pointer; background:#17171c; color:var(--ink); font:700 16px "Poppins",sans-serif; display:grid; place-items:center; overflow:hidden; transition:border-radius .18s ease,background .18s ease,transform .18s ease; flex:none; }
+  .pip img { width:100%; height:100%; object-fit:cover; }
+  .pip:hover, .pip[aria-current=true] { border-radius:16px; background:var(--accent); }
+  .pip[aria-current=true]::before { content:""; position:absolute; left:-12px; top:50%; width:4px; height:28px; transform:translateY(-50%); border-radius:0 4px 4px 0; background:#fff; }
+  .pip.dim { opacity:.55; } .pip.dim:hover, .pip.dim[aria-current=true] { opacity:1; }
+  .pip.home svg { width:24px; height:24px; }
+  .menu { border-radius:20px; background:rgba(255,255,255,.03); border:1px solid var(--line); padding:8px; position:sticky; top:12px; }
+  .menu .srv { display:flex; align-items:center; gap:10px; padding:8px; border-bottom:1px solid var(--line); margin-bottom:6px; font-weight:600; font-family:"Poppins",sans-serif; }
+  .menu .srv span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .menu .srv .icon { width:32px; height:32px; border-radius:10px; font-size:14px; }
+  .menu button { display:flex; width:100%; align-items:center; gap:8px; text-align:left; background:none; border:0; color:var(--muted); font:inherit; padding:8px 10px; border-radius:10px; cursor:pointer; }
+  .menu button:hover { background:rgba(255,255,255,.05); color:var(--ink); } .menu button[aria-current=true] { background:rgba(99,102,241,.2); color:#fff; }
+  .menu .grp { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); padding:10px 10px 4px; }
+  main.content { min-width:0; max-width:none; margin:0; padding:0 0 20px; } .content > h1 { margin-top:4px; }
+  .tip { position:fixed; z-index:20; pointer-events:none; background:#000; color:#fff; padding:6px 10px; border-radius:8px; font-size:13px; border:1px solid var(--line); white-space:nowrap; }
+  table.log { width:100%; border-collapse:collapse; font-size:14px; } table.log th { text-align:left; color:var(--muted); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--line); } table.log td { padding:7px 8px; border-bottom:1px solid rgba(160,160,170,.12); vertical-align:top; word-break:break-word; }
+  .warn { border:1px solid rgba(242,185,80,.5); background:rgba(242,185,80,.08); border-radius:10px; padding:10px 12px; margin:10px 0; } .warn .row { margin:8px 0 0; }
+  .pick { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; } .chip { display:inline-flex; align-items:center; gap:6px; background:rgba(99,102,241,.18); border:1px solid rgba(99,102,241,.4); border-radius:999px; padding:2px 10px; font-size:13px; } .chip button { background:none; border:0; color:inherit; cursor:pointer; padding:0; font-size:15px; line-height:1; }
+  .results { border:1px solid var(--line); border-radius:10px; max-height:180px; overflow:auto; } .results button { display:flex; gap:8px; align-items:center; width:100%; text-align:left; background:none; border:0; color:inherit; font:inherit; padding:6px 10px; cursor:pointer; } .results button:hover { background:rgba(255,255,255,.05); }
+  @media (max-width: 820px) {
+    .shell, .shell.nomenu { grid-template-columns:minmax(0,1fr); }
+    .rail { flex-direction:row; overflow-x:auto; position:static; border-radius:16px; padding:8px 10px; max-height:none; } .rail .sep { width:2px; height:32px; }
+    .pip[aria-current=true]::before { left:50%; top:auto; bottom:-6px; width:28px; height:4px; transform:translateX(-50%); border-radius:4px 4px 0 0; }
+    .menu { position:static; display:flex; flex-wrap:wrap; gap:4px; } .menu .srv { width:100%; } .menu button { width:auto; } .menu .grp { display:none; }
+  }
+
 </style>
 </head>
 <body>
@@ -78,8 +110,10 @@
   <div class="me" id="me"></div>
 </header>
 <div id="app"></div>
+<div class="tip" id="tip" hidden></div>
 <script>
 const BOOT = __BOOT__;
+
 const $ = (s, el = document) => el.querySelector(s);
 function h(tag, props = {}, ...kids) {
   const el = document.createElement(tag);
@@ -94,11 +128,13 @@ async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (r.status === 401) { location.href = '/dashboard'; throw new Error('signed out'); }
-  if (!r.ok) throw new Error(data.error || ('Request failed (' + r.status + ')'));
+  if (!r.ok) { const e = new Error(data.error || data.warning || ('Request failed (' + r.status + ')')); e.status = r.status; e.data = data; throw e; }
   return data;
 }
-const app = $('#app');
-const icon = s => s.icon ? h('img', { class: 'icon', src: s.icon, alt: '', loading: 'lazy' }) : h('div', { class: 'icon' }, (s.name || '?')[0].toUpperCase());
+const app = $('#app'), tip = $('#tip');
+const initial = s => (s.name || '?').trim()[0].toUpperCase();
+const icon = s => s.icon ? h('img', { class: 'icon', src: s.icon, alt: '', loading: 'lazy' }) : h('div', { class: 'icon' }, initial(s));
+const when = t => new Date(t * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
 function renderHeader() {
   const me = $('#me'); me.replaceChildren();
@@ -106,40 +142,79 @@ function renderHeader() {
   const u = BOOT.user;
   me.append(u.avatar ? h('img', { class: 'avatar', src: u.avatar, alt: '' }) : h('div', { class: 'avatar' }), h('span', {}, u.display || u.name), h('a', { href: '/dashboard/logout' }, 'Sign out'));
 }
-
+function showTip(el, text) {
+  el.addEventListener('mouseenter', () => { const r = el.getBoundingClientRect(); tip.textContent = text; tip.hidden = false; tip.style.left = (r.right + 10) + 'px'; tip.style.top = (r.top + r.height / 2 - 15) + 'px'; });
+  el.addEventListener('mouseleave', () => { tip.hidden = true; });
+}
 function loginPage() {
   app.replaceChildren(h('div', { class: 'login' },
     h('h1', {}, 'Shapes dashboard'),
-    h('p', {}, 'Sign in with Yapin’ to manage your servers’ automod, counting and autorole, or see how the servers you’re in are doing.'),
+    h('p', {}, 'Sign in with Yapin’ to manage your servers, or see how the servers you’re in are doing.'),
     BOOT.login ? h('a', { class: 'btn', href: '/dashboard/login' }, 'Login with Yapin’') : h('p', { class: 'status err' }, 'Login isn’t set up on this bot yet.')));
 }
 
-let tab = 'manage', listing = null;
-function tabs() {
-  const defs = [['manage', 'My servers'], ['other', 'Other servers']];
-  if (BOOT.staff) defs.push(['admin', 'Admin']);
-  return h('nav', { class: 'tabs', role: 'tablist' }, defs.map(([id, label]) =>
-    h('button', { role: 'tab', 'aria-selected': tab === id, onclick: () => { tab = id; show(); } }, label)));
+// ---------------------------------------------------------------- state: which server (if any) and which section
+let listing = null, current = null, section = 'overview', detail = null;
+const SECTIONS = [['overview', 'Overview'], ['counting', 'Counting'], ['autorole', 'Autorole'], ['automod', 'Automod'], ['say', 'Send as Shapes'], ['dm', 'Message members'], ['cmdlog', 'Command log'], ['activity', 'Activity log']];
+
+function pip(label, child, onclick, current, extra = '') {
+  const el = h('button', { class: 'pip ' + extra, 'aria-label': label, 'aria-current': current ? 'true' : 'false', onclick }, child);
+  showTip(el, label); return el;
+}
+const serverPip = (s, dim) => pip(s.name, s.icon ? h('img', { src: s.icon, alt: '', loading: 'lazy' }) : initial(s), () => selectServer(s), current && current.id === s.id, dim ? 'dim' : '');
+
+function frame(menu, content) {
+  const rail = h('nav', { class: 'rail', 'aria-label': 'Servers' },
+    pip('Home', h('span', {}, '⌂'), () => { current = null; section = 'home'; draw(); }, !current && section !== 'admin', 'home'),
+    listing && listing.manage.length ? h('div', { class: 'sep' }) : null,
+    listing ? listing.manage.map(s => serverPip(s, false)) : null,
+    listing && listing.other.length ? h('div', { class: 'sep' }) : null,
+    listing ? listing.other.map(s => serverPip(s, true)) : null,
+    BOOT.staff ? [h('div', { class: 'sep' }), pip('Admin', h('span', {}, '★'), () => { current = null; section = 'admin'; draw(); }, section === 'admin' && !current)] : null);
+  app.replaceChildren(h('div', { class: 'shell' + (menu ? '' : ' nomenu') }, rail, menu, h('main', { class: 'content' }, content)));
 }
 
-async function show() {
-  app.replaceChildren(tabs(), h('main', {}, h('div', { id: 'view' }, h('div', { class: 'empty' }, 'Loading…'))));
-  const view = $('#view');
-  if (tab === 'admin') { view.replaceWith(h('iframe', { id: 'admin', src: '/admin', title: 'Admin dashboard' })); $('main').style.maxWidth = 'none'; return; }
-  try { listing = listing || await api('/me/servers'); } catch (e) { view.replaceChildren(h('div', { class: 'empty status err' }, e.message)); return; }
-  const rows = listing[tab];
-  const head = tab === 'manage'
-    ? [h('h1', {}, 'My servers'), h('p', { class: 'sub' }, 'Servers with Shapes where you’re the owner, an administrator, or have a role with manage server.')]
-    : [h('h1', {}, 'Other servers'), h('p', { class: 'sub' }, 'Servers with Shapes where you’re a member without manage-server access. You can see how their counting is going, but not change settings.')];
-  view.replaceChildren(...head, rows.length
-    ? h('div', { class: 'grid' }, rows.map(s => h(tab === 'manage' ? 'button' : 'div', { class: 'card server', onclick: tab === 'manage' ? () => openServer(s) : null },
-        icon(s), h('div', { class: 'meta' }, h('div', { class: 'name' }, s.name),
-          h('div', { class: 'small' }, [s.members ? s.members.toLocaleString() + ' members' : null, s.counting ? ('Counting: ' + s.counting.current.toLocaleString() + ' (best ' + s.counting.highest.toLocaleString() + ')') : null].filter(Boolean).join(' · '))))))
-    : h('div', { class: 'empty' }, tab === 'manage' ? 'You don’t manage any server that has Shapes.' : 'No other servers with Shapes.'));
+function menuFor(s) {
+  const mine = s.manage;
+  const items = mine ? SECTIONS : [['overview', 'Overview']];
+  return h('aside', { class: 'menu' }, h('div', { class: 'srv' }, icon(s), h('span', {}, s.name)),
+    items.flatMap(([id, label]) => [id === 'say' ? h('div', { class: 'grp' }, 'Speak as Shapes') : id === 'cmdlog' ? h('div', { class: 'grp' }, 'Logs') : null,
+      h('button', { 'aria-current': section === id ? 'true' : 'false', onclick: () => { section = id; draw(); } }, label)]));
 }
 
+async function selectServer(s) { current = s; section = 'overview'; detail = null; draw(); }
+
+async function draw() {
+  if (!listing) {
+    frame(null, h('div', { class: 'empty' }, 'Loading…'));
+    try { listing = await api('/me/servers'); } catch (e) { frame(null, h('div', { class: 'empty status err' }, e.message)); return; }
+  }
+  if (section === 'admin' && !current) { frame(null, h('iframe', { id: 'admin', src: '/admin', title: 'Admin dashboard' })); return; }
+  if (!current) { frame(null, homeView()); return; }
+  const menu = menuFor(current), view = h('div', {}, h('div', { class: 'empty' }, 'Loading…'));
+  frame(menu, view);
+  const stamp = current.id + section; let mine = stamp;
+  try {
+    if (current.manage && (!detail || detail.server.id !== current.id)) detail = await api('/me/servers/' + encodeURIComponent(current.id));
+    const built = await buildSection();
+    if (stamp !== current.id + section) return;      // the person clicked elsewhere meanwhile
+    view.replaceChildren(...[].concat(built));
+  } catch (e) { view.replaceChildren(h('div', { class: 'empty status err' }, e.message)); }
+}
+
+function homeView() {
+  const m = listing.manage, o = listing.other;
+  return [h('h1', {}, 'Welcome' + (BOOT.user ? ', ' + (BOOT.user.display || BOOT.user.name) : '')),
+    h('p', { class: 'sub' }, 'Pick a server on the left. Servers you manage open their settings; the dimmed ones are servers you’re in without manage access, where you can see how counting is going.'),
+    h('div', { class: 'grid' },
+      h('div', { class: 'card' }, h('h2', {}, 'You manage'), h('div', { class: 'stat' }, h('b', {}, m.length), m.length === 1 ? 'server' : 'servers')),
+      h('div', { class: 'card' }, h('h2', {}, 'You’re a member of'), h('div', { class: 'stat' }, h('b', {}, o.length), o.length === 1 ? 'more server' : 'more servers'))),
+    !m.length && !o.length ? h('div', { class: 'empty' }, 'None of your servers have Shapes yet.') : null];
+}
+
+// ---------------------------------------------------------------- small form helpers
 function field(label, input, cls = 'field') { return h('div', { class: cls }, h('label', {}, label), input); }
-function check(label, checked, id) { const i = h('input', { type: 'checkbox', id }); i.checked = !!checked; return [h('label', { class: 'check' }, i, label), i]; }
+function check(label, checked) { const i = h('input', { type: 'checkbox' }); i.checked = !!checked; return [h('label', { class: 'check' }, i, label), i]; }
 function select(options, value, empty) {
   const s = h('select', {}, empty != null ? h('option', { value: '' }, empty) : null, options.map(o => h('option', { value: o.id }, o.label)));
   s.value = value || ''; return s;
@@ -148,82 +223,154 @@ function num(value, min, max) { return h('input', { type: 'number', min, max, va
 function lines(arr) { return (arr || []).join('\n'); }
 function save(btn, status, fn) {
   btn.addEventListener('click', async () => {
-    btn.disabled = true; status.className = 'status'; status.textContent = 'Saving…';
-    try { await fn(); status.className = 'status ok'; status.textContent = 'Saved.'; } catch (e) { status.className = 'status err'; status.textContent = e.message; }
+    btn.disabled = true; status.className = 'status'; status.textContent = 'Working…';
+    try { const msg = await fn(); status.className = 'status ok'; status.textContent = msg || 'Saved.'; } catch (e) { status.className = 'status err'; status.textContent = e.message; }
     btn.disabled = false;
   });
 }
 function panel(title, about, ...body) { return h('section', { class: 'card panel' }, h('h2', {}, title), about ? h('p', { class: 'sub' }, about) : null, ...body); }
+const chans = () => detail.channels.map(c => ({ id: c.id, label: '#' + c.name + (c.category ? ' · ' + c.category : '') }));
+const roleOpts = () => detail.roles.map(r => ({ id: r.id, label: r.name }));
+const sid = () => encodeURIComponent(current.id);
+const head = (title, about) => [h('h1', {}, title), about ? h('p', { class: 'sub' }, about) : null];
 
-async function openServer(s) {
-  const view = $('#view'); view.replaceChildren(h('div', { class: 'empty' }, 'Loading…'));
-  let d; try { d = await api('/me/servers/' + encodeURIComponent(s.id)); } catch (e) { view.replaceChildren(h('div', { class: 'empty status err' }, e.message)); return; }
-  const sid = encodeURIComponent(s.id), chans = d.channels.map(c => ({ id: c.id, label: '#' + c.name + (c.category ? ' · ' + c.category : '') })), roles = d.roles.map(r => ({ id: r.id, label: r.name }));
-  const back = h('button', { class: 'back', onclick: () => show() }, '← All servers');
-  const title = h('div', { class: 'row' }, icon(d.server), h('div', {}, h('h1', {}, d.server.name), h('div', { class: 'small' }, d.server.members ? d.server.members.toLocaleString() + ' members' : '')));
+async function buildSection() {
+  if (section === 'overview') return overview();
+  return ({ counting, autorole, automod, say, dm, cmdlog, activity })[section]();
+}
 
-  // --- counting
-  const c = d.counting;
-  const [cEnLabel, cEn] = check('Counting enabled', c.enabled);
-  const cCh = select(chans, c.channel, 'No channel');
+function overview() {
+  const s = current, c = detail ? detail.counting : null;
+  const stats = [];
+  if (s.members) stats.push(h('div', { class: 'card' }, h('h2', {}, 'Members'), h('div', { class: 'stat' }, h('b', {}, s.members.toLocaleString()))));
+  const counting = c || (s.counting ? { enabled: true, number: s.counting.current, highestnumber: s.counting.highest } : null);
+  if (counting && counting.enabled !== false) stats.push(h('div', { class: 'card' }, h('h2', {}, 'Counting'), h('span', { class: 'stat' }, 'Current', h('b', {}, counting.number.toLocaleString())), h('span', { class: 'stat' }, 'Highest', h('b', {}, counting.highestnumber.toLocaleString()))));
+  return [...head(s.name, s.manage ? 'You can manage this server. Choose a section on the left.' : 'You’re a member here without manage access, so this is read-only.'),
+    stats.length ? h('div', { class: 'grid' }, stats) : h('div', { class: 'empty' }, 'Nothing to show yet.')];
+}
+
+function counting() {
+  const c = detail.counting;
+  const [enL, en] = check('Counting enabled', c.enabled), ch = select(chans(), c.channel, 'No channel');
   const em = { correct: h('input', { type: 'text', value: c.emojis.correct, maxlength: 64 }), warning: h('input', { type: 'text', value: c.emojis.warning, maxlength: 64 }), wrong: h('input', { type: 'text', value: c.emojis.wrong, maxlength: 64 }) };
-  const cSave = h('button', { class: 'primary' }, 'Save counting'), cReset = h('button', { class: 'ghost' }, 'Reset count to 0'), cStatus = h('div', { class: 'status' });
-  const cStats = h('div', {}, h('span', { class: 'stat' }, 'Current', h('b', {}, c.number.toLocaleString())), h('span', { class: 'stat' }, 'Highest', h('b', {}, c.highestnumber.toLocaleString())),
+  const sv = h('button', { class: 'primary' }, 'Save counting'), reset = h('button', { class: 'ghost' }, 'Reset count to 0'), st = h('div', { class: 'status' });
+  const stats = h('div', {}, h('span', { class: 'stat' }, 'Current', h('b', {}, c.number.toLocaleString())), h('span', { class: 'stat' }, 'Highest', h('b', {}, c.highestnumber.toLocaleString())),
     h('span', { class: 'stat' }, 'Warnings', h('b', {}, c.warnings + '/3')), c.lastcounter ? h('span', { class: 'stat' }, 'Last counter', h('b', {}, c.last_name ? '@' + c.last_name : c.lastcounter)) : null);
-  const countingBody = () => ({ enabled: cEn.checked, channel: cCh.value, emojis: { correct: em.correct.value, warning: em.warning.value, wrong: em.wrong.value } });
-  save(cSave, cStatus, async () => { await api('/me/servers/' + sid + '/counting', countingBody()); });
-  save(cReset, cStatus, async () => { const r = await api('/me/servers/' + sid + '/counting', { reset: true }); cStats.replaceWith(h('div', {}, 'Count reset to 0. Reload to see it.')); });
-  const counting = panel('Counting', 'Pick the channel and the emoji the bot reacts with.', cStats,
-    h('div', { class: 'row' }, cEnLabel, field('Channel', cCh)),
-    h('div', { class: 'row' }, field('Correct emoji', em.correct, 'field'), field('Warning emoji', em.warning, 'field'), field('Wrong emoji', em.wrong, 'field')),
-    h('div', { class: 'row' }, cSave, cReset, cStatus));
+  save(sv, st, async () => { await api('/me/servers/' + sid() + '/counting', { enabled: en.checked, channel: ch.value, emojis: { correct: em.correct.value, warning: em.warning.value, wrong: em.wrong.value } }); detail = null; });
+  save(reset, st, async () => { await api('/me/servers/' + sid() + '/counting', { reset: true }); detail = null; return 'Count reset to 0.'; });
+  return [...head('Counting', 'Pick the channel and the emoji the bot reacts with.'), panel('Settings', null, stats,
+    h('div', { class: 'row' }, enL, field('Channel', ch)),
+    h('div', { class: 'row' }, field('Correct emoji', em.correct), field('Warning emoji', em.warning), field('Wrong emoji', em.wrong)),
+    h('div', { class: 'row' }, sv, reset, st))];
+}
 
-  // --- autorole
-  const a = d.autorole;
-  const [aEnLabel, aEn] = check('Autorole enabled', a.enabled), [aBotLabel, aBots] = check('Also give it to bots', a.include_bots);
-  const aRole = select(roles, a.role_id, 'No role'), aEx = h('textarea', { placeholder: 'One user id per line' }, lines(a.exempt_users));
-  const aSave = h('button', { class: 'primary' }, 'Save autorole'), aStatus = h('div', { class: 'status' });
-  save(aSave, aStatus, () => api('/me/servers/' + sid + '/autorole', { enabled: aEn.checked, role_id: aRole.value, include_bots: aBots.checked, exempt_users: aEx.value.split(/[\s,]+/).filter(Boolean) }));
-  const autorole = panel('Autorole', 'A role new members get when they join. Exempt people never get it.',
-    h('div', { class: 'row' }, aEnLabel, aBotLabel, field('Role', aRole)), field('Exempt user ids', aEx, 'row'), h('div', { class: 'row' }, aSave, aStatus));
+function autorole() {
+  const a = detail.autorole;
+  const [enL, en] = check('Autorole enabled', a.enabled), [bL, bots] = check('Also give it to bots', a.include_bots);
+  const role = select(roleOpts(), a.role_id, 'No role'), ex = h('textarea', { placeholder: 'One user id per line' }, lines(a.exempt_users));
+  const sv = h('button', { class: 'primary' }, 'Save autorole'), st = h('div', { class: 'status' });
+  save(sv, st, async () => { await api('/me/servers/' + sid() + '/autorole', { enabled: en.checked, role_id: role.value, include_bots: bots.checked, exempt_users: ex.value.split(/[\s,]+/).filter(Boolean) }); detail = null; });
+  return [...head('Autorole', 'A role new members get when they join. Exempt people never get it.'), panel('Settings', null,
+    h('div', { class: 'row' }, enL, bL, field('Role', role)), field('Exempt user ids', ex, 'row'), h('div', { class: 'row' }, sv, st))];
+}
 
-  // --- automod
-  const m = d.automod, r = m.rules, act = m.actions;
-  const [mEnLabel, mEn] = check('Automod enabled', m.enabled);
-  const mLog = select(chans, m.log_channel, 'No log channel');
-  const ruleOn = {}, rule = (key, title, ...inner) => { const [l, i] = check(title, r[key].on); ruleOn[key] = i; return h('div', { class: 'rule' }, l, ...inner); };
+function automod() {
+  const m = detail.automod, r = m.rules, act = m.actions;
+  const [enL, en] = check('Automod enabled', m.enabled), log = select(chans(), m.log_channel, 'No log channel');
+  const on = {}, rule = (key, title, ...inner) => { const [l, i] = check(title, r[key].on); on[key] = i; return h('div', { class: 'rule' }, l, ...inner); };
   const words = h('textarea', { placeholder: 'One blocked word per line' }, lines(r.words.list)), allow = h('textarea', { placeholder: 'Allowed domains, one per line' }, lines(r.links.allow));
   const capsP = num(r.caps.percent, 30, 100), capsM = num(r.caps.min_length, 1, 200), spamC = num(r.spam.count, 2, 30), spamS = num(r.spam.seconds, 1, 120), menL = num(r.mentions.limit, 1, 50);
-  const [delL, delI] = check('Delete the message', act.delete), [warnL, warnI] = check('Warn the person', act.warn);
+  const [dL, d] = check('Delete the message', act.delete), [wL, w] = check('Warn the person', act.warn);
   const toA = num(act.timeout_after, 0, 50), toM = num(act.timeout_minutes, 1, 40320), kA = num(act.kick_after, 0, 50), stM = num(act.strike_minutes, 1, 1440);
-  const exRoles = h('select', { multiple: true, size: 5 }, roles.map(o => h('option', { value: o.id }, o.label)));
-  [...exRoles.options].forEach(o => { o.selected = m.exempt_roles.includes(o.value); });
-  const exCh = h('select', { multiple: true, size: 5 }, chans.map(o => h('option', { value: o.id }, o.label)));
-  [...exCh.options].forEach(o => { o.selected = m.exempt_channels.includes(o.value); });
-  const mSave = h('button', { class: 'primary' }, 'Save automod'), mStatus = h('div', { class: 'status' });
-  save(mSave, mStatus, () => api('/me/servers/' + sid + '/automod', {
-    enabled: mEn.checked, log_channel: mLog.value || null,
-    exempt_roles: [...exRoles.selectedOptions].map(o => o.value), exempt_channels: [...exCh.selectedOptions].map(o => o.value),
-    rules: { words: { on: ruleOn.words.checked, list: words.value }, links: { on: ruleOn.links.checked, allow: allow.value }, invites: { on: ruleOn.invites.checked },
-      caps: { on: ruleOn.caps.checked, percent: capsP.value, min_length: capsM.value }, spam: { on: ruleOn.spam.checked, count: spamC.value, seconds: spamS.value }, mentions: { on: ruleOn.mentions.checked, limit: menL.value } },
-    actions: { delete: delI.checked, warn: warnI.checked, timeout_after: toA.value, timeout_minutes: toM.value, kick_after: kA.value, strike_minutes: stM.value } }));
-  const automod = panel('Automod', 'Rule breakers get their message removed and a strike; enough strikes in a short time means a timeout or kick.',
-    h('div', { class: 'row' }, mEnLabel, field('Log channel', mLog)),
-    h('div', { class: 'rules' },
-      rule('words', 'Blocked words', words), rule('links', 'Links', allow), rule('invites', 'Server invites'),
+  const exR = h('select', { multiple: true, size: 5 }, roleOpts().map(o => h('option', { value: o.id }, o.label)));
+  [...exR.options].forEach(o => { o.selected = m.exempt_roles.includes(o.value); });
+  const exC = h('select', { multiple: true, size: 5 }, chans().map(o => h('option', { value: o.id }, o.label)));
+  [...exC.options].forEach(o => { o.selected = m.exempt_channels.includes(o.value); });
+  const sv = h('button', { class: 'primary' }, 'Save automod'), st = h('div', { class: 'status' });
+  save(sv, st, async () => { await api('/me/servers/' + sid() + '/automod', {
+    enabled: en.checked, log_channel: log.value || null, exempt_roles: [...exR.selectedOptions].map(o => o.value), exempt_channels: [...exC.selectedOptions].map(o => o.value),
+    rules: { words: { on: on.words.checked, list: words.value }, links: { on: on.links.checked, allow: allow.value }, invites: { on: on.invites.checked },
+      caps: { on: on.caps.checked, percent: capsP.value, min_length: capsM.value }, spam: { on: on.spam.checked, count: spamC.value, seconds: spamS.value }, mentions: { on: on.mentions.checked, limit: menL.value } },
+    actions: { delete: d.checked, warn: w.checked, timeout_after: toA.value, timeout_minutes: toM.value, kick_after: kA.value, strike_minutes: stM.value } }); detail = null; });
+  return [...head('Automod', 'Rule breakers get their message removed and a strike; enough strikes in a short time means a timeout or kick.'), panel('Settings', null,
+    h('div', { class: 'row' }, enL, field('Log channel', log)),
+    h('div', { class: 'rules' }, rule('words', 'Blocked words', words), rule('links', 'Links', allow), rule('invites', 'Server invites'),
       rule('caps', 'Too many capitals', h('div', { class: 'row' }, field('Percent', capsP), field('Min length', capsM))),
       rule('spam', 'Spam', h('div', { class: 'row' }, field('Messages', spamC), field('In seconds', spamS))),
       rule('mentions', 'Mass mentions', h('div', { class: 'row' }, field('Max mentions', menL)))),
-    h('h2', { style: 'margin-top:16px' }, 'Punishments'), h('div', { class: 'row' }, delL, warnL),
+    h('h2', { style: 'margin-top:16px' }, 'Punishments'), h('div', { class: 'row' }, dL, wL),
     h('div', { class: 'row' }, field('Timeout after (strikes, 0 = never)', toA), field('Timeout minutes', toM), field('Kick after (strikes, 0 = never)', kA), field('Strikes expire after (minutes)', stM)),
-    h('div', { class: 'row' }, field('Exempt roles (hold Ctrl/Cmd to pick several)', exRoles), field('Exempt channels', exCh)),
-    h('div', { class: 'row' }, mSave, mStatus));
+    h('div', { class: 'row' }, field('Exempt roles (hold Ctrl/Cmd for several)', exR), field('Exempt channels', exC)), h('div', { class: 'row' }, sv, st))];
+}
 
-  view.replaceChildren(back, title, counting, autorole, automod);
+// ---------------------------------------------------------------- speak as Shapes
+function hiddenBox() {
+  if (!detail.staff) return [null, null];
+  return check('Hide who sent this (bot admins only)', false);
+}
+
+function say() {
+  const ch = select(chans(), '', 'Pick a channel'), title = h('input', { type: 'text', maxlength: 200, placeholder: 'Optional title' }), msg = h('textarea', { maxlength: 1800, placeholder: 'What should Shapes say?' }), img = h('input', { type: 'text', placeholder: 'Optional image link (https)' });
+  const [hL, hide] = hiddenBox(), sv = h('button', { class: 'primary' }, 'Send as Shapes'), st = h('div', { class: 'status' });
+  save(sv, st, async () => {
+    const r = await api('/me/servers/' + sid() + '/say', { channel: ch.value, message: msg.value, title: title.value, image_url: img.value, hidden: hide ? hide.checked : false });
+    msg.value = ''; return r.footer ? 'Sent. It shows: “' + r.footer + '”' : 'Sent (sender hidden).';
+  });
+  return [...head('Send as Shapes', 'Shapes posts your message in the channel. It always says who sent it and when' + (detail.staff ? ', unless you hide it.' : '.')),
+    panel('Message', null, field('Channel', ch, 'row'), field('Title', title, 'row'), field('Message', msg, 'row'), field('Image', img, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
+}
+
+function dm() {
+  const picked = new Map(), chips = h('div', { class: 'pick' }), results = h('div', { class: 'results', hidden: true });
+  const q = h('input', { type: 'text', placeholder: 'Search members by name' }), msg = h('textarea', { maxlength: 1500, placeholder: 'Message to send (they’ll see who it’s from)' });
+  const [hL, hide] = hiddenBox(), sv = h('button', { class: 'primary' }, 'Send messages'), st = h('div', { class: 'status' });
+  const redraw = () => chips.replaceChildren(...[...picked].map(([id, name]) => h('span', { class: 'chip' }, name, h('button', { 'aria-label': 'Remove ' + name, onclick: () => { picked.delete(id); redraw(); } }, '×'))));
+  let timer; q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(async () => {
+    if (!q.value.trim()) { results.hidden = true; return; }
+    try { const r = await api('/me/servers/' + sid() + '/members?q=' + encodeURIComponent(q.value.trim()));
+      results.replaceChildren(...(r.members.length ? r.members.map(m => h('button', { onclick: () => { picked.set(m.id, m.display || m.name); redraw(); q.value = ''; results.hidden = true; } }, m.avatar ? h('img', { class: 'avatar', src: m.avatar, alt: '' }) : h('div', { class: 'avatar' }), (m.display || m.name) + ' (@' + m.name + ')')) : [h('div', { class: 'empty' }, 'No one found.')]));
+      results.hidden = false; } catch (e) { st.className = 'status err'; st.textContent = e.message; } }, 250); });
+  save(sv, st, async () => {
+    const r = await api('/me/servers/' + sid() + '/dm', { user_ids: [...picked.keys()], message: msg.value, hidden: hide ? hide.checked : false });
+    msg.value = ''; return 'Sent to ' + r.sent + (r.failed.length ? ' · ' + r.failed.length + ' couldn’t be reached (DMs closed?)' : '') + '.';
+  });
+  return [...head('Message members', 'Shapes sends each person a DM. It says who sent it and which server it’s from. Up to 25 people at a time.'),
+    panel('Recipients', null, field('Find a member', q, 'row'), results, chips, field('Message', msg, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
+}
+
+// ---------------------------------------------------------------- logs
+async function cmdlog() {
+  const d = await api('/me/servers/' + sid() + '/cmdlog'), cfg = d.config;
+  const [enL, en] = check('Log commands', cfg.enabled), ch = select(chans(), cfg.channel, 'No channel');
+  const sv = h('button', { class: 'primary' }, 'Save'), st = h('div', { class: 'status' }), warn = h('div');
+  const send = async (confirm) => api('/me/servers/' + sid() + '/cmdlog', { channel: ch.value || null, enabled: en.checked, confirm_public: confirm === true });
+  save(sv, st, async () => {
+    try { await send(false); } catch (e) {
+      if (e.status !== 409) throw e;
+      const yes = h('button', { class: 'ghost' }, 'Log publicly anyway'), no = h('button', { class: 'ghost' }, 'Cancel');
+      warn.replaceChildren(h('div', { class: 'warn' }, h('b', {}, '⚠ That channel is public. '), e.data.warning, h('div', { class: 'row' }, yes, no)));
+      no.onclick = () => warn.replaceChildren(); yes.onclick = async () => { try { await send(true); warn.replaceChildren(); st.className = 'status ok'; st.textContent = 'Saved (public logging).'; draw(); } catch (e2) { st.className = 'status err'; st.textContent = e2.message; } };
+      return 'Waiting for your answer…';
+    }
+  });
+  const rows = d.rows.length ? h('table', { class: 'log' }, h('thead', {}, h('tr', {}, ['When', 'Who', 'Command', 'Channel'].map(t => h('th', {}, t)))),
+    h('tbody', {}, d.rows.map(r => h('tr', {}, h('td', {}, when(r.at)), h('td', {}, '@' + r.username), h('td', {}, '/' + r.command + (r.args ? ' ' + r.args : '')), h('td', {}, '#' + ((detail.channels.find(c => c.id === r.channel_id) || {}).name || r.channel_id)))))) : h('div', { class: 'empty' }, 'No commands logged yet.');
+  const how = cfg.mode === 'bot' ? 'Posting as the bot (Yapin’ wouldn’t let me make a webhook).' : cfg.mode === 'webhook' ? 'Posting through a webhook.' : 'Posts through a webhook when possible, otherwise as the bot.';
+  return [...head('Command log', 'Every command run in this server is written to a channel and kept here.'),
+    d.owner ? panel('Setup (server owner)', how, h('div', { class: 'row' }, enL, field('Log channel', ch)), d.channel_public ? h('div', { class: 'warn' }, '⚠ The log channel can be read by everyone in the server.') : null, warn, h('div', { class: 'row' }, sv, st))
+            : panel('Setup', 'Only the server owner can change this.'),
+    panel('Recent commands', 'Newest first.', rows)];
+}
+
+async function activity() {
+  const d = await api('/me/servers/' + sid() + '/log');
+  return [...head('Activity log', 'What people did from this dashboard (sends, DMs, settings), with who and when.'),
+    panel('Recent', null, d.actions.length ? h('table', { class: 'log' }, h('thead', {}, h('tr', {}, ['When', 'Who', 'What'].map(t => h('th', {}, t)))),
+      h('tbody', {}, d.actions.map(a => h('tr', {}, h('td', {}, when(a.at)), h('td', {}, '@' + a.actor), h('td', {}, a.kind + (a.target ? ' → ' + a.target : '') + (a.detail ? ': ' + a.detail : '')))))) : h('div', { class: 'empty' }, 'Nothing yet.'))];
 }
 
 renderHeader();
-if (!BOOT.user) loginPage(); else show();
+if (!BOOT.user) loginPage(); else draw();
 </script>
 </body>
 </html>

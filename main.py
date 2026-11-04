@@ -51,6 +51,8 @@ class _Stamped:
     def write(self, text):
         if not text:
             return 0
+        if isinstance(text, (bytes, bytearray)):          # some libraries (click) write bytes
+            text = bytes(text).decode("utf-8", "replace")
         with self._lock:
             out = []
             for chunk in text.splitlines(keepends=True):
