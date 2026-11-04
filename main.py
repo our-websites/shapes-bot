@@ -5184,8 +5184,19 @@ def rate_limited(limit=60, window=60):
     return deco
 
 
+def _is_shapes_api_call():
+    """The Shapes API (same machine) presenting the internal token. It is how api.shapes.lol reads /mutuals for its keyed
+    route; nothing that arrives through a proxy counts."""
+    if not API_INTERNAL_TOKEN or request.remote_addr not in ("127.0.0.1", "::1") or request.headers.get("X-Forwarded-For"):
+        return False
+    header = request.headers.get("Authorization", "")
+    return header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip(), API_INTERNAL_TOKEN)
+
+
 def admin_required(f):
     def wrapped(*args, **kwargs):
+        if request.path == "/mutuals" and _is_shapes_api_call():
+            return f(*args, **kwargs)
         if not _is_admin_session():
             if request.path.startswith("/api/") or request.path == "/mutuals":
                 return jsonify({"error": "login required"}), 401
