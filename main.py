@@ -1748,7 +1748,7 @@ async def ai(interaction: discord.Interaction, *, prompt: str):
                 "Stay safe, respectful, and friendly."
                 "Your name is Shapes, the support server is https://yapin.gg/invite/shapes if a user requests it or if you think the prompt is support related."
                 "Please stay away from nsfw/bad topics, it will get you deleted/banned."
-                "You're created/owned by Spooky Inc. with leandre as your main developer and nathan as the second developer."
+                "You're created/owned by Spooky Inc. with leandre as your main developer."
             )
         }
     ]
