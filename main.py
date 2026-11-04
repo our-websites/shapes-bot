@@ -249,8 +249,49 @@ def total_members():
     return total
 
 
+COUNTING_EMOJI_DEFAULT = {"correct": "👍", "warning": "⚠️", "wrong": "❌"}
+COUNTING_EMOJI_NAMES = {"correct": "correct", "right": "correct", "good": "correct", "warning": "warning", "warn": "warning",
+                        "wrong": "wrong", "incorrect": "wrong", "ruined": "wrong", "fail": "wrong"}
+
+
 def default_counting():
-    return {"channel": None, "number": 0, "enabled": False, "warnings": 0, "lastcounter": None, "highestnumber": 0, "banned": False}
+    return {"channel": None, "number": 0, "enabled": False, "warnings": 0, "lastcounter": None, "highestnumber": 0, "banned": False,
+            "emojis": dict(COUNTING_EMOJI_DEFAULT)}
+
+
+def clean_emoji(value):
+    """One emoji (Unicode or a custom one written like :name: / <:name:id>), or None when it isn't usable."""
+    value = str(value or "").strip()
+    return value if value and len(value) <= 64 and not re.search(r"\s", value) else None
+
+
+def counting_emojis(data):
+    """The three emoji a server uses, falling back to the defaults for any that are missing."""
+    chosen = (data or {}).get("emojis") or {}
+    return {k: clean_emoji(chosen.get(k)) or v for k, v in COUNTING_EMOJI_DEFAULT.items()}
+
+
+def _counter_label(user_id):
+    """'<@id> (@username)' for the last person to count, or None."""
+    if not user_id:
+        return None
+    name = yshim.fetch_user(user_id).get("username")
+    return f"<@{user_id}>" + (f" (@{name})" if name else "")
+
+
+def counting_stats_embed(data, color, requester):
+    """What anyone may see: how far the count is. No settings."""
+    nxt = data.get("number", 0) + 1
+    embed = discord.Embed(title="Counting", color=color)
+    embed.add_field(name="Current Number", value=f"`{data.get('number', 0):,}`", inline=True)
+    embed.add_field(name="Highest Number", value=f"`{data.get('highestnumber', 0):,}`", inline=True)
+    embed.add_field(name="Next Number", value=f"`{nxt:,}`", inline=True)
+    if data.get("lastcounter"):
+        embed.add_field(name="Last Counter", value=_counter_label(data["lastcounter"]), inline=False)
+    if data.get("channel"):
+        embed.add_field(name="Channel", value=f"<#{data['channel']}>", inline=False)
+    embed.set_footer(text=f"Requested By {requester} | {MainURL}")
+    return embed
 
 
 async def need_admin(interaction):
@@ -434,12 +475,20 @@ async def restart(interaction: discord.Interaction):
     threading.Timer(1.5, relaunch).start()
 
 
-@bot.tree.command(name="counting", description="Counting Settings: /counting [toggle|channel <#channel>]")
+@bot.tree.command(name="counting", description="Counting: stats for everyone; admins can use /counting [toggle|channel|emoji]")
 async def counting(interaction: discord.Interaction, action: str = "", value: str = ""):
-    if not await need_admin(interaction):
+    if interaction.is_dm:
+        await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
         return
     sid = str(interaction.guild_id)
-    data = countingDB.get(sid) or default_counting()
+    data = {**default_counting(), **(countingDB.get(sid) or {})}
+    is_staff = yshim.is_admin(interaction.guild_id, interaction.user.id)
+    if not is_staff:
+        if not data.get("channel") and not data.get("enabled"):
+            await interaction.response.send_message("Counting isn't set up in this server.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=counting_stats_embed(data, ecolor(interaction.user.id), interaction.user.name))
+        return
     action = action.lower()
     if action == "toggle":
         data["enabled"] = not data["enabled"]
@@ -449,21 +498,37 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
     if action == "channel":
         ch = resolve_channel(sid, value) if value else None
         if not ch:
-            await interaction.response.send_message("Tell me which text channel: `/counting channel #general`")
+            await interaction.response.send_message("Tell me which text channel: `/counting channel #general`", ephemeral=True)
             return
         data["channel"] = str(ch.get("id"))
         countingDB.set(sid, data)
         await interaction.response.send_message(f"Counting channel set to <#{ch.get('id')}>.")
         return
+    if action in ("emoji", "emojis"):
+        parts = value.split(None, 1)
+        kind = COUNTING_EMOJI_NAMES.get(parts[0].lower()) if parts else None
+        if parts and parts[0].lower() == "reset":
+            data["emojis"] = dict(COUNTING_EMOJI_DEFAULT)
+            countingDB.set(sid, data)
+            await interaction.response.send_message("Counting emoji are back to the defaults.", ephemeral=True)
+            return
+        emoji = clean_emoji(parts[1]) if len(parts) > 1 else None
+        if not kind or not emoji:
+            await interaction.response.send_message("Usage: `/counting emoji <correct|warning|wrong> <emoji>` or `/counting emoji reset`", ephemeral=True)
+            return
+        data["emojis"] = {**counting_emojis(data), kind: emoji}
+        countingDB.set(sid, data)
+        await interaction.response.send_message(f"The **{kind}** emoji is now {emoji}", ephemeral=True)
+        return
     countingDB.set(sid, data)
+    emo = counting_emojis(data)
     channel = f"<#{data['channel']}>" if data["channel"] else "not set"
-    embed = discord.Embed(
-        title="Counting Settings", color=ecolor(interaction.user.id),
-        description=f"**Current Settings:**\n- Counting Enabled: `{data['enabled']}`\n- Counting Channel: {channel}\n"
-                    f"- Current Number: `{data['number']}`\n- Highest Number: `{data.get('highestnumber', 0)}`\n"
-                    f"- Warnings: `{data['warnings']}`\n- Last Counter: `{data['lastcounter']}`\n\n"
-                    f"Change it with `/counting toggle` or `/counting channel #channel`")
-    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
+    embed = counting_stats_embed(data, ecolor(interaction.user.id), interaction.user.name)
+    embed.title = "Counting Settings"
+    embed.add_field(name="Enabled", value=f"`{data['enabled']}`", inline=True)
+    embed.add_field(name="Warnings", value=f"`{data['warnings']}`/3", inline=True)
+    embed.add_field(name="Emoji", value=f"Correct {emo['correct']}  ·  Warning {emo['warning']}  ·  Wrong {emo['wrong']}", inline=False)
+    embed.add_field(name="Change it", value="`/counting toggle` · `/counting channel #channel` · `/counting emoji <correct|warning|wrong> <emoji>`", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -626,7 +691,7 @@ async def autorole(interaction: discord.Interaction, action: str = "status", *, 
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="Bot Help & Commands", color=ecolor(interaction.user.id),
                           description="Use `/command` or `!command`. Put names with spaces in quotes.")
-    embed.add_field(name="Counting", value="• /counting - Counting settings (`toggle`, `channel #channel`)\n• /countingleaderboard - Leaderboard website", inline=False)
+    embed.add_field(name="Counting", value="• /counting - Count stats for everyone; admins also get settings (`toggle`, `channel #channel`, `emoji <correct|warning|wrong> <emoji>`)\n• /countingleaderboard - Leaderboard website", inline=False)
     embed.add_field(name="User Settings", value="• /settings - Customize your embed color\n• /autorole - Give new members a role\n• /lastfm - Link Last.fm", inline=False)
     embed.add_field(name="Moderation", value="• /automod - Block words, links, invites, spam, caps and mass mentions (admins)\n• /serverinfo - Server information", inline=False)
     embed.add_field(name="Roblox", value=(
@@ -4941,31 +5006,47 @@ def handle_counting(msg):
     def save():
         countingDB.set(sid, data)
 
+    emo = counting_emojis(data)
+
+    def react(kind):
+        """Add the server's emoji; if Yapin won't take a custom one, use the default so the count still gets a reaction."""
+        try:
+            bot.react(channel, mid, emo[kind])
+        except Exception as e:
+            if emo[kind] != COUNTING_EMOJI_DEFAULT[kind]:
+                print(f"[counting] emoji {emo[kind]!r} rejected ({e}); using the default")
+                try:
+                    bot.react(channel, mid, COUNTING_EMOJI_DEFAULT[kind])
+                except Exception:
+                    pass
+
     if str(value) == str(next_number) and author != last:
         data.update(number=next_number, lastcounter=author, highestnumber=max(highest, next_number))
         save()
-        bot.react(channel, mid, "👍")
+        react("correct")
         return
 
     if author == last and warnings != 3:
-        bot.react(channel, mid, "⚠️")
-        bot.send(channel, ":warning: You can't count by yourself!".replace(":warning:", "⚠️"), reply_to=mid)
+        react("warning")
+        bot.send(channel, f"{emo['warning']} You can't count by yourself!", reply_to=mid)
         data["warnings"] = warnings + 1
         save()
         return
     if warnings < 3:
-        bot.react(channel, mid, "⚠️")
-        bot.send(channel, f"⚠️ The next number is {next_number}", reply_to=mid)
+        react("warning")
+        bot.send(channel, f"{emo['warning']} The next number is {next_number}", reply_to=mid)
         data["warnings"] = warnings + 1
         save()
         return
 
-    bot.react(channel, mid, "❌")
+    react("wrong")
     data["highestnumber"] = max(highest, number)
+    name = yshim.fetch_user(author).get("username")
+    who = f"{mention} (@{name})" if name else mention
     if number == 0:
-        bot.send(channel, f"❌ {mention} ruined it at 1, the next number is 1 (again)")
+        bot.send(channel, f"{emo['wrong']} {who} ruined it at 1, the next number is 1 (again)")
     else:
-        bot.send(channel, f"❌ {mention} ruined it at {number}, the next number is 1")
+        bot.send(channel, f"{emo['wrong']} {who} ruined it at {number}, the next number is 1")
     data.update(number=0, warnings=0, lastcounter=None)
     save()
 
@@ -5532,6 +5613,9 @@ def _vcounting(v):
     for key in ("channel", "lastcounter"):
         if out[key] is not None:
             out[key] = str(out[key])
+    if not isinstance(out.get("emojis"), dict):
+        raise ValueError('"emojis" must be an object like {"correct": "👍", "warning": "⚠️", "wrong": "❌"}.')
+    out["emojis"] = {k: clean_emoji(out["emojis"].get(k)) or d for k, d in COUNTING_EMOJI_DEFAULT.items()}
     return out
 
 
