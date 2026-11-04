@@ -47,4 +47,4 @@ bot's own data, and a dashboard at `/dashboard`:
 - **My servers**: owners, administrators and people with a manage-server role can edit automod, counting (channel, emoji) and autorole.
 - **Other servers**: servers you're in with Shapes but can't manage (read-only counting stats).
 - **Admin** (only for `ADMIN_USER_IDS`): the bot-owner dashboard, also reachable at `/admin` (the `ADMIN_KEY` login still works).
-- Activities live in `activity/` and are public under `/activity`.
+- Activities: `/activity` redirects to the dashboard until Yapper has an activity SDK. Set `ACTIVITIES_ENABLED=1` to serve the `activity/` folder publicly.

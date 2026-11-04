@@ -5152,6 +5152,8 @@ def _web_file(name):
 # --- activities: the activity/ folder is public under /activity ---
 
 ACTIVITY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "activity")
+# No Yapper activity SDK exists yet, so /activity sends people to the dashboard. Set ACTIVITIES_ENABLED=1 to serve the folder.
+ACTIVITIES_ENABLED = os.environ.get("ACTIVITIES_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _activity_list():
@@ -5174,19 +5176,23 @@ def _activity_list():
 @app.route("/activity/")
 @app.route("/activity")
 def activity_index():
+    if not ACTIVITIES_ENABLED:
+        return redirect("/dashboard", 302)
     if os.path.isfile(os.path.join(ACTIVITY_DIR, "index.html")):
         from flask import send_from_directory
         return send_from_directory(ACTIVITY_DIR, "index.html")
     rows = "".join(f'<li><a href="/activity/{urllib.parse.quote(a["slug"])}/"><b>{_html_escape(a["name"])}</b></a>'
                    f'{"<br><span>" + _html_escape(a["description"]) + "</span>" if a["description"] else ""}</li>' for a in _activity_list())
     return Response("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Activities</title>"
-                    "<style>:root{color-scheme:light dark}body{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem}"
+                    "<style>:root{color-scheme:dark}body{background:#050505;color:#fff;font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem}"
                     "li{margin:.8rem 0}span{opacity:.7}a{text-decoration:none}</style><h1>Activities</h1>"
                     f"<ul>{rows or '<li>No activities yet.</li>'}</ul>", mimetype="text/html")
 
 
 @app.route("/activity/<path:subpath>")
 def activity_files(subpath):
+    if not ACTIVITIES_ENABLED:
+        return redirect("/dashboard", 302)
     from flask import abort, send_from_directory
     parts = [p for p in subpath.split("/") if p]
     if not parts or any(p.startswith((".", "_")) for p in parts):

@@ -4,16 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;800&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
 <title>Sign in · Shapes</title>
 <style>
-  :root {
-    --bg: #f4f3f0; --panel: #ffffff; --ink: #1d1c1a; --muted: #6d6a64; --line: #dcd9d2;
-    --accent: #2f4fd1; --accent-ink: #ffffff; --danger: #b3261e; --field: #fbfaf8;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #151514; --panel: #1d1d1b; --ink: #ecebe7; --muted: #9a978f; --line: #33322f;
-            --accent: #7c93f5; --accent-ink: #11131c; --danger: #f2877f; --field: #171716; }
-  }
+  :root { color-scheme: dark; --bg:#050505; --panel:#0d0d0f; --sunk:#0a0a0b; --ink:#ffffff; --muted:#9b9b9f; --line:rgba(160,160,170,.25);
+    --accent:#6366f1; --accent-ink:#ffffff; --accent-soft:rgba(99,102,241,.2); --danger:#f2877f; --ok:#6fcf8d; --field:#08080a; }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
@@ -45,6 +40,11 @@
            border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
            color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
   footer { padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
+  body { font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; }
+  h1,h2,.brand span { font-family:"Poppins","Inter",sans-serif; }
+  button.primary, button[type=submit] { background:linear-gradient(135deg,#6366f1,#4f46e5); color:#fff; }
+  ::-webkit-scrollbar { width:12px; } ::-webkit-scrollbar-track { background:#050505; } ::-webkit-scrollbar-thumb { background:rgba(99,102,241,.4); border-radius:6px; border:3px solid #050505; }
+  * { scrollbar-width:thin; scrollbar-color:rgba(99,102,241,.4) #050505; }
 </style>
 </head>
 <body>

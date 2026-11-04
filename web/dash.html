@@ -4,10 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dashboard · Shapes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;800&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="https://our-websites.github.io/cdn.shapes.lol/shapes/favicon.ico">
 <style>
-  :root { --bg:#f4f3f0; --panel:#fff; --ink:#1d1c1a; --muted:#6d6a64; --line:#dcd9d2; --accent:#2f4fd1; --accent-ink:#fff; --danger:#b3261e; --ok:#1f7a3d; --field:#fbfaf8; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#151514; --panel:#1d1d1b; --ink:#ecebe7; --muted:#9a978f; --line:#33322f; --accent:#7c93f5; --accent-ink:#11131c; --danger:#f2877f; --ok:#6fcf8d; --field:#171716; } }
+  :root { color-scheme: dark; --bg:#050505; --panel:#0d0d0f; --sunk:#0a0a0b; --ink:#ffffff; --muted:#9b9b9f; --line:rgba(160,160,170,.25);
+    --accent:#6366f1; --accent-ink:#ffffff; --accent-soft:rgba(99,102,241,.2); --danger:#f2877f; --ok:#6fcf8d; --field:#08080a; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; -webkit-font-smoothing:antialiased; }
   a { color: var(--accent); }
@@ -39,14 +41,40 @@
   .stat { display:inline-block; margin-right:16px; } .stat b { font-size:18px; display:block; }
   .empty { color:var(--muted); padding:24px 0; text-align:center; }
   .badge { font-size:12px; border:1px solid var(--line); border-radius:999px; padding:1px 8px; color:var(--muted); }
-  iframe#admin { width:100%; height:calc(100vh - 130px); border:1px solid var(--line); border-radius:12px; background:var(--panel); }
+  iframe#admin { width:100%; height:calc(100vh - 150px); border:1px solid var(--line); border-radius:16px; background:var(--bg); color-scheme:dark; }
   .login { max-width:380px; margin:12vh auto; text-align:center; } .login p { color:var(--muted); }
   .login a.btn { display:inline-block; margin-top:8px; text-decoration:none; font-weight:600; background:var(--accent); color:var(--accent-ink); padding:11px 18px; border-radius:10px; }
+
+  /* landing-page look: near-black, faint dots, glassy pills and cards, Poppins/Inter, indigo accent */
+  body { font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; }
+  h1,h2,.brand,button.primary,.login a.btn { font-family:"Poppins","Inter",sans-serif; }
+  body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:.8; mix-blend-mode:screen;
+    background-image:radial-gradient(circle at 10% 20%,rgba(255,255,255,.06) 0 1px,transparent 1px),radial-gradient(circle at 70% 40%,rgba(255,255,255,.04) 0 1px,transparent 1px),
+      radial-gradient(circle at 30% 70%,rgba(255,255,255,.03) 0 1px,transparent 1px),radial-gradient(circle at 80% 12%,rgba(255,255,255,.05) 0 1px,transparent 1px); background-size:240px 240px; }
+  body > * { position:relative; }
+  header { max-width:880px; width:calc(100% - 32px); margin:24px auto 12px; border:1px solid rgba(255,255,255,.05); border-radius:999px; padding:8px 16px; background:rgba(255,255,255,.03);
+    box-shadow:0 2px 10px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.02); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); }
+  header .brand { display:flex; align-items:center; gap:8px; } header .brand img { width:28px; height:28px; border-radius:50%; }
+  header .links { display:flex; gap:14px; font-size:14px; } header .links a { color:var(--muted); text-decoration:none; } header .links a:hover { color:var(--ink); }
+  nav.tabs { max-width:880px; margin:0 auto; border:0; background:none; padding:0 16px; }
+  nav.tabs button { border-radius:999px; border:1px solid transparent; padding:8px 16px; margin:4px 2px; }
+  nav.tabs button[aria-selected=true] { background:rgba(255,255,255,.05); border-color:var(--line); color:var(--ink); }
+  .card { background:rgba(255,255,255,.03); border:1px solid var(--line); box-shadow:0 8px 24px rgba(0,0,0,.35); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); transition:transform .25s ease,border-color .25s ease,box-shadow .25s ease; }
+  .server:hover { transform:translateY(-3px); box-shadow:0 12px 32px rgba(99,102,241,.25); }
+  input[type=text],input[type=number],select,textarea { background:rgba(0,0,0,.35); }
+  button.primary,.login a.btn { background:linear-gradient(135deg,#6366f1,#4f46e5); box-shadow:0 4px 14px rgba(99,102,241,.35); }
+  button.primary:hover,.login a.btn:hover { transform:translateY(-2px); box-shadow:0 8px 22px rgba(99,102,241,.45); }
+  button.ghost { border-color:var(--line); } button.ghost:hover { background:rgba(255,255,255,.05); }
+  main { padding-top:12px; } h1 { font-size:26px; font-weight:800; } .badge { background:rgba(99,102,241,.15); border-color:rgba(99,102,241,.4); color:#c7c8ff; }
+  .login { background:rgba(255,255,255,.03); border:1px solid var(--line); border-radius:16px; padding:32px 24px; }
+  ::-webkit-scrollbar { width:12px; } ::-webkit-scrollbar-track { background:#050505; } ::-webkit-scrollbar-thumb { background:rgba(99,102,241,.4); border-radius:6px; border:3px solid #050505; }
+  * { scrollbar-width:thin; scrollbar-color:rgba(99,102,241,.4) #050505; }
 </style>
 </head>
 <body>
 <header>
-  <a class="brand" href="/">Shapes</a><span class="badge">Dashboard</span><span class="grow"></span>
+  <a class="brand" href="/"><img src="https://our-websites.github.io/cdn.shapes.lol/shapes/logo.png" alt="">Shapes</a><span class="badge">Dashboard</span><span class="grow"></span>
+  <div class="links"><a href="/commands">Commands</a><a href="/counting/leaderboard/">Leaderboard</a></div>
   <div class="me" id="me"></div>
 </header>
 <div id="app"></div>
