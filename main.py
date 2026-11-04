@@ -171,7 +171,6 @@ def yapin_of_roblox(roblox):
         return None
     return (data.get("data"), bool(data.get("hidden")))
 GoogleAPIKey = _secret("GOOGLE_API_KEY", "GoogleToken.txt")
-SPOOK_API_KEY = _secret("SPOOK_API_KEY", "SpookToken.txt") or ""
 ADMIN_KEY = _secret("ADMIN_KEY", "akey.txt")
 
 bot_ready = False
@@ -737,7 +736,7 @@ async def help_command(interaction: discord.Interaction):
         "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox\n• /vortexgame, /vortexuser - PlayVortex lookups"), inline=False)
     embed.add_field(name="Utility", value=(
         "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI\n• /github - GitHub user\n"
-        "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp, /yapin2spook - spook.bio"), inline=False)
+        "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp - spook.bio"), inline=False)
     embed.add_field(name="Yapper profile", value="• /yapinuser - Info about a user\n• /yapinavatar - Avatar\n• /yapinbanner - Banner", inline=False)
     embed.set_footer(text="Right-click context menus from the Discord bot are not available on Yapper; use the slash commands.")
     await interaction.response.send_message(embed=embed)
@@ -1392,27 +1391,6 @@ async def spookpfp(interaction: discord.Interaction, username: str = "leandre"):
         print("Fetched data successfully!")
     else:
         await interaction.response.send_message(f":x: {username} Not Found :x:", ephemeral=False)
-        print(f"Error fetching data: {response.status_code}")
-
-
-# --- yapin2spook ---
-@bot.tree.command(name="yapin2spook", description="Get a Spook profile from a Yapin user.")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def yapin2spook(interaction: discord.Interaction, user: discord.User): # = 481295611417853982):
-    url = f"https://spook.bio/api/profiles?discordId={user.id}"
-    print(user.id)
-    print(url)
-    response = requests.get(url, headers={"Authorization": f"{SPOOK_API_KEY}"})
-    data = response.json()
-    if response.status_code == 200:
-        await interaction.response.send_message(f"{user.mention}'s [Spook Profile](https://spook-v3.onrender.com/@{data.get('username')})", ephemeral=False)
-        print(f"Fetched {data['username']} successfully!")
-    else:
-        if interaction.user.name == user.name:
-            await interaction.response.send_message(f":x: You don't have a Spook profile linked to your account {user.mention}! :x: To link your profile to your account create a spook.bio account [here](https://spook.bio/login)")
-            return
-        await interaction.response.send_message(f":x: {user.mention} doesn't have a Spook profile linked to their account! :x:", ephemeral=False)
         print(f"Error fetching data: {response.status_code}")
 
 
@@ -5170,6 +5148,42 @@ def _is_admin_session():
     return session.get("admin") is True or (isinstance(user, dict) and is_staff_user(user.get("id")))
 
 
+_hits = {}
+_hits_lock = threading.Lock()
+
+
+def client_ip():
+    return (request.headers.get("X-Forwarded-For") or request.remote_addr or "?").split(",")[0].strip()
+
+
+def rate_limited(limit=60, window=60):
+    """Allow `limit` requests per `window` seconds from one address, then answer 429 with Retry-After. The Shapes API on
+    this machine (and anything holding the internal token) is exempt, so the API's own cached lookups never trip it."""
+    def deco(f):
+        def wrapped(*args, **kwargs):
+            local = request.remote_addr in ("127.0.0.1", "::1") and not request.headers.get("X-Forwarded-For")
+            if not local:
+                now, key = time.time(), (f.__name__, client_ip())
+                with _hits_lock:
+                    recent = [t for t in _hits.get(key, []) if now - t < window]
+                    if len(recent) >= limit:
+                        _hits[key] = recent
+                        retry = max(1, int(window - (now - recent[0])))
+                        resp = jsonify({"error": "Too many requests. Slow down.", "retry_after": retry})
+                        resp.status_code = 429
+                        resp.headers["Retry-After"] = str(retry)
+                        return resp
+                    recent.append(now)
+                    _hits[key] = recent
+                    if len(_hits) > 5000:                 # forget addresses that went quiet
+                        for k in [k for k, v in _hits.items() if not v or now - v[-1] > window]:
+                            _hits.pop(k, None)
+            return f(*args, **kwargs)
+        wrapped.__name__ = f.__name__
+        return wrapped
+    return deco
+
+
 def admin_required(f):
     def wrapped(*args, **kwargs):
         if not _is_admin_session():
@@ -5783,16 +5797,45 @@ def api_automod(server_id):
     return jsonify(get_automod(server_id))
 
 
+def _public(ttl, limit=60):
+    """Public JSON routes: answered from a short cache (so a burst of requests costs one lookup) and rate limited."""
+    def deco(f):
+        @rate_limited(limit, 60)
+        def wrapped(*args, **kwargs):
+            key, hit = f"pub:{f.__name__}", _cache.get(f"pub:{f.__name__}")
+            if hit and time.time() - hit[0] < ttl:
+                return hit[1]
+            result = f(*args, **kwargs)
+            if isinstance(result, tuple) and result[1] == 200:      # never keep an error ("still starting") around
+                _cache[key] = (time.time(), result)
+            return result
+        wrapped.__name__ = f.__name__
+        return wrapped
+    return deco
+
+
+def leaderboard_rows():
+    """Counting leaderboard rows, best first. Cached for 30 seconds: it reads every server's counting record."""
+    def build():
+        names = {str(s.get("id")): s.get("name") for s in cached("servers", 15, bot.servers)}
+        rows = []
+        for sid in countingDB.all():
+            data = countingDB.get(sid) or {}
+            if data.get("banned") or not data.get("enabled") or sid not in names:
+                continue
+            rows.append({"id": sid, "name": names[sid], "current": int(data.get("number", 0)), "highest": int(data.get("highestnumber", 0))})
+        return sorted(rows, key=lambda r: r["highest"], reverse=True)
+    return cached("leaderboard", 30, build)
+
+
 @app.route("/count/commands", methods=["GET"])
+@_public(300)
 def get_command_count():
     return {"Commands": str(len(yshim.tree.commands))}, 200
 
 
-def _ready_or_503(payload):
-    return (payload, 200) if bot_ready else ({k: "Unknown" for k in payload}, 503)
-
-
 @app.route("/botinfo", methods=["GET"])
+@_public(30)
 def get_bot_info():
     if not bot_ready:
         return {"Servers": "Unknown", "Users": "Unknown"}, 503
@@ -5800,6 +5843,7 @@ def get_bot_info():
 
 
 @app.route("/count/servers", methods=["GET"])
+@_public(30)
 def get_server_count():
     if not bot_ready:
         return {"Servers": "Unknown"}, 503
@@ -5807,6 +5851,7 @@ def get_server_count():
 
 
 @app.route("/count/users", methods=["GET"])
+@_public(30)
 def get_user_count():
     if not bot_ready:
         return {"Users": "Unknown"}, 503
@@ -5814,17 +5859,12 @@ def get_user_count():
 
 
 @app.route("/clb", methods=["GET"])
+@rate_limited(60, 60)
 def countinglb():
     if not bot_ready:
         return jsonify("Bot is still starting"), 503
-    names = {str(s.get("id")): s.get("name") for s in cached("servers", 15, bot.servers)}
-    lb = {}
-    for sid in countingDB.all():
-        data = countingDB.get(sid) or {}
-        if data.get("banned") or not data.get("enabled") or sid not in names:
-            continue
-        lb[sid] = {"currentnumber": data["number"], "highestnumber": data["highestnumber"], "serverName": names[sid]}
-    return {"Leaderboard": sorted(lb.items(), key=lambda x: x[1]["highestnumber"], reverse=True)}, 200
+    lb = {r["id"]: {"currentnumber": r["current"], "highestnumber": r["highest"], "serverName": r["name"]} for r in leaderboard_rows()}
+    return {"Leaderboard": list(lb.items())}, 200
 
 
 def _all_members(server_id, limit=5000):

@@ -36,20 +36,14 @@ def register(m):
     def stats():
         if not m.bot_ready:
             return None, None
-        return len(m.cached("servers", 15, bot.servers)), m.total_members()
+        return len(m.cached("servers", 15, bot.servers)), m.cached("total_members", 30, m.total_members)
 
     def leaderboard():
-        names = {str(s.get("id")): s.get("name") for s in m.cached("servers", 15, bot.servers)} if m.bot_ready else {}
-        rows = []
-        for sid in m.countingDB.all():
-            d = m.countingDB.get(sid) or {}
-            if d.get("banned") or not d.get("enabled") or sid not in names:
-                continue
-            rows.append({"name": names[sid], "current": int(d.get("number", 0)), "highest": int(d.get("highestnumber", 0))})
-        return sorted(rows, key=lambda r: r["highest"], reverse=True)
+        return [{"name": r["name"], "current": r["current"], "highest": r["highest"]} for r in m.leaderboard_rows()] if m.bot_ready else []
 
     def commands():
-        return [{"name": n, "description": s.description, "usage": s.usage} for n, s in sorted(yshim.tree.commands.items())]
+        """The command list: it only changes when the bot restarts, so it is built once per five minutes at most."""
+        return m.cached("commands", 300, lambda: [{"name": n, "description": s.description, "usage": s.usage} for n, s in sorted(yshim.tree.commands.items())])
 
     def paged(items):
         pages = max(1, -(-len(items) // PAGE))
@@ -61,11 +55,13 @@ def register(m):
         return send_from_directory(os.path.join(SITE_DIR, "assets"), name, max_age=3600)
 
     @app.route("/", methods=["GET"])
+    @m.rate_limited(120, 60)
     def home():
         users, servers = stats()
         return render_template("home.html", users=users, servers=servers, top=leaderboard()[:3])
 
     @app.route("/about")
+    @m.rate_limited(120, 60)
     def about():
         return render_template("about.html")
 
@@ -79,11 +75,13 @@ def register(m):
 
     @app.route("/counting/leaderboard/")
     @app.route("/leaderboard")
+    @m.rate_limited(120, 60)
     def leaderboard_page():
         items, page, pages = paged(leaderboard())
         return render_template("leaderboard.html", items=items, page=page, pages=pages)
 
     @app.route("/commands", methods=["GET"])
+    @m.rate_limited(120, 60)
     def send_commands():
         """A web page for browsers; the JSON the old site read for anything else (so existing callers keep working)."""
         if "text/html" in request.headers.get("Accept", "") and request.args.get("format") != "json":
