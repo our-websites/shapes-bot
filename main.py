@@ -4417,11 +4417,20 @@ async def vortexcookie(interaction: discord.Interaction, cookie: str = ""):
         have = bool(entry.get("vortex"))
         await interaction.response.send_message(
             ("You have a PlayVortex login saved. `/vortexcookie remove` deletes it.\n" if have else "No PlayVortex login saved.\n") +
-            "Paste your login cookie as `name=value` (or just the value, or a Bearer token): `/vortexcookie <cookie>`. "
+            "Send your login cookie (`name=value`, just the value, or a Bearer token) **base64 encoded**: `/vortexcookie <encoded>`. "
             "It's only used for your own lookups, to show how you relate to a user. Best done in a DM with me, since the command you type stays in the chat.",
             ephemeral=True)
         return
-    if len(cookie) > 4000 or "\n" in cookie:
+    try:        # people paste it base64 encoded, so the real cookie never shows in the chat
+        cookie = base64.b64decode(cookie.strip(), validate=True).decode("utf-8").strip()
+        if not cookie or not cookie.isprintable():
+            raise ValueError
+    except (ValueError, UnicodeDecodeError):
+        await interaction.response.send_message(
+            "Send your login **base64 encoded** so it isn't readable in chat. Encode it first, e.g. in a terminal: "
+            "`printf '%s' 'name=value' | base64 -w0` (or `btoa('name=value')` in your browser console), then run `/vortexcookie <encoded>`.", ephemeral=True)
+        return
+    if len(cookie) > 4000:
         await interaction.response.send_message("That doesn't look like a cookie (too long, or has line breaks).", ephemeral=True)
         return
     check = await asyncio.to_thread(vortex_get, "users", "1", cookie)
