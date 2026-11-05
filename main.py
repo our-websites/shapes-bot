@@ -1295,150 +1295,22 @@ async def serverinfo(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-# --- Last.fm (linked with Last.fm's web auth, so the account is verified by Last.fm itself) ---
-# Flow: /lastfm link -> private message with a Last.fm authorize button -> Last.fm sends the person back to
-# PUBLIC_URL/lastfm/callback/<state>?token=... -> we trade the token for a session (name + key) and save it.
-# Env: LASTFM_API_KEY, LASTFM_API_SECRET (both from https://www.last.fm/api/account/create) and PUBLIC_URL.
+# --- Last.fm: the Shapes API does all of it (linking, the account, the profile lookups); the bot just asks it ---
 
-import hashlib
-
-LastFMKey = _secret("LASTFM_API_KEY", "LastFMToken.txt")
-LastFMSecret = _secret("LASTFM_API_SECRET", "LastFMSecret.txt")
 PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
-LASTFM_STATE_KEY = (os.environ.get("FLASK_SECRET_KEY") or os.urandom(32).hex()).encode()
-LASTFM_STATE_TTL = 600
-_lastfm_used_states = {}
-_lastfm_cache = {}          # name -> (expires_at, profile); keeps us far below Last.fm's rate limit
-LASTFM_CACHE_SECONDS = 60
-
-
-def lastfm_ready():
-    return bool(LastFMKey and LastFMSecret and PUBLIC_URL)
-
-
-def _lastfm_sign(params):
-    """api_sig: md5 of every parameter (name+value, sorted by name, without format/callback) + the shared secret."""
-    raw = "".join(f"{k}{v}" for k, v in sorted(params.items()) if k not in ("format", "callback")) + LastFMSecret
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
-
-
-def lastfm_call(method, signed=False, **params):
-    """One Last.fm API call; returns the JSON dict, or None on any failure (including missing config)."""
-    if not LastFMKey or (signed and not LastFMSecret):
-        return None
-    q = {"method": method, "api_key": LastFMKey, **params}
-    if signed:
-        q["api_sig"] = _lastfm_sign(q)
-    q["format"] = "json"
-    try:
-        r = requests.get("https://ws.audioscrobbler.com/2.0/", params=q, timeout=8)
-        data = r.json()
-        return None if "error" in data else data
-    except Exception as e:
-        print(f"lastfm {method} failed: {e}")
-        return None
-
-
-def lastfm_state(user_id):
-    """A tamper-proof, expiring token that says which Yapin user started the link."""
-    expires = int(time.time()) + LASTFM_STATE_TTL
-    payload = f"{user_id}.{expires}"
-    return f"{payload}.{hmac.new(LASTFM_STATE_KEY, payload.encode(), hashlib.sha256).hexdigest()[:32]}"
-
-
-def lastfm_state_user(state):
-    """The user id a state was made for, or None if it is forged, expired or already used."""
-    try:
-        user_id, expires, sig = state.rsplit(".", 2)
-        good = hmac.new(LASTFM_STATE_KEY, f"{user_id}.{expires}".encode(), hashlib.sha256).hexdigest()[:32]
-        now = time.time()
-        for k in [k for k, t in _lastfm_used_states.items() if t < now]:
-            _lastfm_used_states.pop(k, None)
-        if not hmac.compare_digest(sig, good) or int(expires) < now or state in _lastfm_used_states:
-            return None
-        _lastfm_used_states[state] = int(expires)
-        return user_id
-    except (ValueError, AttributeError):
-        return None
-
-
-def lastfm_auth_url(user_id):
-    callback = f"{PUBLIC_URL}/lastfm/callback/{lastfm_state(user_id)}"
-    return f"https://www.last.fm/api/auth/?api_key={LastFMKey}&cb={urllib.parse.quote(callback, safe='')}"
-
-
-def lastfm_finish_link(state, token):
-    """Callback step: returns the verified Last.fm username (and saves it), or None."""
-    user_id = lastfm_state_user(state)
-    if not user_id or not token:
-        return None
-    data = lastfm_call("auth.getSession", signed=True, token=token)
-    session = (data or {}).get("session") or {}
-    if not session.get("name"):
-        return None
-    set_lastfm(user_id, session["name"], session.get("key"))
-    return session["name"]
+LASTFM_LINK_TTL = 600
 
 
 def get_lastfm(user_id):
-    """The linked (verified) Last.fm username for a Yapin user id, or None. The API is the source of truth when it
-    is set up; the local copy is what older links (and a down API) fall back to."""
-    if api_ready():
-        data = shapes_api("GET", f"/internal/links/{user_id}")
-        if data and data.get("success"):
-            return (data.get("lastfm") or {}).get("name")
-    entry = usersDB.get(str(user_id))
-    value = entry.get("lastfm") if isinstance(entry, dict) else None
-    return value.get("name") if isinstance(value, dict) else value
-
-
-def set_lastfm(user_id, name, session_key=None):
-    """Link (or with name=None, unlink) a Last.fm account; keeps whatever else is stored for the user."""
-    if not name and api_ready():
-        shapes_api("DELETE", f"/internal/links/{user_id}/lastfm")
-    entry = usersDB.get(str(user_id))
-    entry = dict(entry) if isinstance(entry, dict) else {}
-    if name:
-        entry["lastfm"] = {"name": name, "key": session_key, "linked_at": int(time.time())}
-    else:
-        entry.pop("lastfm", None)
-    usersDB.set(str(user_id), entry)
+    """The Last.fm username this Yapin user linked (kept by the API), or None."""
+    data = shapes_api("GET", f"/internal/links/{user_id}")
+    return ((data or {}).get("lastfm") or {}).get("name")
 
 
 def lastfm_profile(name):
-    """Summary for a Last.fm user: url, scrobbles, and the current/last track. None if the lookup failed. Cached."""
-    hit = _lastfm_cache.get(name.lower())
-    if hit and hit[0] > time.time():
-        return hit[1]
-    result = _lastfm_profile_uncached(name)
-    if result:
-        _lastfm_cache[name.lower()] = (time.time() + LASTFM_CACHE_SECONDS, result)
-    return result
-
-
-def _lastfm_profile_uncached(name):
-    info = lastfm_call("user.getinfo", user=name)
-    if not info or "user" not in info:
-        return None
-    u = info["user"]
-    out = {"name": u.get("name", name), "url": u.get("url") or f"https://www.last.fm/user/{name}",
-           "scrobbles": u.get("playcount"), "track": None, "now": False, "image": None}
-    for img in reversed(u.get("image") or []):
-        if img.get("#text"):
-            out["image"] = img["#text"]
-            break
-    recent = lastfm_call("user.getrecenttracks", user=name, limit=1)
-    try:
-        tracks = recent["recenttracks"]["track"]
-        if isinstance(tracks, dict):
-            tracks = [tracks]
-        if tracks:
-            t = tracks[0]
-            out["track"] = f"{t['artist']['#text']} - {t['name']}"
-            out["now"] = bool((t.get("@attr") or {}).get("nowplaying"))
-    except (TypeError, KeyError):
-        pass
-    return out
+    """Profile summary (url, scrobbles, now playing / last track, picture) from the API, or None. The API caches it."""
+    data = shapes_api("GET", f"/internal/lastfm/{urllib.parse.quote(str(name), safe='')}", timeout=10)
+    return (data or {}).get("profile") if data and data.get("success") else None
 
 
 def lastfm_line(p):
@@ -1454,31 +1326,29 @@ async def lastfm(interaction: discord.Interaction, action: str = "", user: disco
     action = action.lower().strip()
     uid = interaction.user.id
     if action == "link":
-        link = None
-        if api_ready():
-            started = shapes_api("POST", "/internal/link/start", {"provider": "lastfm", "yapin_id": str(uid), "yapin_name": interaction.user.name})
-            link = (started or {}).get("url")
-        if not link and lastfm_ready():
-            link = lastfm_auth_url(uid)            # the bot's own flow, when the API isn't there
+        started = await asyncio.to_thread(shapes_api, "POST", "/internal/link/start",
+                                          {"provider": "lastfm", "yapin_id": str(uid), "yapin_name": interaction.user.name})
+        link = (started or {}).get("url")
         if not link:
-            await interaction.response.send_message("Last.fm linking isn't set up on this bot yet (the owner needs the Shapes API with LASTFM_API_KEY and LASTFM_API_SECRET).", ephemeral=True)
+            reason = (started or {}).get("data") or "Couldn't reach the linking service. Try again in a moment."
+            await interaction.response.send_message(str(reason), ephemeral=True)
             return
-        view = discord.ui.View(timeout=LASTFM_STATE_TTL)
+        view = discord.ui.View(timeout=LASTFM_LINK_TTL)
         view.add_item(discord.ui.Button(label="Authorize on Last.fm", style=discord.ButtonStyle.link, url=link))
         await interaction.response.send_message("Tap the button, approve access on Last.fm and you're linked. The link works for 10 minutes and only for you.", view=view, ephemeral=True)
         return
     if action == "unlink":
-        had = get_lastfm(uid)
-        set_lastfm(uid, None)
+        had = await asyncio.to_thread(get_lastfm, uid)
+        await asyncio.to_thread(shapes_api, "DELETE", f"/internal/links/{uid}/lastfm")
         await interaction.response.send_message("Unlinked your Last.fm account." if had else "You had no Last.fm account linked.", ephemeral=True)
         return
     target = user or interaction.user
-    linked = get_lastfm(target.id)
+    linked = await asyncio.to_thread(get_lastfm, target.id)
     if not linked:
         who = "You haven't" if target.id == uid else f"{target.display_name} hasn't"
         await interaction.response.send_message(f"{who} linked a Last.fm account. Use `/lastfm link`.", ephemeral=True)
         return
-    p = lastfm_profile(linked)
+    p = await asyncio.to_thread(lastfm_profile, linked)
     if not p:
         await interaction.response.send_message(f"Couldn't reach Last.fm for `{linked}` right now.", ephemeral=True)
         return
@@ -1540,9 +1410,9 @@ async def yapinuser(interaction: discord.Interaction, user: discord.User = None)
     if mutual:
         shown = "\n".join(f"• {n}" for n in mutual[:8]) + (f"\n…and {len(mutual) - 8} more" if len(mutual) > 8 else "")
         embed.add_field(name=f"Servers with Shapes ({len(mutual)})", value=shown, inline=False)
-    linked = get_lastfm(target.id)
+    linked = await asyncio.to_thread(get_lastfm, target.id)
     if linked:
-        p = lastfm_profile(linked)
+        p = await asyncio.to_thread(lastfm_profile, linked)
         embed.add_field(name="Last.fm", value=lastfm_line(p) if p else f"[{linked}](https://www.last.fm/user/{linked})", inline=False)
     if target.avatar_url:
         embed.set_thumbnail(url=target.avatar_url)
@@ -5485,17 +5355,6 @@ def activity_files(subpath):
 
 def _html_escape(text):
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-
-
-@app.route("/lastfm/callback/<state>")
-def lastfm_callback(state):
-    name = lastfm_finish_link(state, request.args.get("token", ""))
-    if name:
-        body = f"<h2>Linked!</h2><p>Your Last.fm account <b>{name}</b> is now linked. You can close this tab.</p>"
-    else:
-        body = "<h2>That didn't work</h2><p>The link expired or was already used. Run <code>/lastfm link</code> again.</p>"
-    return Response(f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Last.fm</title>"
-                    f"<body style='font-family:system-ui;max-width:28rem;margin:4rem auto;padding:0 1rem'>{body}", mimetype="text/html")
 
 
 @app.route("/status")
