@@ -130,12 +130,12 @@ bot = yapper.Bot()
 bot.tree = yshim.tree
 yshim.BOT = bot
 owner = "leandre"
-MainURL = "https://our-websites.github.io/shapes.lol/yapin"
+MainURL = "https://shapes-yapper.oriaxen.com"
 InviteURL = os.environ.get("YAPPER_INVITE_URL", "https://our-websites.github.io/shapes.lol/yapin?s=true")
 searchengine = "621a38269031b4e89"  # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
 APIBaseURL_Key = _secret("Shapes_API_Key")
-APIBaseURL = os.environ.get("SHAPES_API_URL", "http://127.0.0.1:1337").rstrip("/")
+APIBaseURL = os.environ.get("SHAPES_API_URL", "http://localhost:1337").rstrip("/")
 # The token for the API's /internal routes (its INTERNAL_TOKEN). The older Shapes_API_Key secret still works.
 API_INTERNAL_TOKEN = os.environ.get("SHAPES_API_TOKEN", "").strip() or APIBaseURL_Key
 APIBaseURL_Headers = {"Authorization": f"Bearer {API_INTERNAL_TOKEN}"}
@@ -3611,7 +3611,7 @@ async def limiteds(interaction: discord.Interaction, username: str):
             value = 0
             try:
                 rolimons_url = f"https://api.rolimons.com/players/v1/playerinfo/{user_id}"
-                async with session.get(rolimons_url, headers={'User-Agent': 'cats.lol'}) as response:
+                async with session.get(rolimons_url, headers={'User-Agent': 'shapes.lol'}) as response:
                     if response.status == 200:
                         rolimons_data = await response.json()
                         if rolimons_data.get('success'):
@@ -4416,7 +4416,7 @@ async def vortexcookie(interaction: discord.Interaction):
         await interaction.response.send_message("Run this as a slash command (pick /vortexcookie from the command list) so I can open the form.", ephemeral=True)
 
 
-@bot.on_modal("vortexcookie")
+@bot.modal("vortexcookie")
 def vortex_modal(i):
     uid = str(i.user_id)
     cookie = str((i.values or {}).get("cookie") or "").strip()
