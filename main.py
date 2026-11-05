@@ -4364,9 +4364,10 @@ async def _vortex_lookup(interaction, kind, ident):
     secret = vortex_secret_of(interaction.user.id)
     data = await asyncio.to_thread(vortex_get, kind, ident, secret)
     what = "game" if kind == "games" else "user"
+    rejected = False
     if data == "denied":                    # the stored login stopped working: fall back to a plain lookup
         data = await asyncio.to_thread(vortex_get, kind, ident, "")
-        secret = ""
+        secret, rejected = "", True
     if data is None:
         await interaction.edit_original_response(embed=discord.Embed(title="PlayVortex didn't answer", description="Try again in a moment.", color=discord.Color.red()))
         return
@@ -4382,7 +4383,7 @@ async def _vortex_lookup(interaction, kind, ident):
     else:
         embed = vortex_user_embed(data, color, signed_in=bool(secret))
         buttons = [("View profile", vortex_user_url(data["id"]))] if data.get("id") is not None else []
-    embed.set_footer(text=f"Requested By {interaction.user.name} | playvortex.io")
+    embed.set_footer(text=f"Requested By {interaction.user.name} | playvortex.io" + (" | your saved login was rejected, run /vortexcookie" if rejected else ""))
     await interaction.edit_original_response(embed=embed, view=_link_view(*buttons) if buttons else None)
 
 
@@ -4400,49 +4401,37 @@ async def vortexinfo(interaction: discord.Interaction, user: str):
     await _vortex_lookup(interaction, "users", user)
 
 
-@bot.tree.command(name="vortexcookie", description="Save your PlayVortex login so lookups are made as you (or `remove` to delete it)")
+@bot.tree.command(name="vortexcookie", description="Save your PlayVortex login so lookups are made as you")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def vortexcookie(interaction: discord.Interaction, cookie: str = ""):
-    uid = str(interaction.user.id)
+async def vortexcookie(interaction: discord.Interaction):
+    # A form, so the cookie is never typed into the chat. It arrives in vortex_modal below.
+    have = bool((usersDB.get(str(interaction.user.id)) or {}).get("vortex"))
+    box = (yapper.main.TextInput.paragraph("cookie", "Your PlayVortex cookie").required(False).length(max=4000)
+           .placeholder("name=value, just the value, or a Bearer token")
+           .description("Leave empty to delete your saved login." if have else "Used only for your own lookups."))
+    try:
+        await interaction.response.send_modal(yapper.main.Modal("vortexcookie", "PlayVortex login", box))
+    except NotImplementedError:
+        await interaction.response.send_message("Run this as a slash command (pick /vortexcookie from the command list) so I can open the form.", ephemeral=True)
+
+
+@bot.on_modal("vortexcookie")
+def vortex_modal(i):
+    uid = str(i.user_id)
+    cookie = str((i.values or {}).get("cookie") or "").strip()
     entry = usersDB.get(uid)
     entry = dict(entry) if isinstance(entry, dict) else {}
-    cookie = (cookie or "").strip()
-    if cookie.lower() in ("remove", "delete", "clear"):
+    if not cookie:
         entry.pop("vortex", None)
         usersDB.set(uid, entry)
-        await interaction.response.send_message("Your PlayVortex login was deleted.", ephemeral=True)
-        return
-    if not cookie:
-        have = bool(entry.get("vortex"))
-        await interaction.response.send_message(
-            ("You have a PlayVortex login saved. `/vortexcookie remove` deletes it.\n" if have else "No PlayVortex login saved.\n") +
-            "Send your login cookie (`name=value`, just the value, or a Bearer token) **base64 encoded**: `/vortexcookie <encoded>`. "
-            "It's only used for your own lookups, to show how you relate to a user. Best done in a DM with me, since the command you type stays in the chat.",
-            ephemeral=True)
-        return
-    try:        # people paste it base64 encoded, so the real cookie never shows in the chat
-        cookie = base64.b64decode(cookie.strip(), validate=True).decode("utf-8").strip()
-        if not cookie or not cookie.isprintable():
-            raise ValueError
-    except (ValueError, UnicodeDecodeError):
-        await interaction.response.send_message(
-            "Send your login **base64 encoded** so it isn't readable in chat. Encode it first, e.g. in a terminal: "
-            "`printf '%s' 'name=value' | base64 -w0` (or `btoa('name=value')` in your browser console), then run `/vortexcookie <encoded>`.", ephemeral=True)
-        return
-    if len(cookie) > 4000:
-        await interaction.response.send_message("That doesn't look like a cookie (too long, or has line breaks).", ephemeral=True)
-        return
-    check = await asyncio.to_thread(vortex_get, "users", "1", cookie)
-    if check == "denied":
-        await interaction.response.send_message("PlayVortex didn't accept that login. Copy the whole `name=value` cookie from your browser and try again.", ephemeral=True)
-        return
-    if check is None:
-        await interaction.response.send_message("PlayVortex didn't answer, so I couldn't check it. Try again in a moment.", ephemeral=True)
-        return
+        return i.ephemeral("Your PlayVortex login was deleted.")
+    if len(cookie) > 4000 or "\n" in cookie or not cookie.isprintable():
+        return i.ephemeral("That doesn't look like a cookie (too long, or has line breaks). Nothing was saved.")
     entry["vortex"] = cookie
     usersDB.set(uid, entry)
-    await interaction.response.send_message("Saved. Your PlayVortex lookups now use your login. `/vortexcookie remove` deletes it.", ephemeral=True)
+    _vortex_cache.clear()
+    return i.ephemeral("Saved. Your PlayVortex lookups now use your login. Run /vortexcookie and submit it empty to delete it.")
 
 
 roblox_colors = {

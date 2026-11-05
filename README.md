@@ -57,4 +57,4 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 
 ## PlayVortex
 
-`/vortexgame <id>` and `/vortexinfo <id>` show a game or user with link buttons. `/vortexcookie <base64-encoded cookie>` (ephemeral; encode it first so it never shows in chat) saves your own PlayVortex login so lookups are made as you and also show your friend/follow status; `/vortexcookie remove` deletes it.
+`/vortexgame <id>` and `/vortexinfo <id>` show a game or user with link buttons. `/vortexcookie` opens a private form (so the cookie never appears in chat) that saves your own PlayVortex login so lookups are made as you and also show your friend/follow status; submitting the form empty deletes it.

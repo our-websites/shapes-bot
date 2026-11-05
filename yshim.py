@@ -9,7 +9,7 @@ It exists so the ~40 command bodies could be ported with very few changes. What 
                           edit_original_response.
   * tree.command(...)  -> registers a Yapper command and parses "/command some args" into the function's parameters.
 
-Things Yapper cannot do (so they do not exist here): select menus, modals, context menus, ephemeral replies to
+Things Yapper cannot do (so they do not exist here): select menus, context menus, ephemeral replies to
 commands. Buttons support ephemeral replies; for commands they are posted normally.
 
 Embeds
@@ -849,8 +849,14 @@ class _Response:
     async def edit_message(self, *, content=None, embed=None, view=None, **_):
         return self._i._edit_message(content, embed, view)
 
-    async def send_modal(self, _modal):
-        raise NotImplementedError("Yapper has no modals")
+    async def send_modal(self, modal):
+        """Open a yapper.Modal for the person (only as the first answer). Comes back to bot.on_modal(<modal's custom_id>)."""
+        target = self._i._click if self._i._click is not None else self._i._msg
+        show = getattr(target, "show_modal", None)
+        if show is None:
+            raise NotImplementedError("This message can't open a form (it needs to be a slash command)")
+        self._i._responded = True
+        return show(modal)
 
 
 class _Followup:
