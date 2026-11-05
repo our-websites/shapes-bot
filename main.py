@@ -4308,7 +4308,7 @@ def vortex_user_embed(data, color, signed_in=False):
     badges = [label for key, label in _VORTEX_BADGES if data.get(key)]
     fields = [("Followers", _vnum(data.get("follower_count")), True), ("Following", _vnum(data.get("following_count")), True),
               ("Friends", _vnum(data.get("friend_count")), True), ("Visits", _vnum(data.get("visits")), True),
-              ("Status", _VORTEX_STATUS.get(status, status.replace("_", " ").title() or None), True), ("ID", _vnum(uid), True),
+              ("Status", _VORTEX_STATUS.get(status, status.replace("_", " ").title() or None), True),
               ("Joined", _vtime(data.get("created_at")), True)]
     if status != "online":
         fields.append(("Last seen", _vtime(data.get("last_seen"), "R"), True))
@@ -4318,11 +4318,12 @@ def vortex_user_embed(data, color, signed_in=False):
     if prev:
         fields.append(("Previous usernames", _vclean(", ".join(prev), 300), False))
     if signed_in:       # these only mean something to the person who is signed in
-        fields.append(("Friendship", _VORTEX_RELATION.get(str(data.get("friendship_status") or "").lower(), str(data.get("friendship_status") or "").replace("_", " ").title() or None), True))
-        fields.append(("You follow them", str(data.get("follow_status") or "").replace("_", " ").title() or None, True))
+        rel = [_VORTEX_RELATION.get(str(data.get("friendship_status") or "").lower(), str(data.get("friendship_status") or "").replace("_", " ").title()),
+               {"following": "You follow them"}.get(str(data.get("follow_status") or "").lower(), "")]
+        fields.append(("You and them", "\n".join(x for x in rel if x) or None, False))
     if data.get("is_deleted"):
         fields.insert(0, ("⚠️", "This account was deleted.", False))
-    for name, value, inline in fields[:14]:
+    for name, value, inline in fields[:10]:    # Yapin allows 10 fields per embed
         if value:
             embed.add_field(name=name, value=value, inline=inline)
     return embed
