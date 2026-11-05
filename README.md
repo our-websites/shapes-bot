@@ -48,3 +48,13 @@ bot's own data, and a dashboard at `/dashboard`:
 - **Other servers**: servers you're in with Shapes but can't manage (read-only counting stats).
 - **Admin** (only for `ADMIN_USER_IDS`): the bot-owner dashboard, also reachable at `/admin` (the `ADMIN_KEY` login still works).
 - Activities: `/activity` redirects to the dashboard until Yapper has an activity SDK. Set `ACTIVITIES_ENABLED=1` to serve the `activity/` folder publicly.
+
+## Dashboard login fallback
+
+`/dashboard/login` asks the Shapes API whether it is up (3s check, remembered for 15s). If it is, login goes through the API as before.
+If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login` and `/dashboard/oauth/callback`. Set `YAPIN_CLIENT_ID` and
+`YAPIN_CLIENT_SECRET` and register `<PUBLIC_URL>/dashboard/oauth/callback` as a redirect URI. The state is signed, single use and tied to a cookie, and the token calls have no timeout.
+
+## PlayVortex
+
+`/vortexgame <id>` and `/vortexinfo <id>` show a game or user with link buttons. `/vortexcookie <cookie>` (ephemeral) saves your own PlayVortex login so lookups are made as you and also show your friend/follow status; `/vortexcookie remove` deletes it.

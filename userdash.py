@@ -10,12 +10,18 @@ gets a read-only list. The bot-owner admin dashboard (/admin) shows up as a tab 
 Sign-in goes through the Shapes API (the api.shapes.lol repo) running on this machine: it does the OAuth dance with Yapin
 and hands the bot a one-time ticket over localhost, so the bot never sees the client secret or a code.
 """
+import base64
+import hashlib
+import hmac
+import json
 import os
+import secrets
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 import jinja2
+import requests
 from flask import Response, abort, jsonify, redirect, render_template, request, send_from_directory, session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -122,26 +128,104 @@ def register(m):
         return Response(m._web_file("dash.html").replace("__BOOT__", jsonify(_boot(user)).get_data(as_text=True).replace("<", "\\u003c")),
                         mimetype="text/html")
 
+    # --- Login: through the Shapes API when it's up, otherwise OAuth2 done right here ---
+    local = {
+        "id": os.environ.get("YAPIN_CLIENT_ID", ""), "secret": os.environ.get("YAPIN_CLIENT_SECRET", ""),
+        "authorize": os.environ.get("YAPIN_AUTHORIZE_URL", "https://www.yapin.gg/oauth/authorize"),
+        "token": os.environ.get("YAPIN_TOKEN_URL", "https://www.yapin.gg/api/oauth/token"),
+        "me": os.environ.get("YAPIN_USERINFO_URL", "https://www.yapin.gg/api/oauth/me"),
+        "scope": os.environ.get("YAPIN_SCOPE", "identify"),
+    }
+    if local["me"].rstrip("/").endswith("/userinfo"):          # Yapin' calls it /me
+        local["me"] = local["me"].rstrip("/")[:-len("userinfo")] + "me"
+    LOGIN_COOKIE, STATE_TTL = "yapin_login_local", 3600
+    used_states = {}
+    health = {"at": 0.0, "up": False}
+
+    def local_ready():
+        return bool(local["id"] and local["secret"])
+
+    def api_up():
+        """Is the Shapes API answering? Checked quickly and remembered for 15 seconds so a dead API never slows logins down."""
+        if not m.api_ready():
+            return False
+        if time.time() - health["at"] > 15:
+            result = m.shapes_api("GET", "/internal/health", timeout=3)
+            health.update(at=time.time(), up=bool(result and result.get("success") and result.get("yapin_login", True)))
+        return health["up"]
+
+    def _callback_url(path):
+        return f"{(m.PUBLIC_URL or request.host_url).rstrip('/')}{path}"
+
+    def _sign(body):
+        return hmac.new(str(app.secret_key).encode(), ("dash-login." + body).encode(), hashlib.sha256).hexdigest()[:32]
+
+    def _make_state():
+        body = base64.urlsafe_b64encode(json.dumps({"n": secrets.token_hex(8), "e": int(time.time()) + STATE_TTL}).encode()).decode().rstrip("=")
+        return f"{body}.{_sign(body)}"
+
+    def _read_state(state):
+        """True for a state we made, that hasn't expired and hasn't been used."""
+        try:
+            body, sig = state.rsplit(".", 1)
+            if not hmac.compare_digest(sig, _sign(body)):
+                return False
+            data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        except (ValueError, TypeError):
+            return False
+        now = time.time()
+        for k in [k for k, t in used_states.items() if t < now]:
+            used_states.pop(k, None)
+        return data.get("e", 0) >= now and state not in used_states
+
+    def _unwrap(data):
+        if not isinstance(data, dict):
+            return {}
+        for key in ("data", "user", "result"):
+            if isinstance(data.get(key), dict):
+                return {**data, **data[key]}
+        return data
+
+    def _json(r):
+        try:
+            return _unwrap(r.json())
+        except ValueError:
+            return {}
+
+    def local_token(code):
+        """Trade the code for a token: client credentials in the body first, then HTTP Basic. No timeout: Yapin' can be slow."""
+        base = {"grant_type": "authorization_code", "code": code, "redirect_uri": _callback_url("/dashboard/oauth/callback")}
+        last = ""
+        for kwargs in ({"data": {**base, "client_id": local["id"], "client_secret": local["secret"]}},
+                       {"data": {**base, "client_id": local["id"]}, "auth": (local["id"], local["secret"])}):
+            r = requests.post(local["token"], headers={"Accept": "application/json"}, timeout=None, **kwargs)
+            data = _json(r)
+            token = data.get("access_token") or data.get("token") or data.get("accessToken")
+            if r.ok and isinstance(token, str) and token:
+                return token
+            last = f"{r.status_code} {str(data.get('error_description') or data.get('error') or r.text)[:120]}"
+            if r.status_code not in (400, 401):
+                break
+        raise ValueError(f"token step failed ({last})")
+
+    def local_profile(token):
+        r = requests.get(local["me"], headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=None)
+        info = _json(r)
+        if not r.ok or not (info.get("id") or info.get("sub") or info.get("user_id")):
+            raise ValueError(f"profile step failed ({r.status_code})")
+        return {"id": str(info.get("id") or info.get("sub") or info.get("user_id")),
+                "username": info.get("username") or info.get("preferred_username"), "display_name": info.get("display_name") or info.get("name"),
+                "avatar_path": info.get("avatar_path") or info.get("avatar_url") or info.get("picture")}
+
     def _boot(user):
         return {"user": user, "staff": m.is_staff_user(user["id"]) if user else False,
-                "login": bool(m.api_ready()), "bot_ready": bool(m.bot_ready)}
+                "login": bool(local_ready() or api_up()), "bot_ready": bool(m.bot_ready)}
 
-    @app.route("/dashboard/login")
-    def dashboard_login():
-        if not m.api_ready():
-            return Response("Login isn't set up: the bot needs SHAPES_API_TOKEN so it can reach the Shapes API.", status=503, mimetype="text/plain")
-        back = f"{m.PUBLIC_URL.rstrip('/')}/dashboard/callback" if m.PUBLIC_URL else f"{request.host_url.rstrip('/')}/dashboard/callback"
-        return redirect(f"{api_public}/auth/yapin/login?return={urllib.parse.quote(back, safe='')}", 302)
+    def _fail(message, status=400):
+        return Response("<!doctype html><meta charset=utf-8><body style='font-family:system-ui;max-width:28rem;margin:4rem auto;background:#0b0b0f;color:#eee'>"
+                        f"<h2>Login failed</h2><p>{message} <a style='color:#9ab' href='/dashboard/login'>Try again</a>.</p>", status=status, mimetype="text/html")
 
-    @app.route("/dashboard/callback")
-    def dashboard_callback():
-        ticket = request.args.get("ticket", "")
-        data = m.shapes_api("GET", f"/internal/yapin/ticket/{urllib.parse.quote(ticket, safe='')}") if ticket else None
-        info = (data or {}).get("user")
-        print(data)
-        if not info or not info.get("id"):
-            return Response("<!doctype html><meta charset=utf-8><body style='font-family:system-ui;max-width:28rem;margin:4rem auto'>"
-                            "<h2>Login failed</h2><p>The login expired. <a href='/dashboard/login'>Try again</a>.</p>", status=400, mimetype="text/html")
+    def _sign_in(info):
         uid = str(info["id"])
         person = m._person(dict(yshim.fetch_user(uid))) if m.bot_ready else {}
         session.clear()
@@ -150,6 +234,58 @@ def register(m):
                             "avatar": person.get("avatar") or yshim._asset_url(info.get("avatar_path"), "avatars")}
         session.permanent = True
         return redirect("/dashboard")
+
+    @app.route("/dashboard/login")
+    def dashboard_login():
+        if request.args.get("local") != "1" and api_up():
+            back = _callback_url("/dashboard/callback")
+            return redirect(f"{api_public}/auth/yapin/login?return={urllib.parse.quote(back, safe='')}", 302)
+        if not local_ready():
+            return Response("Login isn't available: the Shapes API is down and this bot has no YAPIN_CLIENT_ID / YAPIN_CLIENT_SECRET to log you in itself.",
+                            status=503, mimetype="text/plain")
+        return redirect("/dashboard/oauth/login", 302)
+
+    @app.route("/dashboard/oauth/login")
+    def dashboard_oauth_login():
+        if not local_ready():
+            return Response("Login isn't set up on this server.", status=503, mimetype="text/plain")
+        state = _make_state()
+        query = urllib.parse.urlencode({"client_id": local["id"], "response_type": "code", "scope": local["scope"], "state": state,
+                                        "redirect_uri": _callback_url("/dashboard/oauth/callback")})
+        resp = redirect(f"{local['authorize']}?{query}", 302)
+        resp.set_cookie(LOGIN_COOKIE, state, max_age=STATE_TTL, httponly=True, samesite="Lax", secure=(m.PUBLIC_URL or request.host_url).startswith("https"))
+        return resp
+
+    @app.route("/dashboard/oauth/callback")
+    def dashboard_oauth_callback():
+        state, cookie = request.args.get("state", ""), request.cookies.get(LOGIN_COOKIE, "")
+        if request.args.get("error"):
+            return _fail("You didn't approve the login.")
+        if not state or not cookie or not hmac.compare_digest(state, cookie) or not _read_state(state):
+            return _fail("That login link isn't valid any more (expired, already used, or started in another browser).")
+        used_states[state] = time.time() + STATE_TTL
+        code = request.args.get("code", "")
+        if not code:
+            return _fail("Yapin' didn't send a login code.")
+        try:
+            info = local_profile(local_token(code))
+        except (requests.RequestException, ValueError) as e:
+            print(f"[dashboard login] failed: {e}")
+            return _fail(f"Yapin' didn't confirm who you are ({str(e)[:60]}).")
+        resp = _sign_in(info)
+        resp.delete_cookie(LOGIN_COOKIE)
+        return resp
+
+    @app.route("/dashboard/callback")
+    def dashboard_callback():
+        ticket = request.args.get("ticket", "")
+        data = m.shapes_api("GET", f"/internal/yapin/ticket/{urllib.parse.quote(ticket, safe='')}") if ticket else None
+        info = (data or {}).get("user")
+        if not info or not info.get("id"):
+            if local_ready():       # the API may have gone down mid-login: do it here instead
+                return redirect("/dashboard/oauth/login", 302)
+            return _fail("The login expired.")
+        return _sign_in(info)
 
     @app.route("/dashboard/logout")
     def dashboard_logout():
