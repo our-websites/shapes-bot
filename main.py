@@ -4416,7 +4416,7 @@ async def vortexcookie(interaction: discord.Interaction):
         await interaction.response.send_message("Run this as a slash command (pick /vortexcookie from the command list) so I can open the form.", ephemeral=True)
 
 
-@bot.on_modal("vortexcookie")
+#@bot.on_modal("vortexcookie")
 def vortex_modal(i):
     uid = str(i.user_id)
     cookie = str((i.values or {}).get("cookie") or "").strip()
