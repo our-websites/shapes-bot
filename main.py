@@ -4416,7 +4416,7 @@ async def vortexcookie(interaction: discord.Interaction):
         await interaction.response.send_message("Run this as a slash command (pick /vortexcookie from the command list) so I can open the form.", ephemeral=True)
 
 
-#@bot.on_modal("vortexcookie")
+@bot.on_modal("vortexcookie")
 def vortex_modal(i):
     uid = str(i.user_id)
     cookie = str((i.values or {}).get("cookie") or "").strip()
@@ -5216,7 +5216,7 @@ def on_message(msg):
     except Exception as e:
         print(f"[counting] {type(e).__name__}: {e}")
 
-@bot.on("dm_message")
+@bot.on_dm()
 def on_direct_message(msg):
     try:
         track_dm(msg)
