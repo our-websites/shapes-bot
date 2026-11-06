@@ -593,10 +593,13 @@ def _join(*parts):
     return "\n".join(p for p in parts if p).strip()
 
 
-def _send_msg(channel_id, text, embeds=None, comps=None, reply_to=None, ephemeral=False):
+def _send_msg(channel_id, text, embeds=None, comps=None, reply_to=None, ephemeral=False, via=None):
     text = str(text or "")
     if len(text) > 2000:       # Yapin's limit for message content
         text = text[:1997] + "…"
+    if via is not None:        # the answer to a slash command: Yapin shows "<user> used /cmd" above it, and ephemeral is truly private
+        out = via._answer("ephemeral" if ephemeral else "reply", text, embeds, comps)
+        return out if isinstance(out, dict) else {}
     if not ephemeral:
         return BOT.send(channel_id, text, embeds=embeds, components=comps, reply_to=reply_to)
     body = {"content": text, "ephemeral": True}   # only the person who ran the command sees it
@@ -609,12 +612,12 @@ def _send_msg(channel_id, text, embeds=None, comps=None, reply_to=None, ephemera
     return BOT.api("POST", f"/channels/{channel_id}/messages", body).get("message") or {}
 
 
-def _post(channel_id, content=None, embed=None, view=None, reply_to=None, ephemeral=False):
+def _post(channel_id, content=None, embed=None, view=None, reply_to=None, ephemeral=False, via=None):
     comps = _components(view) or None
     text = clean(content) if content else ""
     if embed is not None and _embeds_ok:
         try:
-            sent = SentMessage(channel_id, _send_msg(channel_id, text, [embed.to_dict()], comps, reply_to, ephemeral))
+            sent = SentMessage(channel_id, _send_msg(channel_id, text, [embed.to_dict()], comps, reply_to, ephemeral, via))
             _embed_worked()
             return sent
         except YapperError as e:
@@ -623,7 +626,7 @@ def _post(channel_id, content=None, embed=None, view=None, reply_to=None, epheme
             _disable_embeds(e)
     if embed is not None:
         text = _join(text, embed.to_text())
-    return SentMessage(channel_id, _send_msg(channel_id, text or "\u200b", None, comps, reply_to, ephemeral))
+    return SentMessage(channel_id, _send_msg(channel_id, text or "\u200b", None, comps, reply_to, ephemeral, via))
 
 
 def _edit(channel_id, message_id, content=None, embed=None, view=None):
@@ -840,8 +843,8 @@ class _Response:
     def __init__(self, inter):
         self._i = inter
 
-    async def defer(self, **_):
-        self._i._deferred = True
+    async def defer(self, *, ephemeral=False, **_):
+        self._i._defer(ephemeral)
 
     async def send_message(self, content=None, *, embed=None, embeds=None, view=None, ephemeral=False, **_):
         return self._i._send(content, embed, view, ephemeral)
@@ -877,6 +880,8 @@ class Interaction:
         self._responded = False
         self._deferred = False
         self._sent_first = False
+        self._answered = False          # the slash command's one interaction answer has been used
+        self._placeholder = None
         self.created_at = datetime.now(timezone.utc)
         if msg is not None:
             self.channel_id = msg.get("channel_id")
@@ -902,6 +907,25 @@ class Interaction:
         return self.guild_id is None
 
     # -- internals used by response / followup
+    def _command_msg(self):
+        """The slash-command event to answer through (None for typed !commands and clicks, which are answered another way)."""
+        m = self._msg
+        return m if m is not None and callable(getattr(m, "_answer", None)) and m.get("interaction") else None
+
+    def _defer(self, ephemeral=False):
+        self._deferred = True
+        via = self._command_msg()
+        if via is not None and not self._answered and not ephemeral:
+            # a command must be answered quickly: put a placeholder up now, the real answer replaces it
+            try:
+                sent = _post(self.channel_id, "⏳ Working on it…", via=via)
+            except Exception:
+                traceback.print_exc()
+                return
+            self._answered = True
+            if sent.id:
+                self._placeholder = self._original = sent
+
     def _send(self, content, embed, view, ephemeral):
         self._responded = True
         if not ephemeral and not self._sent_first and looks_private(content, embed):
@@ -929,8 +953,17 @@ class Interaction:
             else:
                 self._click.reply(text, embeds, comps)
             return None
-        reply_to = None if self._sent_first else (self._msg or {}).get("id")
-        sent = _post(self.channel_id, content, embed, view, reply_to=reply_to, ephemeral=ephemeral)
+        if self._placeholder is not None and not ephemeral:
+            sent, self._placeholder = self._placeholder, None
+            _edit(self.channel_id, sent.id, content if content else "", embed, view)
+            self._sent_first = True
+            return sent
+        via = None if self._answered else self._command_msg()
+        # slash commands have no chat message to quote; typed !commands quote theirs once
+        reply_to = None if (self._sent_first or self._command_msg() is not None) else (self._msg or {}).get("id")
+        sent = _post(self.channel_id, content, embed, view, reply_to=reply_to, ephemeral=ephemeral, via=via)
+        if via is not None:
+            self._answered = True
         self._sent_first = True
         if self._original is None:
             self._original = sent
@@ -953,6 +986,7 @@ class Interaction:
     async def edit_original_response(self, *, content=None, embed=None, view=None, **_):
         if self._original is None:
             return self._send(content, embed, view, False)
+        self._placeholder = None
         await self._original.edit(content=content, embed=embed, view=view)
         return self._original
 
@@ -1041,7 +1075,7 @@ def _run_command(spec, msg):
             hook(spec.name, msg)
         except Exception:
             traceback.print_exc()
-    print(f"[cmd] /{spec.name} by @{msg.get('author_username') or msg.get('author_id')} "
+    print(f"[cmd] /{spec.name} by @{msg.get('author_username') or msg.get('username') or msg.get('author_id')} "
           f"in {msg.get('server_id') or 'a DM'}")
     try:
         kwargs = _parse(spec, msg.get("args"), inter)
@@ -1061,7 +1095,7 @@ def _run_command(spec, msg):
 
 def _safe_reply(inter, text):
     try:
-        _post(inter.channel_id, text, reply_to=(inter._msg or {}).get("id"))
+        inter._send(text, None, None, False)
     except Exception:
         traceback.print_exc()
 
