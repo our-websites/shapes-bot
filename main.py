@@ -5216,7 +5216,7 @@ def on_message(msg):
     except Exception as e:
         print(f"[counting] {type(e).__name__}: {e}")
 
-@bot.on_dm()
+@bot.on("dm_message")
 def on_direct_message(msg):
     try:
         track_dm(msg)
