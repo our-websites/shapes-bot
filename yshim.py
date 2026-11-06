@@ -598,7 +598,13 @@ def _send_msg(channel_id, text, embeds=None, comps=None, reply_to=None, ephemera
     if len(text) > 2000:       # Yapin's limit for message content
         text = text[:1997] + "…"
     if via is not None:        # the answer to a slash command: Yapin shows "<user> used /cmd" above it, and ephemeral is truly private
-        out = via._answer("ephemeral" if ephemeral else "reply", text, embeds, comps)
+        kind = "ephemeral" if ephemeral else "reply"
+        try:
+            out = via._answer(kind, text, embeds, comps)
+        except YapperError:
+            if not comps:
+                raise
+            out = via._answer(kind, text, embeds)       # the server refused buttons on this answer: send it without them
         return out if isinstance(out, dict) else {}
     if not ephemeral:
         return BOT.send(channel_id, text, embeds=embeds, components=comps, reply_to=reply_to)
