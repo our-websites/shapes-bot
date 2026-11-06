@@ -5276,12 +5276,24 @@ def cached(key, ttl, fn):
     return value
 
 
-# Yapin user ids that may open the bot-owner dashboard (the /admin tab); defaults to the bot owners.
-ADMIN_USER_IDS = {x.strip() for x in (os.environ.get("ADMIN_USER_IDS") or os.environ.get("OWNER_IDS", "")).split(",") if x.strip()}
+# Two separate lists of Yapin user ids. Owners control everything (every command, DM everyone, the global command log).
+# Admins only get the bot-admin parts of the dashboard (every server, hide-sender, DM a list). Owners count as admins too,
+# and an id on both lists is only ever counted once.
+def _id_set(name):
+    return {x.strip() for x in (os.environ.get(name) or "").split(",") if x.strip()}
+
+
+OWNER_IDS = _id_set("OWNER_IDS")
+ADMIN_USER_IDS = _id_set("ADMIN_USER_IDS") - OWNER_IDS
+
+
+def is_bot_owner(user_id):
+    return str(user_id) in OWNER_IDS
 
 
 def is_staff_user(user_id):
-    return str(user_id) in ADMIN_USER_IDS
+    """Bot admins and bot owners."""
+    return str(user_id) in OWNER_IDS or str(user_id) in ADMIN_USER_IDS
 
 
 def _is_admin_session():
@@ -5623,6 +5635,14 @@ def api_messages(channel_id):
         return _api_error(e)
 
 
+def actor_is_owner():
+    """The dashboard user is a bot owner (the admin key counts: whoever holds it runs the bot)."""
+    user = session.get("yuser")
+    if isinstance(user, dict) and user.get("id"):
+        return is_bot_owner(user["id"])
+    return session.get("admin") is True
+
+
 def current_actor():
     """(id, name, is_bot_staff) of whoever is using the dashboard right now. The admin key has no identity of its own."""
     user = session.get("yuser")
@@ -5799,21 +5819,73 @@ def api_dm_open():
         return _api_error(e)
 
 
-def dm_people(user_ids, text, title=None, image=None, where=None, hidden=False, delay=0.5):
-    """DM each person as the bot. Returns [{user_id, ok, error?}]; one failure (DMs closed) never stops the rest."""
-    uid, name, staff = current_actor()
+def dm_people(user_ids, text, title=None, image=None, where=None, hidden=False, delay=0.5, actor=None, progress=None):
+    """DM each person as the bot. Returns [{user_id, ok, error?}]; one failure (DMs closed) never stops the rest.
+    `actor` is (id, name, staff) when this runs outside a request (a background job); progress(done, results) is told as it goes."""
+    uid, name, staff = actor or current_actor()
     if hidden and not staff:
         raise PermissionError("Only bot admins can hide who a message is from.")
     footer = None if hidden else _stamp_text(name, where)
     results = []
-    for target in user_ids:
+    for target in dict.fromkeys(str(t) for t in user_ids):         # never the same person twice
         try:
             _post_with_optional_image(bot.dm(target), text, image, title, footer)
             results.append({"user_id": target, "ok": True})
         except Exception as e:
             results.append({"user_id": target, "ok": False, "error": str(e)[:120]})
+        if progress:
+            progress(len(results), results)
         time.sleep(delay)
     return results
+
+
+_dm_jobs = {}
+
+
+def start_dm_job(user_ids, text, title=None, image=None, where=None, hidden=False, log=None):
+    """DM a (possibly huge) list in the background, so the request returns at once. Poll dm_job_status(id)."""
+    ids = list(dict.fromkeys(str(i) for i in user_ids))
+    actor = current_actor()
+    job_id = os.urandom(6).hex()
+    job = {"total": len(ids), "done": 0, "sent": 0, "failed": [], "finished": False, "started": time.time(), "owner": actor[0]}
+    for old in [k for k, v in _dm_jobs.items() if time.time() - v["started"] > 6 * 3600]:
+        _dm_jobs.pop(old, None)
+    _dm_jobs[job_id] = job
+
+    def update(done, results):
+        job.update(done=done, sent=sum(r["ok"] for r in results), failed=[r for r in results if not r["ok"]][:50])
+
+    def run():
+        try:
+            dm_people(ids, text, title, image, where, hidden, actor=actor, progress=update)
+        except Exception as e:
+            job["error"] = str(e)[:200]
+        finally:
+            job["finished"] = True
+            print(f"[dm job {job_id}] {job['sent']}/{job['total']} sent" + (f", {len(job['failed'])} failed" if job["failed"] else ""))
+
+    threading.Thread(target=run, daemon=True, name=f"dm-job-{job_id}").start()
+    return job_id
+
+
+def dm_job_status(job_id, owner_id):
+    job = _dm_jobs.get(job_id)
+    if not job or job["owner"] != owner_id:
+        return None
+    return {k: job[k] for k in ("total", "done", "sent", "failed", "finished")} | ({"error": job["error"]} if job.get("error") else {})
+
+
+def all_member_ids(server_ids=None):
+    """Every non-bot member id across the given servers (default: all of them), each only once."""
+    seen = {}
+    for srv in (server_ids if server_ids is not None else [str(s.get("id")) for s in bot.servers()]):
+        try:
+            for p in _all_members(srv, limit=10 ** 9):
+                if not p["bot"]:
+                    seen[p["id"]] = True
+        except Exception as e:
+            print(f"[dm] couldn't list members of {srv}: {e}")
+    return list(seen)
 
 
 @app.route("/api/dm/send", methods=["POST"])
@@ -5827,18 +5899,30 @@ def api_dm_send():
     ids = list(dict.fromkeys(ids))
     if not text:
         return jsonify({"error": "Write the message first."}), 400
+    everyone = body.get("everyone") is True
+    if everyone:
+        if not actor_is_owner():
+            return jsonify({"error": "Only bot owners can DM everyone."}), 403
+        ids = all_member_ids()
     if not ids:
         return jsonify({"error": "Pick at least one person."}), 400
-    if len(ids) > 200:
+    if len(ids) > 200 and not actor_is_owner():
         return jsonify({"error": "That's more than 200 people at once; split it up."}), 400
     try:
         image = _valid_image(body.get("image_url"))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     hidden = body.get("hidden") is True
-    results = dm_people(ids, text, title or None, image, hidden=hidden, delay=0.5)
-    log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], target=f"{len(ids)} people: " + ", ".join(ids[:8]) + ("…" if len(ids) > 8 else ""))
-    return jsonify({"sent": sum(r["ok"] for r in results), "failed": [r for r in results if not r["ok"]]})
+    job = start_dm_job(ids, text, title or None, image, hidden=hidden)
+    log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], target=("everyone: " if everyone else "") + f"{len(ids)} people: " + ", ".join(ids[:8]) + ("…" if len(ids) > 8 else ""))
+    return jsonify({"job": job, "total": len(ids)})
+
+
+@app.route("/api/dm/job/<job>")
+@admin_required
+def api_dm_job(job):
+    status = dm_job_status(job, current_actor()[0])
+    return (jsonify(status), 200) if status else (jsonify({"error": "No such job."}), 404)
 
 
 @app.route("/api/actions")

@@ -370,7 +370,8 @@ def register(m):
         return {"server": {"id": sid, "name": server.get("name") or sid, "icon": m._icon_of(server),
                            "members": yshim._first(server, "member_count", "members_count", "memberCount")},
                 "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
-                "owner": m.is_server_owner(sid, current_user()["id"]), "staff": m.is_staff_user(current_user()["id"])}
+                "owner": m.is_server_owner(sid, current_user()["id"]) or m.is_bot_owner(current_user()["id"]),
+                "staff": m.is_staff_user(current_user()["id"]), "bot_owner": m.is_bot_owner(current_user()["id"])}
 
     @app.route("/me/servers/<sid>")
     @login_required
@@ -498,22 +499,32 @@ def register(m):
         ids = list(dict.fromkeys(str(i).strip() for i in (body.get("user_ids") or []) if str(i).strip()))
         if not text or len(text) > 1500:
             return jsonify({"error": "Write a message (1500 characters at most)."}), 400
-        if not ids or len(ids) > 50:
-            return jsonify({"error": "Pick between 1 and 50 members."}), 400
-        if too_fast("dm", 10, 3600):
+        unlimited = m.is_server_owner(sid, current_user()["id"]) or m.is_bot_owner(current_user()["id"])
+        people = {p["id"]: p for p in m.cached(f"people:{sid}", 60, lambda: m._all_members(sid, limit=10 ** 9)) if not p["bot"]}
+        if body.get("everyone") is True:                  # the whole server, however big
+            if not unlimited:
+                return jsonify({"error": "Only the server owner can DM the whole server."}), 403
+            ids = list(people)
+        if not ids or (len(ids) > 50 and not unlimited):
+            return jsonify({"error": "Pick between 1 and 50 members." if not unlimited else "Pick at least one member."}), 400
+        if not unlimited and too_fast("dm", 10, 3600):
             return jsonify({"error": "You've sent a lot of DMs this hour. Try again later."}), 429
-        people = {p["id"] for p in m.cached(f"people:{sid}", 60, lambda: m._all_members(sid, limit=3000))}
-        outside = [i for i in ids if i not in people]
-        if outside:
+        if [i for i in ids if i not in people]:
             return jsonify({"error": "Some of those people aren't members of this server."}), 400
         server = dict(m.cached(f"server:{sid}", 30, lambda: bot.server(sid)))
         hidden = body.get("hidden") is True
-        try:
-            results = m.dm_people(ids, text, where=server.get("name") or None, hidden=hidden)
-        except PermissionError as e:
-            return jsonify({"error": str(e)}), 403
-        m.log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], server_id=sid, target=f"{len(ids)} members: " + ", ".join(ids[:8]))
-        return jsonify({"sent": sum(r["ok"] for r in results), "failed": [r for r in results if not r["ok"]]})
+        if hidden and not m.is_staff_user(current_user()["id"]):
+            return jsonify({"error": "Only bot admins can hide who a message is from."}), 403
+        job = m.start_dm_job(ids, text, where=server.get("name") or None, hidden=hidden)
+        m.log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], server_id=sid, target=("whole server: " if body.get("everyone") else "") + f"{len(ids)} members: " + ", ".join(ids[:8]))
+        return jsonify({"job": job, "total": len(ids)})
+
+    @app.route("/me/servers/<sid>/dm/<job>")
+    @login_required
+    def me_dm_job(sid, job):
+        require_manage(sid)
+        status = m.dm_job_status(job, current_user()["id"])
+        return (jsonify(status), 200) if status else (jsonify({"error": "No such job."}), 404)
 
     @app.route("/me/servers/<sid>/log")
     @login_required

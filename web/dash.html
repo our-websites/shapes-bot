@@ -330,12 +330,19 @@ function dm() {
     try { const r = await api('/me/servers/' + sid() + '/members?q=' + encodeURIComponent(q.value.trim()));
       results.replaceChildren(...(r.members.length ? r.members.map(m => h('button', { onclick: () => { picked.set(m.id, m.display || m.name); redraw(); q.value = ''; results.hidden = true; } }, m.avatar ? h('img', { class: 'avatar', src: m.avatar, alt: '' }) : h('div', { class: 'avatar' }), (m.display || m.name) + ' (@' + m.name + ')')) : [h('div', { class: 'empty' }, 'No one found.')]));
       results.hidden = false; } catch (e) { st.className = 'status err'; st.textContent = e.message; } }, 250); });
+  const [allL, all] = detail.owner ? check('Everyone in this server (' + (detail.server.members || 'all') + ' people, no limit)', false) : [null, null];
   save(sv, st, async () => {
-    const r = await api('/me/servers/' + sid() + '/dm', { user_ids: [...picked.keys()], message: msg.value, hidden: hide ? hide.checked : false });
-    msg.value = ''; return 'Sent to ' + r.sent + (r.failed.length ? ' · ' + r.failed.length + ' couldn’t be reached (DMs closed?)' : '') + '.';
+    const r = await api('/me/servers/' + sid() + '/dm', { user_ids: [...picked.keys()], everyone: all ? all.checked : false, message: msg.value, hidden: hide ? hide.checked : false });
+    msg.value = '';
+    for (;;) {                                   // big lists go out in the background: show how far it got
+      const j = await api('/me/servers/' + sid() + '/dm/' + r.job);
+      if (j.finished) return 'Sent to ' + j.sent + ' of ' + j.total + (j.failed.length ? ' · ' + j.failed.length + ' couldn’t be reached (DMs closed?)' : '') + '.';
+      st.className = 'status'; st.textContent = 'Sending… ' + j.done + ' of ' + j.total;
+      await new Promise(ok => setTimeout(ok, 1500));
+    }
   });
-  return [...head('Message members', 'Shapes sends each person a DM. It says who sent it and which server it’s from. Up to 25 people at a time.'),
-    panel('Recipients', null, field('Find a member', q, 'row'), results, chips, field('Message', msg, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
+  return [...head('Message members', 'Shapes sends each person a DM. It says who sent it and which server it’s from. Server owners can message everyone; managers can pick up to 50.'),
+    panel('Recipients', null, allL ? h('div', { class: 'row' }, allL) : null, field('Find a member', q, 'row'), results, chips, field('Message', msg, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
 }
 
 // ---------------------------------------------------------------- logs
