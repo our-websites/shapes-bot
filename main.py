@@ -702,7 +702,7 @@ def cmdlog_record(command, msg):
     cfg = cmdlogcfgDB.get(str(sid))
     if not cfg or not cfg.get("enabled"):
         return
-    row = {"at": int(time.time()), "user_id": str(msg.get("author_id")), "username": str(msg.get("author_username") or msg.get("author_id")),
+    row = {"at": int(time.time()), "user_id": str(msg.get("author_id")), "username": str(msg.get("author_username") or msg.get("username") or msg.get("author_id")),
            "command": command, "args": str(msg.get("args") or "")[:200], "channel_id": str(msg.get("channel_id")), "server_id": str(sid)}
     cmdlogDB.set(f"{sid}:{int(time.time() * 1000)}-{os.urandom(2).hex()}", row)
     mine = sorted(k for k in cmdlogDB.items() if k.startswith(f"{sid}:"))
@@ -4423,7 +4423,7 @@ async def vortexcookie(interaction: discord.Interaction):
 @bot.on_modal("vortexcookie")
 def vortex_modal(i):
     uid = str(i.user_id)
-    cookie = str((i.values or {}).get("cookie") or "").strip()
+    cookie = str(((i.get("values") if hasattr(i, "get") else None) or {}).get("cookie") or "").strip()    # i.values is dict.values: read the key
     entry = usersDB.get(uid)
     entry = dict(entry) if isinstance(entry, dict) else {}
     if not cookie:
