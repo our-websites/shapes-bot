@@ -156,6 +156,7 @@ def shapes_api(method, path, body=None, timeout=30):
         r = _api_session.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=30)
         data = r.json()
         print(data)
+        print('Shapes API Is Responding.' if data['success'] == True else 'Shapes API Is Responding But Denying Your Requests.')
         return data if isinstance(data, dict) else None
     except (requests.RequestException, ValueError):
         print("Shapes API Is Not Responding.")
