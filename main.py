@@ -783,6 +783,243 @@ async def cmdlog(interaction: discord.Interaction, action: str = "status", value
     await interaction.response.send_message(embed=_cmdlog_status_embed(sid, color), ephemeral=True)
 
 
+# --- Bot log (bot owners only): one channel that gets every command from every server, and when Shapes is added or removed ---
+# It posts through a webhook (bot.create_webhook / bot.send_webhook) and falls back to the bot posting in the channel.
+
+BOTLOG_KEY = "_bot"
+BOTLOG_DEFAULT = {"enabled": False, "channel": None, "mode": None, "webhook_id": None, "commands": True, "events": True}
+_botlog_queue = None
+_botlog_times = []
+
+
+def get_botlog():
+    return {**BOTLOG_DEFAULT, **(cmdlogcfgDB.get(BOTLOG_KEY) or {})}
+
+
+def resolve_any_channel(token):
+    """A text channel anywhere the bot is, from <#id>, an id or a name (the first match wins for names)."""
+    token = (token or "").strip()
+    found = re.match(r"^<#([^>\\s]+)>$", token)
+    wanted = (found.group(1) if found else token).lstrip("#")
+    for c in bot.channels():
+        if str(c.get("id")) == wanted or (not found and str(c.get("name", "")).lower() == wanted.lower()):
+            return c
+    return None
+
+
+def botlog_configure(channel_id=None, enabled=None, commands=None, events=None):
+    cfg = get_botlog()
+    if channel_id is not None and str(channel_id) != str(cfg["channel"] or ""):
+        if cfg.get("webhook_id"):
+            try:
+                bot.delete_webhook(cfg["webhook_id"])
+            except Exception:
+                pass
+        cfg.update(channel=str(channel_id), mode=None, webhook_id=None)
+    if enabled is not None:
+        cfg["enabled"] = bool(enabled) and bool(cfg["channel"])
+    if commands is not None:
+        cfg["commands"] = bool(commands)
+    if events is not None:
+        cfg["events"] = bool(events)
+    cmdlogcfgDB.set(BOTLOG_KEY, cfg)
+    return cfg
+
+
+def _botlog_deliver(embed):
+    cfg = get_botlog()
+    if not cfg["enabled"] or not cfg["channel"]:
+        return
+    if cfg["mode"] != "bot":
+        try:
+            if not cfg["webhook_id"]:
+                hook = bot.create_webhook(cfg["channel"], "Shapes Log")
+                cfg.update(mode="webhook", webhook_id=str(hook.id))
+                cmdlogcfgDB.set(BOTLOG_KEY, cfg)
+            bot.send_webhook(cfg["webhook_id"], "", username="Shapes Log", embeds=[embed])
+            return
+        except Exception as e:
+            print(f"[botlog] webhook unavailable ({e}); posting as the bot instead")
+            cfg.update(mode="bot", webhook_id=None)
+            cmdlogcfgDB.set(BOTLOG_KEY, cfg)
+    try:
+        bot.send(cfg["channel"], "", embeds=[embed])
+    except Exception as e:
+        print(f"[botlog] couldn't post: {e}")
+
+
+def _botlog_worker():
+    while True:
+        embed = _botlog_queue.get()
+        now = time.time()
+        _botlog_times[:] = [t for t in _botlog_times if now - t < 60]
+        if len(_botlog_times) >= 30:           # a flood is dropped from the channel (the dashboard still has the commands)
+            continue
+        _botlog_times.append(now)
+        try:
+            _botlog_deliver(embed)
+        except Exception as e:
+            print(f"[botlog] delivery failed: {e}")
+        time.sleep(0.3)
+
+
+def botlog_post(embed):
+    """Queue one embed (a dict) for the bot log. Does nothing when the log is off."""
+    global _botlog_queue
+    cfg = cmdlogcfgDB.get(BOTLOG_KEY)
+    if not cfg or not cfg.get("enabled"):
+        return
+    if _botlog_queue is None:
+        import queue
+        _botlog_queue = queue.Queue()
+        threading.Thread(target=_botlog_worker, daemon=True, name="botlog").start()
+    _botlog_queue.put(embed)
+
+
+GLOBAL_CMDLOG_KEEP = 500
+
+
+def global_cmdlog_rows(limit=200):
+    return cmdlog_rows("_global", limit)
+
+
+def global_cmdlog_record(command, msg):
+    """yshim hook: every command in every server, for the bot owners. Off until an owner turns it on."""
+    cfg = cmdlogcfgDB.get(BOTLOG_KEY)
+    if not cfg or not cfg.get("enabled") or not cfg.get("commands") or command == "botlog":
+        return
+    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    try:
+        name = (dict(cached(f"server:{sid}", 30, lambda: bot.server(sid))).get("name") if sid else None) or ("a DM" if not sid else str(sid))
+    except Exception:
+        name = str(sid or "a DM")
+    row = {"at": int(time.time()), "user_id": str(msg.get("author_id")), "username": str(msg.get("author_username") or msg.get("username") or msg.get("author_id")),
+           "command": command, "args": str(msg.get("args") or "")[:200], "channel_id": str(msg.get("channel_id")), "server_id": str(sid or ""), "server": name}
+    cmdlogDB.set(f"_global:{int(time.time() * 1000)}-{os.urandom(2).hex()}", row)
+    mine = sorted(k for k in cmdlogDB.items() if k.startswith("_global:"))
+    for old in mine[:max(0, len(mine) - GLOBAL_CMDLOG_KEEP)]:
+        cmdlogDB.remove(old)
+    embed = _cmdlog_embed(row)
+    embed["fields"].insert(2, {"name": "Server", "value": f"{name}" + (f" (`{sid}`)" if sid else ""), "inline": True})
+    embed["footer"] = {"text": "Shapes global command log"}
+    botlog_post(embed)
+
+
+yshim.COMMAND_HOOKS.append(global_cmdlog_record)
+
+
+# Servers Shapes is in: noticed by comparing the list now with the one saved last time, so adds and removals are seen even
+# when Yapin' sends no event for them, and nothing is announced twice after a restart.
+_known_servers_lock = threading.Lock()
+
+
+def server_watch_poll():
+    """Compare bot.servers() with the saved list. Returns (added, removed) as lists of {id, name, ...}."""
+    with _known_servers_lock:
+        try:
+            now = {str(s.get("id")): dict(s) for s in bot.servers()}
+        except Exception as e:
+            print(f"[servers] couldn't list servers: {e}")
+            return [], []
+        saved = cmdlogcfgDB.get("_servers")
+        cmdlogcfgDB.set("_servers", {"servers": {k: {"name": v.get("name")} for k, v in now.items()}, "at": int(time.time())})
+        if saved is None:                      # first run: remember them, announce nothing
+            return [], []
+        before = saved.get("servers") or {}
+        added = [now[k] for k in now if k not in before]
+        removed = [{"id": k, **before[k]} for k in before if k not in now]
+    for s in added:
+        _server_event("add", s["id"], s.get("name"), s, len(now))
+    for s in removed:
+        _server_event("remove", s["id"], s.get("name"), s, len(now))
+    return added, removed
+
+
+def _server_event(kind, sid, name, data, total):
+    name = name or str(sid)
+    fields = [{"name": "Server", "value": f"{name}\\n`{sid}`", "inline": True}]
+    members = yshim._first(data, "member_count", "members_count", "memberCount")
+    if members is not None:
+        fields.append({"name": "Members", "value": f"{members:,}" if isinstance(members, int) else str(members), "inline": True})
+    owner = data.get("owner_id")
+    if owner:
+        fields.append({"name": "Owner", "value": f"<@{owner}>", "inline": True})
+    fields.append({"name": "Servers now", "value": str(total), "inline": True})
+    embed = {"title": ("➕ Shapes was added to " if kind == "add" else "➖ Shapes was removed from ") + name,
+             "color": 0x57F287 if kind == "add" else 0xED4245, "fields": fields, "footer": {"text": "Shapes server log"},
+             "timestamp": datetime.now(timezone.utc).isoformat()}
+    actionsDB.set(f"{int(time.time() * 1000)}-{os.urandom(2).hex()}", {
+        "at": int(time.time()), "actor_id": "system", "actor": "system", "kind": f"server_{kind}", "detail": f"{name} ({members or '?'} members)",
+        "server_id": str(sid), "target": None})
+    print(f"[servers] Shapes was {'added to' if kind == 'add' else 'removed from'} {name} ({sid}); now in {total}")
+    cfg = cmdlogcfgDB.get(BOTLOG_KEY)
+    if cfg and cfg.get("events"):
+        botlog_post(embed)
+
+
+def _server_watch_loop():
+    while True:
+        time.sleep(60)
+        try:
+            server_watch_poll()
+        except Exception as e:
+            print(f"[servers] watcher error: {e}")
+
+
+_server_watch_started = False
+
+
+def start_server_watch():
+    global _server_watch_started
+    if _server_watch_started:
+        return
+    _server_watch_started = True
+    server_watch_poll()
+    threading.Thread(target=_server_watch_loop, daemon=True, name="server-watch").start()
+
+
+# If Yapin' ever sends an event for it, react at once instead of waiting for the next check.
+for _ev in ("server_join", "server_add", "bot_added", "bot_join", "server_leave", "server_remove", "bot_removed", "bot_leave"):
+    bot.on(_ev, lambda _e: threading.Thread(target=server_watch_poll, daemon=True).start())
+
+
+def _botlog_status_embed(color, note=None):
+    cfg = get_botlog()
+    embed = discord.Embed(title="Bot log", color=color)
+    embed.description = (f"✅ {note}\\n\\n" if note else "") + (f"Logging is **{'on' if cfg['enabled'] else 'off'}**" + (f" in <#{cfg['channel']}>" if cfg["channel"] else " (no channel chosen)") + ".")
+    embed.add_field(name="Every command, in every server", value="on" if cfg["commands"] else "off", inline=True)
+    embed.add_field(name="Server added / removed", value="on" if cfg["events"] else "off", inline=True)
+    embed.add_field(name="Change it", value="`/botlog channel #logs` · `/botlog on|off` · `/botlog commands on|off` · `/botlog events on|off`", inline=False)
+    return embed
+
+
+@bot.tree.command(name="botlog", description="Bot owners only: log every command and server add/remove: /botlog [channel #c | on | off | commands on|off | events on|off]")
+async def botlog(interaction: discord.Interaction, action: str = "status", value: str = ""):
+    uid = str(interaction.user.id)
+    if not is_bot_owner(uid):
+        await interaction.response.send_message("Only the bot owners can set up the bot log.", ephemeral=True)
+        return
+    color, action, value = ecolor(uid), (action or "status").lower(), (value or "").strip().lower()
+    if action in ("on", "off"):
+        cfg = botlog_configure(enabled=action == "on")
+        if action == "on" and not cfg["enabled"]:
+            await interaction.response.send_message("Pick a channel first: `/botlog channel #logs`", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=_botlog_status_embed(color, f"The bot log is now {action}."), ephemeral=True)
+    elif action in ("commands", "events") and value in ("on", "off"):
+        botlog_configure(**{action: value == "on"})
+        await interaction.response.send_message(embed=_botlog_status_embed(color, f"{action.title()} logging is now {value}."), ephemeral=True)
+    elif action == "channel":
+        ch = resolve_any_channel(value)
+        if not ch:
+            await interaction.response.send_message("I couldn't find that channel. Use `/botlog channel #logs` (a channel in a server I'm in).", ephemeral=True)
+            return
+        botlog_configure(channel_id=str(ch.get("id")), enabled=True)
+        await interaction.response.send_message(embed=_botlog_status_embed(color, f"Logging to <#{ch.get('id')}>."), ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=_botlog_status_embed(color), ephemeral=True)
+
+
 # --- Autorole: a role for new members, with people who are left out ---
 
 AUTOROLE_DEFAULT = {"role_id": "", "enabled": False, "exempt_users": [], "include_bots": True}
@@ -5254,6 +5491,7 @@ def on_ready(me):
         bot.set_status("online", "🔗 shapes-yapper.oriaxen.com")
     except Exception as e:
         print(f"could not set status: {e}")
+    start_server_watch()
     print(f"[SYSTEM] Logged in as {me.username}, watching {len(bot.servers())} servers. Storage: {__import__('cfstore').backend_summary()}")
 
 
@@ -5927,6 +6165,27 @@ def api_dm_send():
 def api_dm_job(job):
     status = dm_job_status(job, current_actor()[0])
     return (jsonify(status), 200) if status else (jsonify({"error": "No such job."}), 404)
+
+
+@app.route("/api/botlog", methods=["GET", "POST"])
+@admin_required
+def api_botlog():
+    """Bot owners: the global command log and its settings (admins can't change or read it)."""
+    if not actor_is_owner():
+        return jsonify({"error": "Only bot owners can use the bot log."}), 403
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        channel = None
+        if body.get("channel"):
+            ch = resolve_any_channel(str(body["channel"]))
+            if not ch:
+                return jsonify({"error": "That channel isn't in a server the bot is in."}), 400
+            channel = str(ch.get("id"))
+        botlog_configure(channel_id=channel, enabled=body.get("enabled") if isinstance(body.get("enabled"), bool) else None,
+                         commands=body.get("commands") if isinstance(body.get("commands"), bool) else None,
+                         events=body.get("events") if isinstance(body.get("events"), bool) else None)
+        log_action("settings", "bot log changed")
+    return jsonify({"config": get_botlog(), "rows": global_cmdlog_rows(200)})
 
 
 @app.route("/api/actions")
