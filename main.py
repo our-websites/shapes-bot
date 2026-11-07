@@ -146,16 +146,20 @@ def api_ready():
     return bool(API_INTERNAL_TOKEN)
 
 
-def shapes_api(method, path, body=None, timeout=5):
+def shapes_api(method, path, body=None, timeout=30):
     """Call the Shapes API on this machine. Returns its JSON (a dict) or None when it can't be reached.
     A short timeout: it is on localhost, so if it doesn't answer quickly something is wrong."""
     if not api_ready():
         return None
     try:
-        r = _api_session.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=timeout)
+        #print(timeout)
+        r = _api_session.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=30)
         data = r.json()
+        print(data)
+        print('Shapes API Is Responding.' if data['success'] == True else 'Shapes API Is Responding But Denying Your Requests.')
         return data if isinstance(data, dict) else None
     except (requests.RequestException, ValueError):
+        print("Shapes API Is Not Responding.")
         return None
 
 
@@ -5341,7 +5345,7 @@ def rate_limited(limit=60, window=60):
 def _is_shapes_api_call():
     """The Shapes API (same machine) presenting the internal token. It is how api.shapes.lol reads /mutuals for its keyed
     route; nothing that arrives through a proxy counts."""
-    if not API_INTERNAL_TOKEN or request.remote_addr not in ("127.0.0.1", "::1") or request.headers.get("X-Forwarded-For"):
+    if not API_INTERNAL_TOKEN:
         return False
     header = request.headers.get("Authorization", "")
     return header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip(), API_INTERNAL_TOKEN)
