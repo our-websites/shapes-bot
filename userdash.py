@@ -218,8 +218,9 @@ def register(m):
                 "avatar_path": info.get("avatar_path") or info.get("avatar_url") or info.get("picture")}
 
     def _boot(user):
-        return {"user": user, "staff": m.is_staff_user(user["id"]) if user else False,
-                "login": bool(local_ready() or api_up()), "bot_ready": bool(m.bot_ready)}
+        return {"user": user, "staff": m.is_staff_user(user["id"]) if user else False, "owner": m.is_bot_owner(user["id"]) if user else False,
+                "login": bool(local_ready() or api_up()), "bot_ready": bool(m.bot_ready), "colors": m.color_choices(),
+                "color": (m.embedDB.get(user["id"]) if user else None)}
 
     def _fail(message, status=400):
         return Response("<!doctype html><meta charset=utf-8><body style='font-family:system-ui;max-width:28rem;margin:4rem auto;background:#0b0b0f;color:#eee'>"
@@ -301,7 +302,10 @@ def register(m):
 
     def perm(sid, uid):
         """(is_member, can_manage) for one person in one server: the owner, an administrator, or a manage-server role.
-        Strict on purpose: unlike the in-chat check, a role that is merely named 'Moderator' doesn't count here."""
+        Strict on purpose: unlike the in-chat check, a role that is merely named 'Moderator' doesn't count here.
+        Bot owners and bot admins can open every server the bot is in."""
+        if m.is_staff_user(uid):
+            return True, True
         try:
             member = dict(bot.member(sid, uid))
         except Exception:
@@ -338,7 +342,7 @@ def register(m):
                 return None
             return {"id": sid, "name": s.get("name") or sid, "icon": m._icon_of(s),
                     "members": yshim._first(s, "member_count", "members_count", "memberCount"),
-                    "manage": manage, "counting": counting_brief(sid)}
+                    "manage": manage, "staff_access": manage and m.is_staff_user(uid), "counting": counting_brief(sid)}
         with ThreadPoolExecutor(max_workers=8) as pool:
             rows = [r for r in pool.map(one, servers) if r]
         rows.sort(key=lambda r: r["name"].lower())
@@ -363,7 +367,8 @@ def register(m):
         server = dict(m.cached(f"server:{sid}", 30, lambda: bot.server(sid)))
         groups = m._group_channels([dict(c) for c in bot.channels(sid)])
         text = [{"id": ch["id"], "name": ch["name"], "category": g["name"]} for g in groups for ch in g["channels"] if m._is_text(ch["type"])]
-        roles = [{"id": str(r.get("id")), "name": r.get("name") or str(r.get("id"))} for r in bot.roles(sid)]
+        roles = [{"id": str(r.get("id")), "name": r.get("name") or str(r.get("id")), "admin": bool(yshim._has_admin(dict(r))), "color": r.get("color") if isinstance(r.get("color"), str) else None}
+                 for r in bot.roles(sid) if str(r.get("name", "")).lower() != "@everyone"]
         counting = {**m.default_counting(), **(m.countingDB.get(sid) or {})}
         counting["emojis"] = m.counting_emojis(counting)
         counting["last_name"] = (yshim.fetch_user(counting["lastcounter"]).get("username") if counting.get("lastcounter") else None)
@@ -372,6 +377,25 @@ def register(m):
                 "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
                 "owner": m.is_server_owner(sid, current_user()["id"]) or m.is_bot_owner(current_user()["id"]),
                 "staff": m.is_staff_user(current_user()["id"]), "bot_owner": m.is_bot_owner(current_user()["id"])}
+
+    @app.route("/me/servers/<sid>/info")
+    @login_required
+    def me_info(sid):
+        """What /serverinfo shows: open to everyone who is in the server."""
+        member, _ = perm(sid, current_user()["id"])
+        if not member:
+            abort(404)
+        try:
+            data = m.cached(f"summary:{sid}", 60, lambda: m.server_summary(sid))
+        except Exception as e:
+            return jsonify({"error": f"Couldn't load that server: {e}"}), 502
+        owner = None
+        if data["owner"]:
+            try:
+                owner = {k: m._person(dict(bot.member(sid, data["owner"])))[k] for k in ("id", "name", "display", "avatar")}
+            except Exception:
+                owner = {"id": data["owner"], "name": data["owner"], "display": data["owner"], "avatar": m.default_avatar_url(data["owner"])}
+        return jsonify({**data, "owner": owner, "extra": [{"label": k, "value": v} for k, v in data["extra"]], "counting": counting_brief(sid)})
 
     @app.route("/me/servers/<sid>")
     @login_required
@@ -471,7 +495,11 @@ def register(m):
         if too_fast("say", 15, 60):
             return jsonify({"error": "Slow down a little, then try again."}), 429
         try:
-            footer = m.send_as_bot(channel, text, image, str(body.get("title", "")).strip() or None, hidden=body.get("hidden") is True)
+            color = m.resolve_color(body.get("color"), body.get("custom_color"), current_user()["id"]) if (body.get("color") or body.get("hidden") is not True) else None
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        try:
+            footer = m.send_as_bot(channel, text, image, str(body.get("title", "")).strip() or None, hidden=body.get("hidden") is True, color=color)
         except PermissionError as e:
             return jsonify({"error": str(e)}), 403
         except Exception as e:
@@ -515,7 +543,11 @@ def register(m):
         hidden = body.get("hidden") is True
         if hidden and not m.is_staff_user(current_user()["id"]):
             return jsonify({"error": "Only bot admins can hide who a message is from."}), 403
-        job = m.start_dm_job(ids, text, where=server.get("name") or None, hidden=hidden)
+        try:
+            color = m.resolve_color(body.get("color"), body.get("custom_color"), current_user()["id"]) if (body.get("color") or body.get("hidden") is not True) else None
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        job = m.start_dm_job(ids, text, where=server.get("name") or None, hidden=hidden, color=color)
         m.log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], server_id=sid, target=("whole server: " if body.get("everyone") else "") + f"{len(ids)} members: " + ", ".join(ids[:8]))
         return jsonify({"job": job, "total": len(ids)})
 
@@ -525,6 +557,66 @@ def register(m):
         require_manage(sid)
         status = m.dm_job_status(job, current_user()["id"])
         return (jsonify(status), 200) if status else (jsonify({"error": "No such job."}), 404)
+
+    # ------------------------------------------------------------------ giving and taking roles
+
+    @app.route("/me/servers/<sid>/member/<uid>")
+    @login_required
+    def me_member(sid, uid):
+        require_manage(sid)
+        try:
+            person = m._person(dict(bot.member(sid, uid)))
+        except Exception:
+            return jsonify({"error": "That person isn't in this server."}), 404
+        return jsonify({k: person[k] for k in ("id", "name", "display", "avatar", "roles", "bot")})
+
+    @app.route("/me/servers/<sid>/roles", methods=["POST"])
+    @login_required
+    def me_roles(sid):
+        """Give or take a role. Roles that can manage the server stay with the server owner (and bot staff), so nobody can
+        promote themselves past their own rank."""
+        require_manage(sid)
+        body = request.get_json(silent=True) or {}
+        target, role_id, action = str(body.get("user_id", "")), str(body.get("role_id", "")), body.get("action")
+        if action not in ("add", "remove"):
+            return jsonify({"error": '"action" must be add or remove.'}), 400
+        roles = {str(r.get("id")): dict(r) for r in m.cached(f"roles:{sid}", 60, lambda: [dict(x) for x in bot.roles(sid)])}
+        role = roles.get(role_id)
+        if not role:
+            return jsonify({"error": "That role isn't in this server."}), 400
+        me = current_user()["id"]
+        powerful = m.is_server_owner(sid, me) or m.is_staff_user(me)
+        if not powerful and yshim._has_admin(role):
+            return jsonify({"error": "Only the server owner can hand out roles that manage the server."}), 403
+        if str(role.get("name", "")).lower() == "@everyone" or role.get("is_default") is True:
+            return jsonify({"error": "Everyone already has that role."}), 400
+        try:
+            person = m._person(dict(bot.member(sid, target)))
+        except Exception:
+            return jsonify({"error": "That person isn't in this server."}), 404
+        try:
+            (bot.add_role if action == "add" else bot.remove_role)(sid, target, role_id)
+        except Exception as e:
+            return jsonify({"error": f"Yapin' wouldn't do that: {e} (the role may be above Shapes' own role)."}), 502
+        m.log_action("role", f"{'gave' if action == 'add' else 'took'} {role.get('name')}", server_id=sid, target=f"@{person['name']}")
+        now = set(person["roles"]) | {role_id} if action == "add" else set(person["roles"]) - {role_id}
+        return jsonify({"ok": True, "roles": sorted(now)})
+
+    # ------------------------------------------------------------------ their own embed colour
+
+    @app.route("/me/settings", methods=["GET", "POST"])
+    @login_required
+    def me_settings():
+        uid = current_user()["id"]
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            try:
+                value = m.resolve_color(body.get("color") if body.get("color") != "mine" else "Blue", body.get("custom_color"), uid)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            m.embedDB.set(uid, value)
+        saved = m.embedDB.get(uid)
+        return jsonify({"color": "#%06x" % saved if isinstance(saved, int) else None, "choices": m.color_choices()})
 
     @app.route("/me/servers/<sid>/log")
     @login_required

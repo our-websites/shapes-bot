@@ -14,6 +14,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import html
 import io
 import json
 import os
@@ -1499,42 +1500,48 @@ async def serverinfo(interaction: discord.Interaction):
         return
     sid = str(interaction.guild_id)
     try:
-        info = dict(bot.server(sid))
-        channels = bot.channels(sid)
-        roles = bot.roles(sid)
-        members = cached(f"allmembers:{sid}", 120, lambda: _all_members(sid))
+        data = server_summary(sid)
     except Exception as e:
         await interaction.response.send_message(f"Couldn't load the server information: {e}", ephemeral=True)
         return
-    bots = sum(1 for m in members if m["bot"])
-    humans = len(members) - bots
-    total = int(yshim._first(info, "member_count", "members_count", "memberCount") or len(members))
-    texts = sum(1 for c in channels if str(yshim._first(c, "type", "kind") or "text") == "text")
-    voices = len(channels) - texts
-    categories = {str(yshim._first(c.get("category") or {}, "id") or c.get("category_id")) for c in channels if c.get("category") or c.get("category_id")}
-    owner = yshim._first(info, "owner_id", "ownerId")
-    embed = discord.Embed(title=info.get("name") or "Server", color=ecolor(interaction.user.id))
-    if info.get("description"):
-        embed.description = str(info["description"])[:400]
-    embed.add_field(name="Owner", value=f"<@{owner}>" if owner else "Unknown", inline=True)
+    embed = discord.Embed(title=data["name"], color=ecolor(interaction.user.id))
+    if data["description"]:
+        embed.description = data["description"]
+    embed.add_field(name="Owner", value=f"<@{data['owner']}>" if data["owner"] else "Unknown", inline=True)
     embed.add_field(name="Server ID", value=f"`{sid}`", inline=True)
     embed.add_field(name="Members", inline=False,
-                    value=f"**{max(total, len(members)):,}** total (people and bots)\n**{humans:,}** people · **{bots:,}** bots")
-    embed.add_field(name="Channels", value=f"{len(channels):,} total\n{texts:,} text · {voices:,} voice\n{len(categories):,} categories", inline=True)
-    embed.add_field(name="Roles", value=f"{len(roles):,}", inline=True)
-    for key, label in (("verified", "Verified"), ("public", "Public"), ("boost_level", "Boost level")):
-        if info.get(key) not in (None, "", False):
-            embed.add_field(name=label, value=str(info[key]), inline=True)
-    icon = _icon_of(info)
-    banner = yshim._asset_url(yshim._first(info, "banner_path", "banner_url", "banner"), "banners")
-    if icon:
-        embed.set_thumbnail(url=icon)
-    if banner:
-        embed.set_image(url=banner)
-    elif icon:
-        embed.set_image(url=icon)      # Yapin gives servers no banner, so the picture is shown large instead
+                    value=f"**{data['members']:,}** total (people and bots)\n**{data['humans']:,}** people · **{data['bots']:,}** bots")
+    embed.add_field(name="Channels", value=f"{data['channels']:,} total\n{data['text']:,} text · {data['voice']:,} voice\n{data['categories']:,} categories", inline=True)
+    embed.add_field(name="Roles", value=f"{data['roles']:,}", inline=True)
+    for label, value in data["extra"]:
+        embed.add_field(name=label, value=value, inline=True)
+    if data["icon"]:
+        embed.set_thumbnail(url=data["icon"])
+    if data["banner"]:
+        embed.set_image(url=data["banner"])
+    elif data["icon"]:
+        embed.set_image(url=data["icon"])      # Yapin gives servers no banner, so the picture is shown large instead
     embed.set_footer(text=f"Requested by {interaction.user.name} | {MainURL}")
     await interaction.response.send_message(embed=embed)
+
+
+def server_summary(sid):
+    """What /serverinfo shows, as plain data (the dashboard shows the same numbers)."""
+    info = dict(bot.server(sid))
+    channels = bot.channels(sid)
+    roles = bot.roles(sid)
+    members = cached(f"allmembers:{sid}", 120, lambda: _all_members(sid))
+    bots = sum(1 for m in members if m["bot"])
+    total = int(yshim._first(info, "member_count", "members_count", "memberCount") or len(members))
+    texts = sum(1 for c in channels if str(yshim._first(c, "type", "kind") or "text") == "text")
+    categories = {str(yshim._first(c.get("category") or {}, "id") or c.get("category_id")) for c in channels if c.get("category") or c.get("category_id")}
+    owner = yshim._first(info, "owner_id", "ownerId")
+    owner = str(owner.get("id") if isinstance(owner, dict) else owner) if owner is not None else None
+    return {"id": sid, "name": info.get("name") or "Server", "description": str(info.get("description") or "")[:400], "owner": owner,
+            "members": max(total, len(members)), "humans": len(members) - bots, "bots": bots,
+            "channels": len(channels), "text": texts, "voice": len(channels) - texts, "categories": len(categories), "roles": len(roles),
+            "extra": [(label, str(info[key])) for key, label in (("verified", "Verified"), ("public", "Public"), ("boost_level", "Boost level")) if info.get(key) not in (None, "", False)],
+            "icon": _icon_of(info), "banner": yshim._asset_url(yshim._first(info, "banner_path", "banner_url", "banner"), "banners")}
 
 
 # --- Last.fm: the Shapes API does all of it (linking, the account, the profile lookups); the bot just asks it ---
@@ -5740,6 +5747,25 @@ def _icon_of(d):
             or yshim._asset_url(yshim._first(d, "icon_path", "icon"), "icons"))
 
 
+_AVATAR_COLORS = ("#6366f1", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#3b82f6")
+
+
+def default_avatar_url(uid, name=None):
+    """A picture for people with none: their initial on a colour picked from their id. Served by /avatar/<id>.svg."""
+    q = urllib.parse.urlencode({"n": str(name or "")[:40]}) if name else ""
+    return f"{PUBLIC_URL}/avatar/{urllib.parse.quote(str(uid), safe='')}.svg" + (f"?{q}" if q else "")
+
+
+@app.route("/avatar/<uid>.svg")
+def default_avatar(uid):
+    name = (request.args.get("n") or uid).strip() or "?"
+    color = _AVATAR_COLORS[sum(ord(c) for c in str(uid)) % len(_AVATAR_COLORS)]
+    letter = html.escape(name[:1].upper() or "?")
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="{color}"/>'
+           f'<text x="32" y="32" dy=".35em" text-anchor="middle" font-family="Arial,sans-serif" font-size="30" font-weight="700" fill="#fff">{letter}</text></svg>')
+    return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+
+
 def _person(d):
     """A flat, UI-friendly version of a member/user dict (some APIs nest the user under "user")."""
     inner = d.get("user") if isinstance(d.get("user"), dict) else {}
@@ -5748,7 +5774,7 @@ def _person(d):
     return {
         "id": str(uid), "name": yshim._first(merged, "username", "name") or str(uid),
         "display": yshim._first(merged, "nickname", "display_name", "displayName", "nick") or yshim._first(merged, "username", "name") or str(uid),
-        "avatar": _avatar_of(merged),
+        "avatar": _avatar_of(merged) or default_avatar_url(uid, yshim._first(merged, "nickname", "display_name", "username", "name")),
         "bot": yshim.YUser(uid, data=merged).is_bot or str(uid) == str((bot.me or {}).get("id")),
         "roles": [str(r.get("id") if isinstance(r, dict) else r) for r in (merged.get("roles") or merged.get("role_ids") or [])],
         "joined": yshim._first(merged, "joined_at", "joinedAt", "created_at"),
@@ -5925,8 +5951,34 @@ def _stamp_text(name, where=None):
     return f"Sent by @{name}" + (f" from {where}" if where else "") + " · " + time.strftime("%b %d, %Y %H:%M UTC", time.gmtime())
 
 
-def _announcement_embed(title, text, image_url, footer=None):
+def resolve_color(choice=None, custom=None, user_id=None):
+    """The embed colour (an int) for a message sent as Shapes: choice is "mine" (their saved /settings colour, else blue),
+    a name from the colour list, "random", or "custom" with custom = "#rrggbb". Raises ValueError for anything else."""
+    choice = str(choice or "mine").strip()
+    if choice.lower() == "mine":
+        saved = embedDB.get(f"{user_id}") if user_id else None
+        return int(saved) if isinstance(saved, int) else discord.Color.blue().value
+    if choice.lower() == "random":
+        return discord.Color.random().value
+    if choice.lower() == "custom":
+        found = re.fullmatch(r"#?([0-9a-fA-F]{6})", str(custom or "").strip())
+        if not found:
+            raise ValueError("A custom colour looks like #5865f2.")
+        return int(found.group(1), 16)
+    for name, color in DiscordColors:
+        if name.lower() == choice.lower():
+            return color.value
+    raise ValueError("Pick a colour from the list, or use a custom one.")
+
+
+def color_choices():
+    return [{"name": n, "hex": "#%06x" % c.value} for n, c in DiscordColors]
+
+
+def _announcement_embed(title, text, image_url, footer=None, color=None):
     embed = {"description": text}
+    if color is not None:
+        embed["color"] = int(color)
     if title:
         embed["title"] = title
     if image_url:
@@ -5936,13 +5988,13 @@ def _announcement_embed(title, text, image_url, footer=None):
     return embed
 
 
-def _post_with_optional_image(channel_id, text, image_url, title=None, footer=None):
-    """Plain text when there is no image, title or sender line; otherwise an embed. If the server refuses embeds, falls
+def _post_with_optional_image(channel_id, text, image_url, title=None, footer=None, color=None):
+    """Plain text when there is no image, title, colour or sender line; otherwise an embed. If the server refuses embeds, falls
     back to text with the image link and the sender line."""
-    if not image_url and not title and not footer:
+    if not image_url and not title and not footer and color is None:
         return bot.send(channel_id, text)
     try:
-        return bot.send(channel_id, "", embeds=[_announcement_embed(title, text, image_url, footer)])
+        return bot.send(channel_id, "", embeds=[_announcement_embed(title, text, image_url, footer, color)])
     except yapper.YapperError as e:
         if e.status not in (400, 422):
             raise
@@ -5950,13 +6002,13 @@ def _post_with_optional_image(channel_id, text, image_url, title=None, footer=No
         return bot.send(channel_id, "\n\n".join(parts))
 
 
-def send_as_bot(channel_id, text, image=None, title=None, where=None, hidden=False):
+def send_as_bot(channel_id, text, image=None, title=None, where=None, hidden=False, color=None):
     """Post as the bot and, unless a bot admin chose to hide it, say who it is from (and when). Returns the footer used."""
     uid, name, staff = current_actor()
     if hidden and not staff:
         raise PermissionError("Only bot admins can hide who a message is from.")
     footer = None if hidden else _stamp_text(name, where)
-    _post_with_optional_image(channel_id, text, image, title, footer)
+    _post_with_optional_image(channel_id, text, image, title, footer, color)
     return footer
 
 
@@ -6061,7 +6113,7 @@ def api_dm_open():
         return _api_error(e)
 
 
-def dm_people(user_ids, text, title=None, image=None, where=None, hidden=False, delay=0.5, actor=None, progress=None):
+def dm_people(user_ids, text, title=None, image=None, where=None, hidden=False, delay=0.5, actor=None, progress=None, color=None):
     """DM each person as the bot. Returns [{user_id, ok, error?}]; one failure (DMs closed) never stops the rest.
     `actor` is (id, name, staff) when this runs outside a request (a background job); progress(done, results) is told as it goes."""
     uid, name, staff = actor or current_actor()
@@ -6071,7 +6123,7 @@ def dm_people(user_ids, text, title=None, image=None, where=None, hidden=False, 
     results = []
     for target in dict.fromkeys(str(t) for t in user_ids):         # never the same person twice
         try:
-            _post_with_optional_image(bot.dm(target), text, image, title, footer)
+            _post_with_optional_image(bot.dm(target), text, image, title, footer, color)
             results.append({"user_id": target, "ok": True})
         except Exception as e:
             results.append({"user_id": target, "ok": False, "error": str(e)[:120]})
@@ -6084,7 +6136,7 @@ def dm_people(user_ids, text, title=None, image=None, where=None, hidden=False, 
 _dm_jobs = {}
 
 
-def start_dm_job(user_ids, text, title=None, image=None, where=None, hidden=False, log=None):
+def start_dm_job(user_ids, text, title=None, image=None, where=None, hidden=False, color=None):
     """DM a (possibly huge) list in the background, so the request returns at once. Poll dm_job_status(id)."""
     ids = list(dict.fromkeys(str(i) for i in user_ids))
     actor = current_actor()
@@ -6099,7 +6151,7 @@ def start_dm_job(user_ids, text, title=None, image=None, where=None, hidden=Fals
 
     def run():
         try:
-            dm_people(ids, text, title, image, where, hidden, actor=actor, progress=update)
+            dm_people(ids, text, title, image, where, hidden, actor=actor, progress=update, color=color)
         except Exception as e:
             job["error"] = str(e)[:200]
         finally:
@@ -6155,7 +6207,11 @@ def api_dm_send():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     hidden = body.get("hidden") is True
-    job = start_dm_job(ids, text, title or None, image, hidden=hidden)
+    try:
+        color = resolve_color(body.get("color"), body.get("custom_color"), current_actor()[0]) if (body.get("color") or body.get("hidden") is not True) else None
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    job = start_dm_job(ids, text, title or None, image, hidden=hidden, color=color)
     log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], target=("everyone: " if everyone else "") + f"{len(ids)} people: " + ", ".join(ids[:8]) + ("…" if len(ids) > 8 else ""))
     return jsonify({"job": job, "total": len(ids)})
 
