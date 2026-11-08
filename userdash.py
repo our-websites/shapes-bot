@@ -232,7 +232,7 @@ def register(m):
         session.clear()
         session["yuser"] = {"id": uid, "name": info.get("username") or person.get("name") or uid,
                             "display": info.get("display_name") or person.get("display") or info.get("username") or uid,
-                            "avatar": person.get("avatar") or yshim._asset_url(info.get("avatar_path"), "avatars")}
+                            "avatar": person.get("avatar") or yshim._asset_url(info.get("avatar_path"), "avatars") or m.default_avatar_url(uid, info.get("username") or uid)}
         session.permanent = True
         return redirect("/dashboard")
 
@@ -436,7 +436,8 @@ def register(m):
     @app.route("/me/servers/<sid>/counting", methods=["POST"])
     @login_required
     def me_counting(sid):
-        """Owners change the settings (on/off, channel, emoji). The number, warnings and ban flag aren't theirs to edit."""
+        """Managers change the settings (on/off, channel, emoji). The number and highest number can only be edited by bot owners
+        (not bot admins, not server owners); warnings and the ban flag stay out of reach."""
         require_manage(sid)
         body = request.get_json(silent=True) or {}
         before = m.countingDB.get(sid)
@@ -455,6 +456,18 @@ def register(m):
                               ((k, m.clean_emoji(v)) for k, v in body["emojis"].items() if k in m.COUNTING_EMOJI_DEFAULT) if v}}
         if body.get("reset") is True:
             data.update(number=0, warnings=0, lastcounter=None)
+        if "number" in body or "highestnumber" in body:
+            if not m.is_bot_owner(current_user()["id"]):
+                return jsonify({"error": "Only the bot owner can change the counting numbers."}), 403
+            for key in ("number", "highestnumber"):
+                if key in body:
+                    value = body[key]
+                    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10 ** 12:
+                        return jsonify({"error": f'"{key}" must be a whole number from 0 to 1,000,000,000,000.'}), 400
+                    data[key] = value
+            if "number" in body:
+                data["lastcounter"] = None          # whoever counts next continues from the new number
+            data["highestnumber"] = max(data.get("highestnumber", 0), data.get("number", 0))
         m.countingDB.set(sid, data)
         audit(sid, "counting", before, data)
         data["emojis"] = m.counting_emojis(data)

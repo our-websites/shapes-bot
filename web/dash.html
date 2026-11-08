@@ -94,6 +94,26 @@
   .warn { border:1px solid rgba(242,185,80,.5); background:rgba(242,185,80,.08); border-radius:10px; padding:10px 12px; margin:10px 0; } .warn .row { margin:8px 0 0; }
   .pick { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; } .chip { display:inline-flex; align-items:center; gap:6px; background:rgba(99,102,241,.18); border:1px solid rgba(99,102,241,.4); border-radius:999px; padding:2px 10px; font-size:13px; } .chip button { background:none; border:0; color:inherit; cursor:pointer; padding:0; font-size:15px; line-height:1; }
   .results { border:1px solid var(--line); border-radius:10px; max-height:180px; overflow:auto; } .results button { display:flex; gap:8px; align-items:center; width:100%; text-align:left; background:none; border:0; color:inherit; font:inherit; padding:6px 10px; cursor:pointer; } .results button:hover { background:rgba(255,255,255,.05); }
+
+  /* overview, server info and tiles */
+  .hero { position:relative; overflow:hidden; border-radius:20px; border:1px solid var(--line); background:rgba(255,255,255,.03); margin-bottom:16px; }
+  .hero .banner { height:150px; background:linear-gradient(135deg,rgba(99,102,241,.45),rgba(139,92,246,.2) 55%,rgba(0,0,0,0)); background-size:cover; background-position:center; }
+  .hero .banner.pic { filter:saturate(1.1); }
+  .hero .body { display:flex; gap:16px; align-items:flex-end; padding:0 20px 18px; margin-top:-38px; flex-wrap:wrap; }
+  .hero .icon.big { width:84px; height:84px; border-radius:22px; border:4px solid var(--bg); font-size:32px; box-shadow:0 8px 24px rgba(0,0,0,.5); }
+  .hero h1 { margin:0; font-size:26px; } .hero .about { color:var(--muted); margin:2px 0 0; max-width:60ch; }
+  .hero .grow { flex:1; min-width:200px; padding-top:42px; }
+  .ownerchip { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--muted); margin-top:6px; } .ownerchip .avatar { width:20px; height:20px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:12px; margin-bottom:16px; }
+  .tile { border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:rgba(255,255,255,.03); }
+  .tile .k { font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); } .tile .v { font:800 26px "Poppins",sans-serif; margin:2px 0; } .tile .s { color:var(--muted); font-size:13px; }
+  .tile.accent { background:linear-gradient(135deg,rgba(99,102,241,.22),rgba(99,102,241,.05)); border-color:rgba(99,102,241,.45); }
+  .actions { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 16px; }
+  .adminbox { display:flex; align-items:center; gap:14px; border:1px solid rgba(242,185,80,.45); background:rgba(242,185,80,.07); border-radius:14px; padding:14px 16px; margin-bottom:16px; flex-wrap:wrap; } .adminbox .grow { flex:1; min-width:200px; } .adminbox b { font-family:"Poppins",sans-serif; }
+  .swatch { display:inline-block; width:16px; height:16px; border-radius:50%; vertical-align:-3px; margin-right:6px; border:1px solid var(--line); }
+  .colorpick { display:flex; gap:8px; align-items:center; } .colorpick select { flex:1 1 180px; min-width:0; } .colorpick input[type=color] { width:44px; height:36px; padding:2px; border:1px solid var(--line); border-radius:8px; background:var(--field); }
+  .roles { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:6px; margin-top:10px; } .roles label { margin:0; font-weight:500; display:flex; align-items:center; gap:8px; border:1px solid var(--line); border-radius:10px; padding:7px 10px; cursor:pointer; } .roles label.off { opacity:.5; cursor:not-allowed; } .roles input { width:auto; }
+  .who { display:flex; align-items:center; gap:10px; margin:8px 0; } .who .avatar { width:40px; height:40px; }
   @media (max-width: 820px) {
     .shell, .shell.nomenu { grid-template-columns:minmax(0,1fr); }
     .rail { flex-direction:row; overflow-x:auto; position:static; border-radius:16px; padding:8px 10px; max-height:none; } .rail .sep { width:2px; height:32px; }
@@ -133,6 +153,11 @@ async function api(path, body) {
 }
 const app = $('#app'), tip = $('#tip');
 const initial = s => (s.name || '?').trim()[0].toUpperCase();
+function avatar(src, name, cls = 'avatar') {       // a picture, or their initial if there is none (or it fails to load)
+  const letter = () => h('div', { class: cls }, (name || '?').trim()[0].toUpperCase());
+  if (!src) return letter();
+  const img = h('img', { class: cls, src, alt: '', loading: 'lazy' }); img.addEventListener('error', () => img.replaceWith(letter())); return img;
+}
 const icon = s => s.icon ? h('img', { class: 'icon', src: s.icon, alt: '', loading: 'lazy' }) : h('div', { class: 'icon' }, initial(s));
 const when = t => new Date(t * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
@@ -140,7 +165,7 @@ function renderHeader() {
   const me = $('#me'); me.replaceChildren();
   if (!BOOT.user) return;
   const u = BOOT.user;
-  me.append(u.avatar ? h('img', { class: 'avatar', src: u.avatar, alt: '' }) : h('div', { class: 'avatar' }), h('span', {}, u.display || u.name), h('a', { href: '/dashboard/logout' }, 'Sign out'));
+  me.append(avatar(u.avatar, u.display || u.name), h('span', {}, u.display || u.name), h('a', { href: '/dashboard/logout' }, 'Sign out'));
 }
 function showTip(el, text) {
   el.addEventListener('mouseenter', () => { const r = el.getBoundingClientRect(); tip.textContent = text; tip.hidden = false; tip.style.left = (r.right + 10) + 'px'; tip.style.top = (r.top + r.height / 2 - 15) + 'px'; });
@@ -155,7 +180,8 @@ function loginPage() {
 
 // ---------------------------------------------------------------- state: which server (if any) and which section
 let listing = null, current = null, section = 'overview', detail = null;
-const SECTIONS = [['overview', 'Overview'], ['counting', 'Counting'], ['autorole', 'Autorole'], ['automod', 'Automod'], ['say', 'Send as Shapes'], ['dm', 'Message members'], ['cmdlog', 'Command log'], ['activity', 'Activity log']];
+const SECTIONS = [['overview', '🏠  Overview'], ['counting', '🔢  Counting'], ['autorole', '🎭  Autorole'], ['roles', '🏷️  Give roles'], ['automod', '🛡️  Automod'], ['say', '📣  Send as Shapes'], ['dm', '✉️  Message members'], ['cmdlog', '📜  Command log'], ['activity', '🕘  Activity log']];
+const PUBLIC_SECTIONS = [['overview', '🏠  Overview'], ['leaderboard', '🔢  Counting']];
 
 function pip(label, child, onclick, current, extra = '') {
   const el = h('button', { class: 'pip ' + extra, 'aria-label': label, 'aria-current': current ? 'true' : 'false', onclick }, child);
@@ -165,18 +191,18 @@ const serverPip = (s, dim) => pip(s.name, s.icon ? h('img', { src: s.icon, alt: 
 
 function frame(menu, content) {
   const rail = h('nav', { class: 'rail', 'aria-label': 'Servers' },
-    pip('Home', h('span', {}, '⌂'), () => { current = null; section = 'home'; draw(); }, !current && section !== 'admin', 'home'),
+    pip('Home', h('span', {}, '⌂'), () => { current = null; section = 'home'; draw(); }, !current, 'home'),
     listing && listing.manage.length ? h('div', { class: 'sep' }) : null,
     listing ? listing.manage.map(s => serverPip(s, false)) : null,
     listing && listing.other.length ? h('div', { class: 'sep' }) : null,
     listing ? listing.other.map(s => serverPip(s, true)) : null,
-    BOOT.staff ? [h('div', { class: 'sep' }), pip('Admin', h('span', {}, '★'), () => { current = null; section = 'admin'; draw(); }, section === 'admin' && !current)] : null);
+    null);
   app.replaceChildren(h('div', { class: 'shell' + (menu ? '' : ' nomenu') }, rail, menu, h('main', { class: 'content' }, content)));
 }
 
 function menuFor(s) {
   const mine = s.manage;
-  const items = mine ? SECTIONS : [['overview', 'Overview']];
+  const items = mine ? SECTIONS : PUBLIC_SECTIONS;
   return h('aside', { class: 'menu' }, h('div', { class: 'srv' }, icon(s), h('span', {}, s.name)),
     items.flatMap(([id, label]) => [id === 'say' ? h('div', { class: 'grp' }, 'Speak as Shapes') : id === 'cmdlog' ? h('div', { class: 'grp' }, 'Logs') : null,
       h('button', { 'aria-current': section === id ? 'true' : 'false', onclick: () => { section = id; draw(); } }, label)]));
@@ -202,14 +228,38 @@ async function draw() {
   } catch (e) { view.replaceChildren(h('div', { class: 'empty status err' }, e.message)); }
 }
 
+function adminBox() {
+  if (!BOOT.staff) return null;
+  return h('div', { class: 'adminbox' }, h('div', { class: 'grow' }, h('b', {}, 'Admin dashboard'), h('div', { class: 'sub', style: 'margin:0' }, 'Bot-wide tools: every server, direct messages' + (BOOT.owner ? ', the global command log and more.' : '.'))),
+    h('button', { class: 'primary', onclick: () => { current = null; section = 'admin'; draw(); } }, 'Open admin dashboard'));
+}
+
 function homeView() {
   const m = listing.manage, o = listing.other;
+  const t = (k, v, sub, cls = '') => h('div', { class: 'tile ' + cls }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), h('div', { class: 's' }, sub));
   return [h('h1', {}, 'Welcome' + (BOOT.user ? ', ' + (BOOT.user.display || BOOT.user.name) : '')),
-    h('p', { class: 'sub' }, 'Pick a server on the left. Servers you manage open their settings; the dimmed ones are servers you’re in without manage access, where you can see how counting is going.'),
-    h('div', { class: 'grid' },
-      h('div', { class: 'card' }, h('h2', {}, 'You manage'), h('div', { class: 'stat' }, h('b', {}, m.length), m.length === 1 ? 'server' : 'servers')),
-      h('div', { class: 'card' }, h('h2', {}, 'You’re a member of'), h('div', { class: 'stat' }, h('b', {}, o.length), o.length === 1 ? 'more server' : 'more servers'))),
-    !m.length && !o.length ? h('div', { class: 'empty' }, 'None of your servers have Shapes yet.') : null];
+    h('p', { class: 'sub' }, 'Pick a server on the left. Servers you manage open their settings; the dimmed ones are servers you’re in, where you can see the server and how counting is going.'),
+    adminBox(),
+    h('div', { class: 'tiles' }, t('You manage', m.length, m.length === 1 ? 'server' : 'servers', 'accent'), t('You’re a member of', o.length, o.length === 1 ? 'more server' : 'more servers')),
+    !m.length && !o.length ? h('div', { class: 'empty' }, 'None of your servers have Shapes yet.') : null,
+    mySettings()];
+}
+
+// the colour Shapes uses for embeds you trigger, and a reusable picker for messages
+function colorPicker(initial = 'mine', withMine = true) {
+  const sel = h('select', {}, withMine ? h('option', { value: 'mine' }, 'My colour (from settings)') : null, BOOT.colors.map(c => h('option', { value: c.name }, c.name)), h('option', { value: 'random' }, 'Random'), h('option', { value: 'custom' }, 'Custom…'));
+  const custom = h('input', { type: 'color', value: '#5865f2', hidden: true }), dot = h('span', { class: 'swatch' });
+  const hexOf = () => sel.value === 'custom' ? custom.value : (BOOT.colors.find(c => c.name === sel.value) || {}).hex || (sel.value === 'mine' && BOOT.color != null ? '#' + BOOT.color.toString(16).padStart(6, '0') : '#3498db');
+  const paint = () => { custom.hidden = sel.value !== 'custom'; dot.style.background = sel.value === 'random' ? 'conic-gradient(red,orange,yellow,green,blue,purple,red)' : hexOf(); };
+  sel.value = initial; sel.addEventListener('change', paint); custom.addEventListener('input', paint); paint();
+  return [h('div', { class: 'colorpick' }, dot, sel, custom), () => ({ color: sel.value, custom_color: sel.value === 'custom' ? custom.value : undefined })];
+}
+
+function mySettings() {
+  const [pick, value] = colorPicker(BOOT.color != null ? (BOOT.colors.find(c => parseInt(c.hex.slice(1), 16) === BOOT.color) || { name: 'custom' }).name : 'Blue', false);
+  const sv = h('button', { class: 'primary' }, 'Save colour'), st = h('div', { class: 'status' });
+  save(sv, st, async () => { const r = await api('/me/settings', value()); BOOT.color = parseInt(r.color.slice(1), 16); return 'Saved. Embeds from your commands and messages use this colour.'; });
+  return panel('Your embed colour', 'Used for the embeds Shapes shows you and for messages you send from here. Same as /settings.', field('Colour', pick, 'row'), h('div', { class: 'row' }, sv, st));
 }
 
 // ---------------------------------------------------------------- small form helpers
@@ -236,17 +286,68 @@ const head = (title, about) => [h('h1', {}, title), about ? h('p', { class: 'sub
 
 async function buildSection() {
   if (section === 'overview') return overview();
-  return ({ counting, autorole, automod, say, dm, cmdlog, activity })[section]();
+  return ({ counting, autorole, roles, automod, say, dm, cmdlog, activity, leaderboard })[section]();
 }
 
-function overview() {
-  const s = current, c = detail ? detail.counting : null;
-  const stats = [];
-  if (s.members) stats.push(h('div', { class: 'card' }, h('h2', {}, 'Members'), h('div', { class: 'stat' }, h('b', {}, s.members.toLocaleString()))));
-  const counting = c || (s.counting ? { enabled: true, number: s.counting.current, highestnumber: s.counting.highest } : null);
-  if (counting && counting.enabled !== false) stats.push(h('div', { class: 'card' }, h('h2', {}, 'Counting'), h('span', { class: 'stat' }, 'Current', h('b', {}, counting.number.toLocaleString())), h('span', { class: 'stat' }, 'Highest', h('b', {}, counting.highestnumber.toLocaleString()))));
-  return [...head(s.name, s.manage ? 'You can manage this server. Choose a section on the left.' : 'You’re a member here without manage access, so this is read-only.'),
-    stats.length ? h('div', { class: 'grid' }, stats) : h('div', { class: 'empty' }, 'Nothing to show yet.')];
+async function overview() {
+  const s = current; let info = null;
+  try { info = await api('/me/servers/' + sid() + '/info'); } catch (e) { /* fall back to the list data */ }
+  const t = (k, v, sub, cls = '') => h('div', { class: 'tile ' + cls }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), sub ? h('div', { class: 's' }, sub) : null);
+  const n = x => (x || 0).toLocaleString();
+  const c = info && info.counting || (detail && detail.counting && detail.counting.enabled ? { current: detail.counting.number, highest: detail.counting.highestnumber } : s.counting);
+  const tiles = [];
+  if (info) tiles.push(t('Members', n(info.members), n(info.humans) + ' people · ' + n(info.bots) + ' bots', 'accent'), t('Channels', n(info.channels), n(info.text) + ' text · ' + n(info.voice) + ' voice · ' + n(info.categories) + ' categories'), t('Roles', n(info.roles), ''));
+  else if (s.members) tiles.push(t('Members', n(s.members), '', 'accent'));
+  if (c) tiles.push(t('Counting', n(c.current), 'Highest ' + n(c.highest)));
+  for (const x of (info && info.extra) || []) tiles.push(t(x.label, x.value, ''));
+  const owner = info && info.owner;
+  const hero = h('div', { class: 'hero' }, h('div', { class: 'banner' + (info && info.banner ? ' pic' : ''), style: info && info.banner ? 'background-image:url("' + info.banner.replace(/"/g, '%22') + '")' : null }),
+    h('div', { class: 'body' }, s.icon ? h('img', { class: 'icon big', src: s.icon, alt: '' }) : h('div', { class: 'icon big' }, initial(s)),
+      h('div', { class: 'grow' }, h('h1', {}, s.name), info && info.description ? h('p', { class: 'about' }, info.description) : null,
+        owner ? h('div', { class: 'ownerchip' }, 'Owned by', avatar(owner.avatar, owner.display || owner.name), owner.display || owner.name) : null)));
+  const go = (id, label) => h('button', { class: 'ghost', onclick: () => { section = id; draw(); } }, label);
+  return [hero, s.manage ? h('div', { class: 'actions' }, go('counting', 'Counting'), go('roles', 'Give roles'), go('say', 'Send a message'), go('dm', 'Message members'), go('automod', 'Automod')) : null,
+    s.staff_access ? h('div', { class: 'status', style: 'margin-bottom:10px' }, 'You can open this server because you’re part of the Shapes team.') : null,
+    tiles.length ? h('div', { class: 'tiles' }, tiles) : h('div', { class: 'empty' }, 'Nothing to show yet.'), adminBox()];
+}
+
+async function leaderboard() {
+  const c = (detail && detail.counting && detail.counting.enabled) ? { current: detail.counting.number, highest: detail.counting.highestnumber } : current.counting;
+  const n = x => (x || 0).toLocaleString();
+  return [...head('Counting', 'How counting is going in ' + current.name + '.'),
+    c ? h('div', { class: 'tiles' }, h('div', { class: 'tile accent' }, h('div', { class: 'k' }, 'Current number'), h('div', { class: 'v' }, n(c.current))), h('div', { class: 'tile' }, h('div', { class: 'k' }, 'Highest number'), h('div', { class: 'v' }, n(c.highest))))
+      : h('div', { class: 'empty' }, 'Counting isn’t set up in this server.'),
+    h('p', {}, h('a', { href: '/counting/leaderboard/' }, 'See the leaderboard of all servers'))];
+}
+
+// ---------------------------------------------------------------- giving and taking roles
+function roles() {
+  const results = h('div', { class: 'results', hidden: true }), q = h('input', { type: 'text', placeholder: 'Search members by name' }), box = h('div'), st = h('div', { class: 'status' });
+  const canAdmin = detail.owner || detail.staff;
+  async function show(m) {
+    let mine;
+    try { mine = new Set((await api('/me/servers/' + sid() + '/member/' + encodeURIComponent(m.id))).roles); } catch (e) { st.className = 'status err'; st.textContent = e.message; return; }
+    st.textContent = '';
+    const list = h('div', { class: 'roles' }, detail.roles.map(r => {
+      const i = h('input', { type: 'checkbox' }); i.checked = mine.has(r.id); const locked = r.admin && !canAdmin;
+      i.disabled = locked;
+      i.addEventListener('change', async () => {
+        i.disabled = true;
+        try { const out = await api('/me/servers/' + sid() + '/roles', { user_id: m.id, role_id: r.id, action: i.checked ? 'add' : 'remove' }); mine = new Set(out.roles); st.className = 'status ok'; st.textContent = (i.checked ? 'Gave ' : 'Took ') + r.name + (i.checked ? ' to ' : ' from ') + (m.display || m.name) + '.'; }
+        catch (e) { i.checked = !i.checked; st.className = 'status err'; st.textContent = e.message; }
+        i.disabled = false;
+      });
+      return h('label', { class: locked ? 'off' : '', title: locked ? 'Only the server owner can hand out roles that manage the server.' : '' }, i, r.name + (r.admin ? ' ⚑' : ''));
+    }));
+    box.replaceChildren(h('div', { class: 'who' }, avatar(m.avatar, m.display || m.name), h('div', {}, h('b', {}, m.display || m.name), h('div', { class: 'sub', style: 'margin:0' }, '@' + m.name))), detail.roles.length ? list : h('div', { class: 'empty' }, 'This server has no roles yet.'));
+  }
+  let timer; q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(async () => {
+    if (!q.value.trim()) { results.hidden = true; return; }
+    try { const r = await api('/me/servers/' + sid() + '/members?q=' + encodeURIComponent(q.value.trim()));
+      results.replaceChildren(...(r.members.length ? r.members.map(m => h('button', { onclick: () => { results.hidden = true; q.value = ''; show(m); } }, avatar(m.avatar, m.display || m.name), (m.display || m.name) + ' (@' + m.name + ')')) : [h('div', { class: 'empty' }, 'No one found.')]));
+      results.hidden = false; } catch (e) { st.className = 'status err'; st.textContent = e.message; } }, 250); });
+  return [...head('Give roles', 'Find a member, then tick the roles they should have. Roles marked ⚑ can manage the server, so only the server owner can hand those out.'),
+    panel('Member', null, field('Find a member', q, 'row'), results, box, st)];
 }
 
 function counting() {
@@ -258,10 +359,16 @@ function counting() {
     h('span', { class: 'stat' }, 'Warnings', h('b', {}, c.warnings + '/3')), c.lastcounter ? h('span', { class: 'stat' }, 'Last counter', h('b', {}, c.last_name ? '@' + c.last_name : c.lastcounter)) : null);
   save(sv, st, async () => { await api('/me/servers/' + sid() + '/counting', { enabled: en.checked, channel: ch.value, emojis: { correct: em.correct.value, warning: em.warning.value, wrong: em.wrong.value } }); detail = null; });
   save(reset, st, async () => { await api('/me/servers/' + sid() + '/counting', { reset: true }); detail = null; return 'Count reset to 0.'; });
+  let owner = null;
+  if (BOOT.owner) {            // only the bot owner may edit the numbers themselves
+    const cur = num(c.number, 0, 1e12), hi = num(c.highestnumber, 0, 1e12), go = h('button', { class: 'ghost' }, 'Set numbers'), st2 = h('div', { class: 'status' });
+    save(go, st2, async () => { await api('/me/servers/' + sid() + '/counting', { number: parseInt(cur.value, 10), highestnumber: parseInt(hi.value, 10) }); detail = null; return 'Numbers updated.'; });
+    owner = panel('Change the numbers (bot owner)', 'The next person to count continues from the current number.', h('div', { class: 'row' }, field('Current number', cur), field('Highest number', hi)), h('div', { class: 'row' }, go, st2));
+  }
   return [...head('Counting', 'Pick the channel and the emoji the bot reacts with.'), panel('Settings', null, stats,
     h('div', { class: 'row' }, enL, field('Channel', ch)),
     h('div', { class: 'row' }, field('Correct emoji', em.correct), field('Warning emoji', em.warning), field('Wrong emoji', em.wrong)),
-    h('div', { class: 'row' }, sv, reset, st))];
+    h('div', { class: 'row' }, sv, reset, st)), owner];
 }
 
 function autorole() {
@@ -311,28 +418,28 @@ function hiddenBox() {
 
 function say() {
   const ch = select(chans(), '', 'Pick a channel'), title = h('input', { type: 'text', maxlength: 200, placeholder: 'Optional title' }), msg = h('textarea', { maxlength: 1800, placeholder: 'What should Shapes say?' }), img = h('input', { type: 'text', placeholder: 'Optional image link (https)' });
-  const [hL, hide] = hiddenBox(), sv = h('button', { class: 'primary' }, 'Send as Shapes'), st = h('div', { class: 'status' });
+  const [hL, hide] = hiddenBox(), sv = h('button', { class: 'primary' }, 'Send as Shapes'), st = h('div', { class: 'status' }), [cp, cv] = colorPicker();
   save(sv, st, async () => {
-    const r = await api('/me/servers/' + sid() + '/say', { channel: ch.value, message: msg.value, title: title.value, image_url: img.value, hidden: hide ? hide.checked : false });
+    const r = await api('/me/servers/' + sid() + '/say', { channel: ch.value, message: msg.value, title: title.value, image_url: img.value, hidden: hide ? hide.checked : false, ...cv() });
     msg.value = ''; return r.footer ? 'Sent. It shows: “' + r.footer + '”' : 'Sent (sender hidden).';
   });
   return [...head('Send as Shapes', 'Shapes posts your message in the channel. It always says who sent it and when' + (detail.staff ? ', unless you hide it.' : '.')),
-    panel('Message', null, field('Channel', ch, 'row'), field('Title', title, 'row'), field('Message', msg, 'row'), field('Image', img, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
+    panel('Message', null, field('Channel', ch, 'row'), field('Title', title, 'row'), field('Message', msg, 'row'), field('Image', img, 'row'), field('Embed colour', cp, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
 }
 
 function dm() {
   const picked = new Map(), chips = h('div', { class: 'pick' }), results = h('div', { class: 'results', hidden: true });
   const q = h('input', { type: 'text', placeholder: 'Search members by name' }), msg = h('textarea', { maxlength: 1500, placeholder: 'Message to send (they’ll see who it’s from)' });
-  const [hL, hide] = hiddenBox(), sv = h('button', { class: 'primary' }, 'Send messages'), st = h('div', { class: 'status' });
+  const [hL, hide] = hiddenBox(), sv = h('button', { class: 'primary' }, 'Send messages'), st = h('div', { class: 'status' }), [cp, cv] = colorPicker();
   const redraw = () => chips.replaceChildren(...[...picked].map(([id, name]) => h('span', { class: 'chip' }, name, h('button', { 'aria-label': 'Remove ' + name, onclick: () => { picked.delete(id); redraw(); } }, '×'))));
   let timer; q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(async () => {
     if (!q.value.trim()) { results.hidden = true; return; }
     try { const r = await api('/me/servers/' + sid() + '/members?q=' + encodeURIComponent(q.value.trim()));
-      results.replaceChildren(...(r.members.length ? r.members.map(m => h('button', { onclick: () => { picked.set(m.id, m.display || m.name); redraw(); q.value = ''; results.hidden = true; } }, m.avatar ? h('img', { class: 'avatar', src: m.avatar, alt: '' }) : h('div', { class: 'avatar' }), (m.display || m.name) + ' (@' + m.name + ')')) : [h('div', { class: 'empty' }, 'No one found.')]));
+      results.replaceChildren(...(r.members.length ? r.members.map(m => h('button', { onclick: () => { picked.set(m.id, m.display || m.name); redraw(); q.value = ''; results.hidden = true; } }, avatar(m.avatar, m.display || m.name), (m.display || m.name) + ' (@' + m.name + ')')) : [h('div', { class: 'empty' }, 'No one found.')]));
       results.hidden = false; } catch (e) { st.className = 'status err'; st.textContent = e.message; } }, 250); });
   const [allL, all] = detail.owner ? check('Everyone in this server (' + (detail.server.members || 'all') + ' people, no limit)', false) : [null, null];
   save(sv, st, async () => {
-    const r = await api('/me/servers/' + sid() + '/dm', { user_ids: [...picked.keys()], everyone: all ? all.checked : false, message: msg.value, hidden: hide ? hide.checked : false });
+    const r = await api('/me/servers/' + sid() + '/dm', { user_ids: [...picked.keys()], everyone: all ? all.checked : false, message: msg.value, hidden: hide ? hide.checked : false, ...cv() });
     msg.value = '';
     for (;;) {                                   // big lists go out in the background: show how far it got
       const j = await api('/me/servers/' + sid() + '/dm/' + r.job);
@@ -342,7 +449,7 @@ function dm() {
     }
   });
   return [...head('Message members', 'Shapes sends each person a DM. It says who sent it and which server it’s from. Server owners can message everyone; managers can pick up to 50.'),
-    panel('Recipients', null, allL ? h('div', { class: 'row' }, allL) : null, field('Find a member', q, 'row'), results, chips, field('Message', msg, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
+    panel('Recipients', null, allL ? h('div', { class: 'row' }, allL) : null, field('Find a member', q, 'row'), results, chips, field('Message', msg, 'row'), field('Embed colour', cp, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
 }
 
 // ---------------------------------------------------------------- logs
