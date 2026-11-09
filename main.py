@@ -1446,7 +1446,7 @@ async def help_command(interaction: discord.Interaction):
         "• /robloxinfo - User information\n• /roblox2yapin - Find a Roblox user's linked account\n• /yapin2roblox - Find a user's Roblox\n"
         "• /britishuser - Check if a user is British\n• /iteminfo - Item information\n• /placeinfo - Place/game information\n"
         "• /badge - Badge information\n• /badges - Check a user's badges\n• /recentbadges - Latest badges\n• /outfits - A user's outfits\n"
-        "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox\n• /vortexgame, /vortexinfo, /vortexcookie - PlayVortex"), inline=False)
+        "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox\n• /vortexgame <game ID>, /vortexinfo <user ID>, /vortexcookie - Vortex"), inline=False)
     embed.add_field(name="Utility", value=(
         "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI (/clearai deletes your history)\n• /github - GitHub user\n"
         "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp - spook.bio"), inline=False)
@@ -1831,8 +1831,19 @@ def lastfm_line(p):
 
 @bot.tree.command(name="lastfm", description="Link your Last.fm account or see what someone is listening to")
 async def lastfm(interaction: discord.Interaction, action: str = "", user: discord.User = None):
-    action = action.lower().strip()
+    action = (action or "").strip()
     uid = interaction.user.id
+    if action.lower() not in ("", "link", "unlink") and user is None:
+        # "/lastfm @someone" (or a bare user ID) lands in the first slot, so read it as the person to show
+        try:
+            user = yshim.resolve_user(action)
+        except ValueError:
+            user = None
+        if user is None:
+            await interaction.response.send_message("I couldn't find that person. Ping them, or use `/lastfm link` or `/lastfm unlink`.", ephemeral=True)
+            return
+        action = ""
+    action = action.lower()
     if action == "link":
         started = await asyncio.to_thread(shapes_api, "POST", "/internal/link/start",
                                           {"provider": "lastfm", "yapin_id": str(uid), "yapin_name": interaction.user.name})
@@ -4884,7 +4895,7 @@ async def _vortex_lookup(interaction, kind, ident):
         data = await asyncio.to_thread(vortex_get, kind, ident, "")
         secret, rejected = "", True
     if data is None:
-        await interaction.edit_original_response(embed=discord.Embed(title="PlayVortex didn't answer", description="Try again in a moment.", color=discord.Color.red()))
+        await interaction.edit_original_response(embed=discord.Embed(title="Vortex didn't answer", description="Try again in a moment.", color=discord.Color.red()))
         return
     if data == "missing":
         await interaction.edit_original_response(embed=discord.Embed(title=f"No {what} found for `{_vclean(ident, 60)}`", color=discord.Color.red()))
@@ -4902,31 +4913,34 @@ async def _vortex_lookup(interaction, kind, ident):
     await interaction.edit_original_response(embed=embed, view=_link_view(*buttons) if buttons else None)
 
 
-@bot.tree.command(name="vortexgame", description="Look up a game on PlayVortex")
+@bot.tree.command(name="vortexgame", description="Look up a Vortex game by its game ID")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def vortexgame(interaction: discord.Interaction, game: str):
     await _vortex_lookup(interaction, "games", game)
 
 
-@bot.tree.command(name="vortexinfo", description="Look up a user on PlayVortex")
+@bot.tree.command(name="vortexinfo", description="Look up a Vortex user by their user ID (not their username)")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def vortexinfo(interaction: discord.Interaction, user: str):
-    await _vortex_lookup(interaction, "users", user)
+async def vortexinfo(interaction: discord.Interaction, user_id: str):
+    if not str(user_id).strip().isdigit():
+        await interaction.response.send_message("Vortex lookups use the **user ID** (the number in their profile link), not the username.", ephemeral=True)
+        return
+    await _vortex_lookup(interaction, "users", user_id)
 
 
-@bot.tree.command(name="vortexcookie", description="Save your PlayVortex login so lookups are made as you")
+@bot.tree.command(name="vortexcookie", description="Save your Vortex login so lookups are made as you")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def vortexcookie(interaction: discord.Interaction):
     # A form, so the cookie is never typed into the chat. It arrives in vortex_modal below.
     have = bool((usersDB.get(str(interaction.user.id)) or {}).get("vortex"))
-    box = (yapper.main.TextInput.paragraph("cookie", "Your PlayVortex cookie").required(False).length(max=4000)
+    box = (yapper.main.TextInput.paragraph("cookie", "Your Vortex cookie").required(False).length(max=4000)
            .placeholder("name=value, just the value, or a Bearer token")
            .description("Leave empty to delete your saved login." if have else "Used only for your own lookups."))
     try:
-        await interaction.response.send_modal(yapper.main.Modal("vortexcookie", "PlayVortex login", box))
+        await interaction.response.send_modal(yapper.main.Modal("vortexcookie", "Vortex login", box))
     except NotImplementedError:
         await interaction.response.send_message("Run this as a slash command (pick /vortexcookie from the command list) so I can open the form.", ephemeral=True)
 
@@ -4940,13 +4954,13 @@ def vortex_modal(i):
     if not cookie:
         entry.pop("vortex", None)
         usersDB.set(uid, entry)
-        return i.ephemeral("Your PlayVortex login was deleted.")
+        return i.ephemeral("Your Vortex login was deleted.")
     if len(cookie) > 4000 or "\n" in cookie or not cookie.isprintable():
         return i.ephemeral("That doesn't look like a cookie (too long, or has line breaks). Nothing was saved.")
     entry["vortex"] = cookie
     usersDB.set(uid, entry)
     _vortex_cache.clear()
-    return i.ephemeral("Saved. Your PlayVortex lookups now use your login. Run /vortexcookie and submit it empty to delete it.")
+    return i.ephemeral("Saved. Your Vortex lookups now use your login. Run /vortexcookie and submit it empty to delete it.")
 
 
 roblox_colors = {

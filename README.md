@@ -55,9 +55,9 @@ bot's own data, and a dashboard at `/dashboard`:
 If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login` and `/dashboard/oauth/callback`. Set `YAPIN_CLIENT_ID` and
 `YAPIN_CLIENT_SECRET` and register `<PUBLIC_URL>/dashboard/oauth/callback` as a redirect URI. The state is signed, single use and tied to a cookie, and the token calls have no timeout.
 
-## PlayVortex
+## Vortex
 
-`/vortexgame <id>` and `/vortexinfo <id>` show a game or user with link buttons. `/vortexcookie` opens a private form (so the cookie never appears in chat) that saves your own PlayVortex login so lookups are made as you and also show your friend/follow status; submitting the form empty deletes it.
+`/vortexgame <game ID>` and `/vortexinfo <user ID>` (IDs, not usernames) show a game or user with link buttons. `/vortexcookie` opens a private form (so the cookie never appears in chat) that saves your own Vortex login so lookups are made as you and also show your friend/follow status; submitting the form empty deletes it.
 
 ## When Shapes is added or removed
 
