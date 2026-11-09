@@ -634,7 +634,7 @@ def register(m):
     def roblox_page():
         if not current_user():
             return redirect("/dashboard/login")
-        return Response(_web_file("roblox.html"), mimetype="text/html")
+        return Response(m._web_file("roblox.html"), mimetype="text/html")
 
     @app.route("/me/roblox")
     @login_required
