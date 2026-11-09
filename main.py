@@ -764,6 +764,20 @@ def make_partner_invite(sid):
     return None
 
 
+def _fresh_partner_invite(sid, row):
+    """The invite to show. One the bot grabbed itself is looked up again (at most every 2 minutes) so it is never stale;
+    one the owner typed in is left alone. Falls back to the saved one when Yapin' can't be asked."""
+    if not row.get("invite_auto"):
+        return row.get("invite")
+    try:
+        url = cached(f"partner-invite:{sid}", 120, lambda: make_partner_invite(sid))
+    except Exception:
+        url = None
+    if url and url != row.get("invite"):
+        partnersDB.set(sid, {**row, "invite": url})
+    return url or row.get("invite")
+
+
 def partner_cards():
     """What the partners page shows: for each partner the live server info where the bot can see it, else what was saved."""
     cards = []
@@ -775,7 +789,7 @@ def partner_cards():
             info = None
         description = (row.get("description") or (info or {}).get("description") or "").strip()
         cards.append({"id": sid, "name": (info or {}).get("name") or row.get("name") or sid, "icon": (info or {}).get("icon") or row.get("icon"),
-                      "description": description[:400], "invite": valid_invite_url(row.get("invite")), "added_at": row.get("added_at") or 0,
+                      "description": description[:400], "invite": valid_invite_url(_fresh_partner_invite(sid, row)), "added_at": row.get("added_at") or 0,
                       "members": (info or {}).get("members"), "humans": (info or {}).get("humans"), "channels": (info or {}).get("channels"), "roles": (info or {}).get("roles")})
     return sorted(cards, key=lambda c: c["added_at"])
 
@@ -813,7 +827,7 @@ async def partner(interaction: discord.Interaction, action: str = "list", server
             await interaction.followup.send(f"I can only partner servers I'm in. I couldn't load that one ({e}).", ephemeral=True)
             return
         invite = await asyncio.to_thread(make_partner_invite, server)
-        row.update(name=info["name"], icon=info["icon"], added_by=uid, added_at=row.get("added_at") or int(time.time()), invite=invite or row.get("invite"))
+        row.update(name=info["name"], icon=info["icon"], added_by=uid, added_at=row.get("added_at") or int(time.time()), invite=invite or row.get("invite"), invite_auto=bool(invite) or bool(row.get("invite_auto")))
         if text:
             row["description"] = text.strip()[:400]
         partnersDB.set(server, row)
@@ -835,6 +849,7 @@ async def partner(interaction: discord.Interaction, action: str = "list", server
             await interaction.followup.send("I need an https://www.yapin.gg/... invite link (I couldn't make one myself).", ephemeral=True)
             return
         row["invite"] = url
+        row["invite_auto"] = text.strip().lower() in ("", "new")      # only a grabbed invite is refreshed on its own
         partnersDB.set(server, row)
         await interaction.followup.send(f"Invite saved: {url}", ephemeral=True)
 
