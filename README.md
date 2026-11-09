@@ -58,3 +58,10 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 ## PlayVortex
 
 `/vortexgame <id>` and `/vortexinfo <id>` show a game or user with link buttons. `/vortexcookie` opens a private form (so the cookie never appears in chat) that saves your own PlayVortex login so lookups are made as you and also show your friend/follow status; submitting the form empty deletes it.
+
+## When Shapes is added or removed
+
+- **Welcome:** the first time Shapes joins a server it posts a short welcome in the first channel it can write to and DMs the owner. It never welcomes the same server twice.
+- **30 day data hold:** when Shapes is removed from a server its data (counting, autorole, automod, command log) is *held*, not deleted. Adding Shapes back, or the server showing up in the list again, cancels the hold. After 30 days the data is deleted, but only after re-checking that the server is really gone, and never while the server list looks wrong (empty or suddenly much shorter), so an API hiccup can't cost anyone their data. A removal is only believed after the server is missing from 5 checks in a row.
+- Yapin' has no join/leave event in yapper.py 1.6.0, so this is detected by checking the server list every minute. If Yapin' adds the event, it is already wired to react at once (`server_join` / `server_leave` and a few other names).
+- `/clearai` deletes your own AI chat history.

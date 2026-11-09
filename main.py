@@ -33,7 +33,7 @@ import aiohttp
 import pytz
 import requests
 import yapper
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for, has_request_context
 from flask_cors import CORS
 from openai import OpenAI
 from slpp import slpp as lua
@@ -914,8 +914,18 @@ yshim.COMMAND_HOOKS.append(global_cmdlog_record)
 _known_servers_lock = threading.Lock()
 
 
+REMOVAL_CONFIRM_POLLS = 5          # a server has to be missing from this many checks in a row before it counts as removed
+REMOVAL_MAX_DROP = 0.5             # ...and the list can't have shrunk by more than half at once (that's the API glitching, not people leaving)
+DATA_HOLD_DAYS = 30
+holdsDB = CloudflareD1("holds")            # server id -> {name, since, delete_after}: removed servers whose data is on hold
+welcomedDB = CloudflareD1("welcomed")      # server id -> when Shapes first welcomed it
+_missing_polls = {}
+
+
 def server_watch_poll():
-    """Compare bot.servers() with the saved list. Returns (added, removed) as lists of {id, name, ...}."""
+    """Compare bot.servers() with the saved list. Returns (added, removed) as lists of {id, name, ...}.
+    Removals are only believed after REMOVAL_CONFIRM_POLLS misses in a row and never when the list looks broken, because a
+    removal starts the clock on deleting that server's data (see start_data_hold)."""
     with _known_servers_lock:
         try:
             now = {str(s.get("id")): dict(s) for s in bot.servers()}
@@ -923,17 +933,144 @@ def server_watch_poll():
             print(f"[servers] couldn't list servers: {e}")
             return [], []
         saved = cmdlogcfgDB.get("_servers")
-        cmdlogcfgDB.set("_servers", {"servers": {k: {"name": v.get("name")} for k, v in now.items()}, "at": int(time.time())})
+        before = (saved or {}).get("servers") or {}
+        list_ok = bool(now) and len(now) >= len(before) * REMOVAL_MAX_DROP
+        removed = []
+        keep = {k: {"name": v.get("name")} for k, v in now.items()}
+        for k, v in before.items():
+            if k in now:
+                _missing_polls.pop(k, None)
+                continue
+            if not list_ok:                      # the list looks wrong: remember everyone, count nothing
+                keep[k] = v
+                continue
+            _missing_polls[k] = _missing_polls.get(k, 0) + 1
+            if _missing_polls[k] >= REMOVAL_CONFIRM_POLLS:
+                removed.append({"id": k, **v})
+                _missing_polls.pop(k, None)
+            else:
+                keep[k] = v                      # still counted as ours until the misses add up
+        cmdlogcfgDB.set("_servers", {"servers": keep, "at": int(time.time())})
         if saved is None:                      # first run: remember them, announce nothing
             return [], []
-        before = saved.get("servers") or {}
         added = [now[k] for k in now if k not in before]
-        removed = [{"id": k, **before[k]} for k in before if k not in now]
+        back = [now[k] for k in now if k in before and holdsDB.exists(k)]      # seen again while on hold
     for s in added:
         _server_event("add", s["id"], s.get("name"), s, len(now))
     for s in removed:
         _server_event("remove", s["id"], s.get("name"), s, len(now))
+    for s in back:
+        cancel_data_hold(s["id"], s.get("name"), "the server showed up again")
+    try:
+        sweep_data_holds(now if list_ok else None)
+    except Exception as e:
+        print(f"[servers] hold sweep failed: {e}")
     return added, removed
+
+
+# --- what happens to a server's data when Shapes leaves: a 30 day hold, undone if it comes back ---
+
+def start_data_hold(sid, name):
+    sid = str(sid)
+    now = int(time.time())
+    holdsDB.set(sid, {"name": name or sid, "since": now, "delete_after": now + DATA_HOLD_DAYS * 86400})
+    print(f"[servers] holding {name or sid}'s data for {DATA_HOLD_DAYS} days")
+
+
+def cancel_data_hold(sid, name=None, why="it was added back"):
+    sid = str(sid)
+    if not holdsDB.exists(sid):
+        return False
+    holdsDB.remove(sid)
+    print(f"[servers] released the data hold on {name or sid}: {why}")
+    try:
+        embed = {"title": f"♻️ {name or sid}'s data hold was cancelled", "description": f"Reason: {why}. Their settings and counting are untouched.", "color": 0x5865F2,
+                 "footer": {"text": "Shapes server log"}}
+        cfg = cmdlogcfgDB.get(BOTLOG_KEY)
+        if cfg and cfg.get("events"):
+            botlog_post(embed)
+    except Exception:
+        pass
+    return True
+
+
+def purge_server_data(sid):
+    """Delete everything stored for one server (settings, counting, logs). Per-person data is never touched here."""
+    sid = str(sid)
+    for db in (countingDB, autoroleDB, automodDB, cmdlogcfgDB, holdsDB, welcomedDB):
+        db.remove(sid)
+    for key in [k for k in cmdlogDB.items() if k.startswith(f"{sid}:")]:
+        cmdlogDB.remove(key)
+    for key, row in list(actionsDB.items().items()):
+        if isinstance(row, dict) and str(row.get("server_id")) == sid:
+            actionsDB.remove(key)
+    for key, row in list(auditDB.items().items()):
+        if isinstance(row, dict) and str(row.get("key")) == sid:
+            auditDB.remove(key)
+    print(f"[servers] deleted the stored data of server {sid}")
+
+
+def sweep_data_holds(now_servers):
+    """Delete data whose 30 days are up, but only after checking again that the server really is gone. `now_servers` is the
+    fresh server list, or None when that list couldn't be trusted this time (then nothing is deleted and the hold just waits)."""
+    if now_servers is None:
+        return []
+    done = []
+    for sid in list(holdsDB.all()):
+        hold = holdsDB.get(sid) or {}
+        if sid in now_servers:
+            cancel_data_hold(sid, hold.get("name"), "the server is in the list again")
+        elif int(hold.get("delete_after") or 0) and time.time() >= int(hold["delete_after"]):
+            purge_server_data(sid)
+            log_action("server_data_deleted", f"{hold.get('name') or sid}: data deleted after the {DATA_HOLD_DAYS} day hold", server_id=sid)
+            done.append(sid)
+    return done
+
+
+WELCOME_TEXT = ("Thanks for adding Shapes! Here's how to get going:\n"
+                "• **/help** lists everything I can do\n"
+                "• **/counting** sets up a counting channel\n"
+                "• **/cmdlog** (server owner) logs the commands people run\n"
+                "• Manage me from the **dashboard**: autorole, automod, messages and more\n"
+                "Pick a colour for my embeds with **/settings**.")
+
+
+def welcome_server(sid, name, data=None):
+    """Say hello in the first channel Shapes may post in, and tell the owner by DM. Only once per server."""
+    sid = str(sid)
+    if welcomedDB.exists(sid):
+        return False
+    data = data or {}
+    embed = {"title": f"👋 Hi {name or 'there'}, I'm Shapes!", "description": WELCOME_TEXT, "color": 0x6366F1,
+             "footer": {"text": f"Dashboard: {PUBLIC_URL or MainURL}/dashboard"}}
+    posted = False
+    try:
+        channels = [dict(c) for c in bot.channels(sid)]
+    except Exception as e:
+        print(f"[servers] couldn't list channels of {name or sid} to welcome them: {e}")
+        channels = []
+    preferred = str(yshim._first(data, "system_channel_id", "default_channel_id", "general_channel_id") or "")
+    text = [c for c in channels if _is_text(str(yshim._first(c, "type", "kind") or "text").lower())]
+    text.sort(key=lambda c: (str(c.get("id")) != preferred, "general" not in str(c.get("name", "")).lower(), int(c.get("position") or 0)))
+    for channel in text[:5]:                       # the first one it lets us post in
+        try:
+            bot.send(str(channel["id"]), "", embeds=[embed])
+            posted = True
+            break
+        except Exception as e:
+            print(f"[servers] couldn't welcome #{channel.get('name')}: {e}")
+    owner = yshim._first(data, "owner_id", "ownerId")
+    owner = str(owner.get("id") if isinstance(owner, dict) else owner) if owner is not None else None
+    if owner:
+        try:
+            bot.send(bot.dm(owner), "", embeds=[{**embed, "title": f"Thanks for adding Shapes to {name or 'your server'}!",
+                                                   "description": WELCOME_TEXT + ("" if posted else "\n\nI couldn't post in any channel of your server, so I'm telling you here.")}])
+            posted = True
+        except Exception as e:
+            print(f"[servers] couldn't DM the owner of {name or sid}: {e}")
+    if posted:
+        welcomedDB.set(sid, {"at": int(time.time()), "name": name})
+    return posted
 
 
 def _server_event(kind, sid, name, data, total):
@@ -953,6 +1090,16 @@ def _server_event(kind, sid, name, data, total):
         "at": int(time.time()), "actor_id": "system", "actor": "system", "kind": f"server_{kind}", "detail": f"{name} ({members or '?'} members)",
         "server_id": str(sid), "target": None})
     print(f"[servers] Shapes was {'added to' if kind == 'add' else 'removed from'} {name} ({sid}); now in {total}")
+    if kind == "remove":
+        start_data_hold(sid, name)
+        embed["fields"].append({"name": "Their data", "value": f"Kept for {DATA_HOLD_DAYS} days, then deleted. Adding Shapes back cancels that.", "inline": False})
+    else:
+        if holdsDB.exists(str(sid)):
+            cancel_data_hold(sid, name, "Shapes was added back")
+        try:
+            welcome_server(sid, name, data)
+        except Exception as e:
+            print(f"[servers] welcome failed for {name}: {e}")
     cfg = cmdlogcfgDB.get(BOTLOG_KEY)
     if cfg and cfg.get("events"):
         botlog_post(embed)
@@ -1189,7 +1336,7 @@ async def help_command(interaction: discord.Interaction):
         "• /badge - Badge information\n• /badges - Check a user's badges\n• /recentbadges - Latest badges\n• /outfits - A user's outfits\n"
         "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox\n• /vortexgame, /vortexinfo, /vortexcookie - PlayVortex"), inline=False)
     embed.add_field(name="Utility", value=(
-        "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI\n• /github - GitHub user\n"
+        "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI (/clearai deletes your history)\n• /github - GitHub user\n"
         "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp - spook.bio"), inline=False)
     embed.add_field(name="Yapper profile", value="• /yapinuser - Info about a user\n• /yapinavatar - Avatar\n• /yapinbanner - Banner", inline=False)
     embed.set_footer(text="Right-click context menus from the Discord bot are not available on Yapper; use the slash commands.")
@@ -1833,6 +1980,14 @@ async def yapin2roblox(interaction: discord.Interaction, user: discord.User):
 
 
 # --- ai ---
+@bot.tree.command(name="clearai", description="Delete your AI chat history")
+async def clearai(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    had = AI_DB.exists(user_id)
+    AI_DB.remove(user_id)
+    await interaction.response.send_message("Your AI chat history was deleted." if had else "You don't have any AI chat history.", ephemeral=True)
+
+
 @bot.tree.command(name="ai", description="Chat with an AI assistant.")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -5905,6 +6060,8 @@ def api_messages(channel_id):
 
 def actor_is_owner():
     """The dashboard user is a bot owner (the admin key counts: whoever holds it runs the bot)."""
+    if not has_request_context():
+        return False
     user = session.get("yuser")
     if isinstance(user, dict) and user.get("id"):
         return is_bot_owner(user["id"])
@@ -5913,6 +6070,8 @@ def actor_is_owner():
 
 def current_actor():
     """(id, name, is_bot_staff) of whoever is using the dashboard right now. The admin key has no identity of its own."""
+    if not has_request_context():            # the bot itself (a background job), not a person on the dashboard
+        return "system", "system", True
     user = session.get("yuser")
     if isinstance(user, dict) and user.get("id"):
         return str(user["id"]), str(user.get("name") or user["id"]), is_staff_user(user["id"])
