@@ -593,17 +593,39 @@ def _join(*parts):
     return "\n".join(p for p in parts if p).strip()
 
 
+def _link_buttons(comps):
+    """[(label, url)] of every link button in a component tree."""
+    out = []
+    if isinstance(comps, dict):
+        if comps.get("url") and comps.get("label"):
+            out.append((str(comps["label"]), str(comps["url"])))
+        for v in comps.values():
+            if isinstance(v, (list, dict)):
+                out += _link_buttons(v)
+    elif isinstance(comps, list):
+        for v in comps:
+            out += _link_buttons(v)
+    return out
+
+
 def _send_msg(channel_id, text, embeds=None, comps=None, reply_to=None, ephemeral=False, via=None):
     text = str(text or "")
+    if ephemeral and comps:
+        # Private messages may not show buttons (they can't be edited or looked up again), so every link button is also
+        # written out as a plain link underneath: the person always has a way to open it.
+        links = [f"[{label}]({url})" for label, url in _link_buttons(comps)]
+        if links:
+            text = _join(text, " · ".join(dict.fromkeys(links)))
     if len(text) > 2000:       # Yapin's limit for message content
         text = text[:1997] + "…"
     if via is not None:        # the answer to a slash command: Yapin shows "<user> used /cmd" above it, and ephemeral is truly private
         kind = "ephemeral" if ephemeral else "reply"
         try:
             out = via._answer(kind, text, embeds, comps)
-        except YapperError:
+        except YapperError as e:
             if not comps:
                 raise
+            print(f"[buttons] Yapin' refused the buttons on this {kind} answer ({e}); sending it without them")
             out = via._answer(kind, text, embeds)       # the server refused buttons on this answer: send it without them
         return out if isinstance(out, dict) else {}
     if not ephemeral:
