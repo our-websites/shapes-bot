@@ -71,6 +71,8 @@
   * { scrollbar-width:thin; scrollbar-color:rgba(99,102,241,.4) #050505; }
 
   /* Discord/Yapin-style shell: server rail, section menu, content */
+  #commit { max-width:1180px; margin:0 auto; padding:0 16px 28px; color:var(--muted, #8b8b99); font-size:12px; text-align:center; }
+  #commit a { color:inherit; text-decoration:underline dotted; }
   .shell { display:grid; grid-template-columns:72px 236px minmax(0,1fr); gap:12px; max-width:1180px; margin:0 auto; padding:0 16px 40px; align-items:start; }
   .shell.nomenu { grid-template-columns:72px minmax(0,1fr); }
   .rail { display:flex; flex-direction:column; align-items:center; gap:8px; padding:10px 0; border-radius:20px; background:rgba(255,255,255,.03); border:1px solid var(--line); position:sticky; top:12px; max-height:calc(100vh - 24px); overflow-y:auto; scrollbar-width:none; }
@@ -130,6 +132,7 @@
   <div class="me" id="me"></div>
 </header>
 <div id="app"></div>
+<footer id="commit"></footer>
 <div class="tip" id="tip" hidden></div>
 <script>
 const BOOT = __BOOT__;
@@ -483,6 +486,10 @@ async function activity() {
       h('tbody', {}, d.actions.map(a => h('tr', {}, h('td', {}, when(a.at)), h('td', {}, '@' + a.actor), h('td', {}, a.kind + (a.target ? ' → ' + a.target : '') + (a.detail ? ': ' + a.detail : '')))))) : h('div', { class: 'empty' }, 'Nothing yet.'))];
 }
 
+if (BOOT.commit && BOOT.commit.sha) {
+  const c = $('#commit');
+  c.append('Running commit ', h('a', { href: 'https://github.com/our-websites/shapes-bot/commit/' + BOOT.commit.sha, target: '_blank', rel: 'noopener' }, BOOT.commit.sha), BOOT.commit.title ? ' · ' + BOOT.commit.title : '');
+}
 renderHeader();
 if (!BOOT.user) loginPage(); else draw();
 </script>

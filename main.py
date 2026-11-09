@@ -1817,6 +1817,22 @@ PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
 LASTFM_LINK_TTL = 600
 
 
+def _git_commit():
+    """(short hash, subject) of the code that is running: COMMIT_SHA if the host sets it, else asked of git. ('', '') if unknown."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        out = subprocess.run(["git", "log", "-1", "--format=%h%n%s"], cwd=here, capture_output=True, text=True, timeout=5).stdout.strip().split("\n", 1)
+        if out and out[0]:
+            return out[0], (out[1] if len(out) > 1 else "")
+    except Exception:
+        pass
+    return (os.environ.get("COMMIT_SHA", "")[:7], "")
+
+
+COMMIT = _git_commit()
+
+
 def get_lastfm(user_id):
     """The Last.fm username this Yapin user linked (kept by the API), or None."""
     data = shapes_api("GET", f"/internal/links/{user_id}")
