@@ -748,16 +748,9 @@ def valid_invite_url(url):
 
 
 def make_partner_invite(sid):
-    """An invite for the server: ask Yapin' for a new one if it lets bots, else reuse one the server already has (a vanity
-    link first). Returns a URL, or None when neither works (then the owner passes one with /partner invite)."""
-    try:
-        made = bot.api("POST", f"/servers/{sid}/invites", {}) or {}
-        invite = made.get("invite") if isinstance(made.get("invite"), dict) else made
-        url = valid_invite_url(invite.get("url") or (f"https://www.yapin.gg/invite/{invite['code']}" if invite.get("code") else None))
-        if url:
-            return url
-    except Exception as e:
-        print(f"[partners] couldn't create an invite for {sid}: {e}")
+    """An invite for the server. Yapin's bot API has no create-invite endpoint (only GET /servers/{id}/invites, which needs
+    Manage Server), so this reuses one the server already has, a vanity link first, and never one that expires. Returns a URL,
+    or None when there isn't one (then the owner passes one with /partner invite)."""
     try:
         found = [dict(i) for i in bot.invites(sid)]
     except Exception as e:
