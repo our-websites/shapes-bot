@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Partners - Shapes</title>
+  <meta property="og:title" content="Shapes partners">
+  <meta property="og:description" content="Servers we partner with.">
+  <link rel="icon" type="image/png" href="https://our-websites.github.io/cdn.shapes.lol/shapes/favicon.ico">
+  <meta name="theme-color" content="#111111">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Stack+Sans+Notch:wght@200..700&family=Poppins:wght@300;400;600;800&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/index.css">
+  <style>
+    .partners-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:18px; width:100%; max-width:1000px; margin:28px auto 0; text-align:left; }
+    .partner-card { display:flex; flex-direction:column; gap:14px; padding:22px; border-radius:20px; border:1px solid rgba(255,255,255,.1); background:rgba(255,255,255,.04); transition:transform .2s, border-color .2s; }
+    .partner-card:hover { transform:translateY(-3px); border-color:rgba(99,102,241,.6); }
+    .partner-top { display:flex; gap:14px; align-items:center; }
+    .partner-icon { width:64px; height:64px; border-radius:18px; object-fit:cover; background:#222; display:flex; align-items:center; justify-content:center; font:800 26px "Poppins",sans-serif; color:#aaa; flex:none; }
+    .partner-name { margin:0; font:700 20px "Poppins",sans-serif; overflow-wrap:anywhere; }
+    .partner-about { margin:0; color:rgba(255,255,255,.7); line-height:1.5; flex:1; font-size:15px; }
+    .partner-stats { display:flex; gap:10px; flex-wrap:wrap; }
+    .partner-stat { padding:6px 12px; border-radius:999px; background:rgba(255,255,255,.06); font-size:13px; color:rgba(255,255,255,.8); }
+    .partner-stat b { color:#fff; }
+    .partner-join { text-align:center; justify-content:center; }
+  </style>
+</head><body>
+  <header class="topbar">
+    <div class="header-nav">
+      <div class="brand-dot"><a href="/"><img src="https://our-websites.github.io/cdn.shapes.lol/shapes/logo.png" alt="Shapes Logo"></a></div>
+      <nav class="nav-links">
+        <a href="/#counting">Counting</a>
+        <a href="/partners">Partners</a>
+        <a href="/commands">Commands</a>
+        <a href="/about">About</a>
+        <a href="/activity/">Activities</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/support">Support</a>
+      </nav>
+    </div>
+  </header>
+  <div class="wrap"><main class="hero">
+      <h1 class="headline">Our <span class="muted">partner</span><br>servers</h1>
+      <p class="sub">Communities we love. Take a look around and join the ones that look like your kind of place.</p>
+      <div class="partners-grid">
+        {% for p in partners %}
+        <article class="partner-card">
+          <div class="partner-top">
+            {% if p.icon %}<img class="partner-icon" src="{{ p.icon }}" alt="" loading="lazy" referrerpolicy="no-referrer">{% else %}<div class="partner-icon">{{ p.name[:1]|upper }}</div>{% endif %}
+            <h2 class="partner-name">{{ p.name }}</h2>
+          </div>
+          <p class="partner-about">{{ p.description or "A Yapin' community." }}</p>
+          <div class="partner-stats">
+            {% if p.members is not none %}<span class="partner-stat"><b>{{ "{:,}".format(p.members) }}</b> members</span>{% endif %}
+            {% if p.channels is not none %}<span class="partner-stat"><b>{{ "{:,}".format(p.channels) }}</b> channels</span>{% endif %}
+            {% if p.roles is not none %}<span class="partner-stat"><b>{{ "{:,}".format(p.roles) }}</b> roles</span>{% endif %}
+          </div>
+          {% if p.invite %}<a class="button-style primary partner-join" href="{{ p.invite }}" rel="noopener" target="_blank">Join {{ p.name }}</a>{% endif %}
+        </article>
+        {% else %}
+        <p class="counting-subtitle" style="grid-column:1/-1;text-align:center">No partners yet. Check back soon!</p>
+        {% endfor %}
+      </div>
+    </main></div>
+</body></html>

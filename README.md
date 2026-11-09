@@ -65,3 +65,7 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 - **30 day data hold:** when Shapes is removed from a server its data (counting, autorole, automod, command log) is *held*, not deleted. Adding Shapes back, or the server showing up in the list again, cancels the hold. After 30 days the data is deleted, but only after re-checking that the server is really gone, and never while the server list looks wrong (empty or suddenly much shorter), so an API hiccup can't cost anyone their data. A removal is only believed after the server is missing from 5 checks in a row.
 - Yapin' has no join/leave event in yapper.py 1.6.0, so this is detected by checking the server list every minute. If Yapin' adds the event, it is already wired to react at once (`server_join` / `server_leave` and a few other names).
 - `/clearai` deletes your own AI chat history.
+
+## Partners page
+
+The bot owner runs `/partner add <server id> [description]` (inside the server, the id can be left out) to feature a server at `/partners`. Shapes tries to create an invite for it, otherwise reuses one the server already has (a vanity link first); `/partner invite <server id> <https://www.yapin.gg/... link>` sets one by hand. The page shows the server's icon, name, member / channel / role counts and the description you wrote (or the server's own description when you wrote none). Also: `/partner description`, `/partner remove`, `/partner list`. The same data is at `/api/partners`. Only yapin.gg invite links are accepted.

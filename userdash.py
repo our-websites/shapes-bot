@@ -87,6 +87,16 @@ def register(m):
         items, page, pages = paged(leaderboard())
         return render_template("leaderboard.html", items=items, page=page, pages=pages)
 
+    @app.route("/partners")
+    @m.rate_limited(120, 60)
+    def partners_page():
+        return render_template("partners.html", partners=m.partner_cards() if m.bot_ready else [])
+
+    @app.route("/api/partners")
+    @m.rate_limited(60, 60)
+    def partners_json():
+        return jsonify({"success": True, "partners": m.partner_cards() if m.bot_ready else []})
+
     @app.route("/commands", methods=["GET"])
     @m.rate_limited(120, 60)
     def send_commands():

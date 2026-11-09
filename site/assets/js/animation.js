@@ -6,7 +6,7 @@ document.addEventListener('DOMContentLoaded', function() {
     console.log('GSAP animations loaded');
     
     // Hero section animations - animate all direct children except FAQ section
-    const heroElements = document.querySelectorAll('.hero > *:not(.faq-section)');
+    const heroElements = document.querySelectorAll('.hero > *:not(.faq-section):not(.counting-section)');
     gsap.from(heroElements, {
         opacity: 0,
         y: 30,
@@ -42,16 +42,20 @@ document.addEventListener('DOMContentLoaded', function() {
         stagger: 0.2
     });
 
-    // Leaderboard cards animation (File: index.html)
-    gsap.from('.leaderboard-card', {
-        opacity: 0,
-        y: 20,
+    // Leaderboard cards animation (File: index.html). The cards are in the page already, so they must never end up hidden:
+    // they start visible, fade in once the section is reached, and the inline styles are removed afterwards.
+    gsap.fromTo('.leaderboard-card', { opacity: 0, y: 20 }, {
+        opacity: 1,
+        y: 0,
         duration: 0.6,
         stagger: 0.1,
         ease: "power2.out",
+        clearProps: "opacity,transform",
+        immediateRender: false,
         scrollTrigger: {
             trigger: '.counting-section',
-            start: 'top 80%'
+            start: 'top 92%',
+            once: true
         }
     });
 

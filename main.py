@@ -734,6 +734,118 @@ def _cmdlog_status_embed(sid, color, note=None):
     return embed
 
 
+# --- Partners: servers the bot owner features on the website (/partners) ---
+partnersDB = CloudflareD1("partners")      # server id -> {name, description, invite, added_by, added_at, icon}
+PARTNER_INVITE_HOSTS = ("yapin.gg", "www.yapin.gg")
+
+
+def valid_invite_url(url):
+    try:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+    except ValueError:
+        return None
+    return parsed.geturl() if parsed.scheme == "https" and parsed.hostname in PARTNER_INVITE_HOSTS and len(parsed.geturl()) <= 200 else None
+
+
+def make_partner_invite(sid):
+    """An invite for the server: ask Yapin' for a new one if it lets bots, else reuse one the server already has (a vanity
+    link first). Returns a URL, or None when neither works (then the owner passes one with /partner invite)."""
+    try:
+        made = bot.api("POST", f"/servers/{sid}/invites", {}) or {}
+        invite = made.get("invite") if isinstance(made.get("invite"), dict) else made
+        url = valid_invite_url(invite.get("url") or (f"https://www.yapin.gg/invite/{invite['code']}" if invite.get("code") else None))
+        if url:
+            return url
+    except Exception as e:
+        print(f"[partners] couldn't create an invite for {sid}: {e}")
+    try:
+        found = [dict(i) for i in bot.invites(sid)]
+    except Exception as e:
+        print(f"[partners] couldn't read the invites of {sid}: {e}")
+        return None
+    found.sort(key=lambda i: (not i.get("vanity"), bool(i.get("expires_at")), int(i.get("max_uses") or 0) != 0))
+    for i in found:
+        url = valid_invite_url(i.get("url") or (f"https://www.yapin.gg/invite/{i['code']}" if i.get("code") else None))
+        if url and not i.get("expires_at"):
+            return url
+    return None
+
+
+def partner_cards():
+    """What the partners page shows: for each partner the live server info where the bot can see it, else what was saved."""
+    cards = []
+    for sid in partnersDB.all():
+        row = partnersDB.get(sid) or {}
+        try:
+            info = cached(f"summary:{sid}", 300, lambda sid=sid: server_summary(sid))
+        except Exception:
+            info = None
+        description = (row.get("description") or (info or {}).get("description") or "").strip()
+        cards.append({"id": sid, "name": (info or {}).get("name") or row.get("name") or sid, "icon": (info or {}).get("icon") or row.get("icon"),
+                      "description": description[:400], "invite": valid_invite_url(row.get("invite")), "added_at": row.get("added_at") or 0,
+                      "members": (info or {}).get("members"), "humans": (info or {}).get("humans"), "channels": (info or {}).get("channels"), "roles": (info or {}).get("roles")})
+    return sorted(cards, key=lambda c: c["added_at"])
+
+
+@bot.tree.command(name="partner", description="Manage partner servers (bot owner): /partner add|remove|description|invite|list <server id> [text]")
+async def partner(interaction: discord.Interaction, action: str = "list", server: str = "", text: str = ""):
+    uid = str(interaction.user.id)
+    if not is_bot_owner(uid):
+        await interaction.response.send_message("Only the bot owner can manage partners.", ephemeral=True)
+        return
+    action, server = (action or "list").lower(), str(server or "").strip()
+    if server == "" and action in ("add", "remove", "description", "invite") and interaction.guild_id:
+        server = str(interaction.guild_id)           # run it inside the server to partner that one
+    if action == "list" or (action not in ("add", "remove", "description", "invite")):
+        rows = [f"**{partnersDB.get(s).get('name') or s}** (`{s}`) " + ("— " + partnersDB.get(s)["invite"] if partnersDB.get(s).get("invite") else "— no invite yet") for s in partnersDB.all()]
+        embed = discord.Embed(title="Partners", description="\n".join(rows) or "No partners yet. `/partner add <server id> [description]`", color=ecolor(uid))
+        embed.add_field(name="Commands", value="`/partner add <server id> [description]` · `/partner remove <server id>` · `/partner description <server id> <text>` · `/partner invite <server id> <invite url>` (or `new`)", inline=False)
+        embed.set_footer(text=f"Shown at {MainURL}/partners")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if not server:
+        await interaction.response.send_message("Which server? Give its id (or run this inside the server).", ephemeral=True)
+        return
+    if action == "remove":
+        gone = partnersDB.remove(server)
+        _cache.pop(f"summary:{server}", None)
+        await interaction.response.send_message("Removed from the partners page." if gone else "That server isn't a partner.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    row = dict(partnersDB.get(server) or {})
+    if action == "add":
+        try:
+            info = await asyncio.to_thread(server_summary, server)
+        except Exception as e:
+            await interaction.followup.send(f"I can only partner servers I'm in. I couldn't load that one ({e}).", ephemeral=True)
+            return
+        invite = await asyncio.to_thread(make_partner_invite, server)
+        row.update(name=info["name"], icon=info["icon"], added_by=uid, added_at=row.get("added_at") or int(time.time()), invite=invite or row.get("invite"))
+        if text:
+            row["description"] = text.strip()[:400]
+        partnersDB.set(server, row)
+        log_action("partner", f"added {info['name']}", server_id=server)
+        note = "" if row.get("invite") else "\n⚠️ I couldn't make or find an invite. Add one with `/partner invite <server id> <invite url>`."
+        await interaction.followup.send(f"**{info['name']}** is now a partner: {MainURL}/partners{note}", ephemeral=True)
+        return
+    if not partnersDB.exists(server):
+        await interaction.followup.send("That server isn't a partner yet. `/partner add <server id>` first.", ephemeral=True)
+        return
+    if action == "description":
+        row["description"] = text.strip()[:400] or None
+        partnersDB.set(server, row)
+        await interaction.followup.send("Description saved." if row["description"] else "Description cleared: the server's own description is used.", ephemeral=True)
+        return
+    if action == "invite":
+        url = (await asyncio.to_thread(make_partner_invite, server)) if text.strip().lower() in ("", "new") else valid_invite_url(text)
+        if not url:
+            await interaction.followup.send("I need an https://www.yapin.gg/... invite link (I couldn't make one myself).", ephemeral=True)
+            return
+        row["invite"] = url
+        partnersDB.set(server, row)
+        await interaction.followup.send(f"Invite saved: {url}", ephemeral=True)
+
+
 @bot.tree.command(name="cmdlog", description="Log every command used in this server (server owner only): /cmdlog [channel #channel | on | off]")
 async def cmdlog(interaction: discord.Interaction, action: str = "status", value: str = ""):
     if interaction.is_dm:
