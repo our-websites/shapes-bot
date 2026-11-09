@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roblox accounts - Shapes</title>
+<link rel="icon" type="image/png" href="https://our-websites.github.io/cdn.shapes.lol/shapes/favicon.ico">
+<meta name="theme-color" content="#050505">
+<style>
+  :root { color-scheme: dark; --bg:#050505; --panel:#0d0d0f; --ink:#fff; --muted:#9b9b9f; --line:rgba(160,160,170,.25); --accent:#6366f1; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 48px; }
+  a { color:#9ab; } h1 { font-size:24px; margin:8px 0 4px; } p.sub { color:var(--muted); margin:0 0 18px; }
+  .top { display:flex; gap:12px; align-items:center; } .top a.back { margin-left:auto; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin:10px 0; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  .card img { width:56px; height:56px; border-radius:12px; background:#222; object-fit:cover; }
+  .card .who { flex:1; min-width:160px; } .card .who b { display:block; } .card .who span { color:var(--muted); font-size:13px; }
+  button, .btn { font:inherit; background:var(--accent); color:#fff; border:0; border-radius:10px; padding:8px 14px; cursor:pointer; text-decoration:none; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); } button.danger { background:#7a1d1d; }
+  .badge { background:rgba(99,102,241,.2); color:#c7c8ff; border-radius:999px; padding:2px 10px; font-size:12px; }
+  .note { color:var(--muted); font-size:13px; margin-top:16px; } .err { color:#ff8a8a; }
+</style></head><body><main>
+<div class="top"><h1>Roblox accounts</h1><a class="back" href="/dashboard">← Dashboard</a></div>
+<p class="sub">Link up to <span id="max">50</span> Roblox accounts by signing in with Roblox (OAuth2, nothing goes in your bio). Pick one to verify you automatically in servers that use Roblox verification.</p>
+<div id="status" class="note"></div><div id="list"></div>
+<p><button id="link">Link a Roblox account</button></p>
+<p class="note">Discord uses the same accounts: sign up with Yapin’ first, then link your Discord account to it. Whenever you verify or are auto-verified, you get a message with the account that was used.</p>
+</main><script>
+const $ = s => document.querySelector(s), list = $('#list'), status = $('#status');
+const post = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json());
+const el = (t, a = {}, ...k) => { const e = document.createElement(t); for (const [x, y] of Object.entries(a)) x === 'class' ? e.className = y : e.setAttribute(x, y); e.append(...k.filter(Boolean)); return e; };
+async function load() {
+  const r = await fetch('/me/roblox'); if (r.status === 401) { location.href = '/dashboard/login'; return; }
+  const d = await r.json(); list.replaceChildren(); $('#max').textContent = d.max || 50;
+  if (!d.accounts || !d.accounts.length) list.append(el('p', { class: 'note' }, 'No accounts linked yet.'));
+  for (const a of d.accounts || []) {
+    const auto = el('button', { class: 'ghost' }, a.auto_verify ? 'Auto-verify: on' : 'Auto-verify: off');
+    auto.onclick = async () => { await post('/me/roblox/auto', { roblox_id: a.auto_verify ? null : a.id }); load(); };
+    const rm = el('button', { class: 'danger' }, 'Remove');
+    rm.onclick = async () => { if (confirm('Remove ' + a.name + '?')) { await post('/me/roblox/remove', { roblox_id: a.id }); load(); } };
+    list.append(el('div', { class: 'card' }, a.avatar ? el('img', { src: a.avatar, alt: '' }) : el('img', { alt: '' }),
+      el('div', { class: 'who' }, el('b', {}, a.name, ' ', a.auto_verify ? el('span', { class: 'badge' }, 'auto-verify') : null), el('span', {}, 'ID ' + a.id + ' · ', el('a', { href: a.profile, target: '_blank', rel: 'noopener' }, 'profile'))), auto, rm));
+  }
+}
+$('#link').onclick = async () => {
+  status.textContent = 'Making your sign-in link…'; status.className = 'note';
+  const d = await post('/me/roblox/link');
+  if (d.url) location.href = d.url; else { status.textContent = d.data || 'Couldn’t start linking.'; status.className = 'note err'; }
+};
+load();
+</script></body></html>

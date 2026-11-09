@@ -5780,6 +5780,10 @@ def on_direct_message(msg):
 @bot.on("member_join")
 def on_member_join(ev):
     try:
+        threading.Thread(target=lambda: verify_on_join(ev), daemon=True).start()     # Roblox verification (rverify.py)
+    except Exception as e:
+        print(f"[verify] join: {type(e).__name__}: {e}")
+    try:
         cfg = get_autorole(ev.server_id)
         if autorole_applies(cfg, ev.server_id, ev.user_id):
             bot.add_role(ev.server_id, ev.user_id, cfg["role_id"])
@@ -5804,6 +5808,7 @@ def on_ready(me):
     except Exception as e:
         print(f"could not set status: {e}")
     start_server_watch()
+    start_verify_scheduler()
     print(f"[SYSTEM] Logged in as {me.username}, watching {len(bot.servers())} servers. Storage: {__import__('cfstore').backend_summary()}")
 
 
@@ -6872,6 +6877,8 @@ def mutualservers():
     return {"Servers": cached("mutuals", 60, build)}, 200
 
 
+import rverify
+rverify.init(sys.modules[__name__])       # Roblox verification
 import userdash
 userdash.register(sys.modules[__name__])      # the public website and the user dashboard
 
