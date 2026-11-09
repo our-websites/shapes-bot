@@ -16,16 +16,23 @@ channels, recent messages, and to send messages as the bot. `/commands`, `/botin
 
 ## Storage
 
-Data lives in Cloudflare D1 (`cfstore.py`), which is free for this bot's size: create a D1 database (Workers & Pages -> D1),
+Data lives in Cloudflare D1 (`tables.py`), which is free for this bot's size: create a D1 database (Workers & Pages -> D1),
 then set `CLOUDFLARE_API_TOKEN` (permission: D1 Edit), `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_D1_DATABASE_ID`.
-The table is created automatically. Without those variables the bot falls back to local `.json` files.
-To copy old data across, run `python migrate_pickledb.py`.
+Each store is its own real table (`bot_counting`, `bot_embed`, `bot_users`, `bot_autorole`, `bot_ai`, `bot_automod`, `bot_audit`,
+`bot_cmdlog`, `bot_cmdlog_config`, `bot_actions`, `bot_dms`, `bot_partners`, `bot_holds`, `bot_welcomed`, `bot_rverify`), created
+automatically, with typed columns and an `extra_json` column that keeps anything that has no column, so nothing is dropped.
+Without the variables the bot falls back to local `.json` files. To copy old pickledb data across, run `python migrate_pickledb.py`.
+
+**Moving off the old key/value table:** on the first start the rows of the old `kv` table are copied into the new tables, read back from D1
+and compared. Only when every row matches is it marked done (`bot_meta`). If anything differs the bot keeps using `kv` for that run and retries
+next start (the log says `[tables] ...`). `kv` is never deleted by the bot; drop it yourself once you're happy. `/botinfo` shows which
+backend each store is on (`d1-tables`, `d1-kv` or `local-json`).
 
 ## Files
 
 - `main.py`: commands, events, web server
 - `yshim.py`: a small discord.py-shaped layer on top of `yapper.py` (embeds, buttons, command arguments)
-- `cfstore.py`: Cloudflare D1 storage with a pickledb-style API
+- `tables.py`: Cloudflare D1 storage as real tables, with the same get / set / remove / items API
 - `migrate_pickledb.py`: one-time import of the old `.db` files
 
 ## Last.fm linking

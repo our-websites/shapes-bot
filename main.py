@@ -1,7 +1,7 @@
 """Shapes for Yapper.
 
 Same commands as the Discord bot, running on Yapper through yapper.py. Data lives in Cloudflare D1
-(see cfstore.py), and a small web server runs on port 5004.
+(see tables.py), and a small web server runs on port 5004.
 
 Layout of this file:
   1. setup (env, databases, helpers)
@@ -78,7 +78,7 @@ if not isinstance(sys.stdout, _Stamped):
 import logging
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="[%(levelname)s] %(name)s: %(message)s")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)     # one line per web request drowned everything else
-from cfstore import CloudflareD1
+from tables import Table
 from yshim import app_commands, commands, discord
 
 # Emoji used by the Discord version were custom server emoji. yshim.clean() turns them into plain text/emoji.
@@ -112,17 +112,17 @@ chatgpt = OpenAI(api_key=os.getenv("OPENAI_KEY") or "unset", base_url="https://o
 AIModel = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 # === Databases (Cloudflare D1, or local JSON when the Cloudflare env vars are not set) ===
-countingDB = CloudflareD1("counting")
-embedDB = CloudflareD1("embed")
-usersDB = CloudflareD1("users")
-autoroleDB = CloudflareD1("autorole")
-AI_DB = CloudflareD1("ai")
-automodDB = CloudflareD1("automod")
-auditDB = CloudflareD1("audit")     # who changed what from the dashboard
-cmdlogDB = CloudflareD1("cmdlog")     # command log lines: "<server>:<ms>-<rand>" -> who ran what, where, when
-cmdlogcfgDB = CloudflareD1("cmdlogcfg")   # per server: where the command log goes
-actionsDB = CloudflareD1("actions")   # who did what from the dashboard: sends, DMs, settings, with username and time
-dmDB = CloudflareD1("dms")       # DM channels the dashboard knows about: user id -> {channel_id, name, last}
+countingDB = Table("counting")
+embedDB = Table("embed")
+usersDB = Table("users")
+autoroleDB = Table("autorole")
+AI_DB = Table("ai")
+automodDB = Table("automod")
+auditDB = Table("audit")     # who changed what from the dashboard
+cmdlogDB = Table("cmdlog")     # command log lines: "<server>:<ms>-<rand>" -> who ran what, where, when
+cmdlogcfgDB = Table("cmdlogcfg")   # per server: where the command log goes
+actionsDB = Table("actions")   # who did what from the dashboard: sends, DMs, settings, with username and time
+dmDB = Table("dms")       # DM channels the dashboard knows about: user id -> {channel_id, name, last}
 DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "autoroleDB": autoroleDB, "AI_DB": AI_DB,
              "automodDB": automodDB, "dmDB": dmDB, "auditDB": auditDB}
 
@@ -735,7 +735,7 @@ def _cmdlog_status_embed(sid, color, note=None):
 
 
 # --- Partners: servers the bot owner features on the website (/partners) ---
-partnersDB = CloudflareD1("partners")      # server id -> {name, description, invite, added_by, added_at, icon}
+partnersDB = Table("partners")      # server id -> {name, description, invite, added_by, added_at, icon}
 PARTNER_INVITE_HOSTS = ("yapin.gg", "www.yapin.gg")
 
 
@@ -1037,8 +1037,8 @@ _known_servers_lock = threading.Lock()
 REMOVAL_CONFIRM_POLLS = 5          # a server has to be missing from this many checks in a row before it counts as removed
 REMOVAL_MAX_DROP = 0.5             # ...and the list can't have shrunk by more than half at once (that's the API glitching, not people leaving)
 DATA_HOLD_DAYS = 30
-holdsDB = CloudflareD1("holds")            # server id -> {name, since, delete_after}: removed servers whose data is on hold
-welcomedDB = CloudflareD1("welcomed")      # server id -> when Shapes first welcomed it
+holdsDB = Table("holds")            # server id -> {name, since, delete_after}: removed servers whose data is on hold
+welcomedDB = Table("welcomed")      # server id -> when Shapes first welcomed it
 _missing_polls = {}
 
 
@@ -5809,7 +5809,7 @@ def on_ready(me):
         print(f"could not set status: {e}")
     start_server_watch()
     start_verify_scheduler()
-    print(f"[SYSTEM] Logged in as {me.username}, watching {len(bot.servers())} servers. Storage: {__import__('cfstore').backend_summary()}")
+    print(f"[SYSTEM] Logged in as {me.username}, watching {len(bot.servers())} servers. Storage: {__import__('tables').backend_summary()}")
 
 
 # =====================================================================================
@@ -6138,7 +6138,7 @@ def api_overview():
                         "icon": _icon_of(s)})
     return jsonify({
         "ready": True, "me": {**dict(bot.me or {}), "avatar": _avatar_of(dict(bot.me or {}))}, "uptime_seconds": int(time.time() - started_at),
-        "storage": __import__("cfstore").backend_summary(), "commands": sorted(bot.commands), "servers": servers,
+        "storage": __import__("tables").backend_summary(), "commands": sorted(bot.commands), "servers": servers,
     })
 
 

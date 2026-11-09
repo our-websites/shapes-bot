@@ -20,8 +20,8 @@ _prompted = {}
 
 def init(m):
     bot, yshim, discord = m.bot, m.yshim, m.discord
-    from cfstore import CloudflareD1
-    stateDB = CloudflareD1("rverify")        # server id -> {"roles": {roblox role id: yapin role id}}
+    from tables import Table
+    stateDB = Table("rverify")        # server id -> {"roles": {roblox role id: yapin role id}}
     m.rverifyDB = stateDB
     def api(*a, **k):
         return m.shapes_api(*a, **k)
