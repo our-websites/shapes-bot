@@ -642,7 +642,24 @@ def register(m):
         d = m.shapes_api("GET", f"/internal/person/yapin/{current_user()['id']}")
         if not d or not d.get("success"):
             return jsonify({"accounts": [], "max": 50, "error": "The linking service isn't answering right now."})
-        return jsonify({"accounts": d.get("accounts", []), "max": d.get("max", 50)})
+        return jsonify({"accounts": d.get("accounts", []), "max": d.get("max", 50), "discord_id": d.get("discord_id") or None})
+
+    @app.route("/me/roblox/discord/link", methods=["POST"])
+    @login_required
+    def me_discord_link():
+        """One-time Discord OAuth2 link (the API proves the person owns the Discord account before attaching it)."""
+        if not _json_only():
+            return jsonify({"success": False}), 400
+        u = current_user()
+        d = m.shapes_api("POST", "/internal/discord/start", {"user_id": u["id"], "name": u.get("name", "")})
+        return jsonify(d or {"success": False, "data": "The linking service isn't answering right now."})
+
+    @app.route("/me/roblox/discord/unlink", methods=["POST"])
+    @login_required
+    def me_discord_unlink():
+        if not _json_only():
+            return jsonify({"success": False}), 400
+        return jsonify(m.shapes_api("DELETE", f"/internal/person/yapin/{current_user()['id']}/discord") or {"success": False})
 
     def _json_only():
         return request.is_json       # a cross-site form can't send JSON, so this doubles as a CSRF guard
