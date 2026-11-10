@@ -30,8 +30,7 @@ backend each store is on (`d1-tables`, `d1-kv` or `local-json`).
 
 ## Files
 
-- `main.py`: commands, events, web server
-- `yshim.py`: a small discord.py-shaped layer on top of `yapper.py` (embeds, buttons, command arguments)
+- `main.py`: commands, events, web server, and the small discord.py-shaped layer on top of `yapper.py` (embeds, buttons, command arguments; the section near the top, formerly `yshim.py`)
 - `tables.py`: Cloudflare D1 storage as real tables, with the same get / set / remove / items API
 - `migrate_pickledb.py`: one-time import of the old `.db` files
 

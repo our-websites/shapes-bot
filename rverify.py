@@ -19,7 +19,7 @@ _prompted = {}
 
 
 def init(m):
-    bot, yshim, discord = m.bot, m.yshim, m.discord
+    bot, discord = m.bot, m.discord
     from tables import Table
     stateDB = Table("rverify")        # server id -> {"roles": {roblox role id: yapin role id}}
     m.rverifyDB = stateDB
@@ -278,7 +278,7 @@ def init(m):
 
     # ------------------------------------------------------------------ commands
     def is_manager(i):
-        return bool(i.guild_id) and (m.is_bot_owner(str(i.user.id)) or yshim.is_admin(str(i.guild_id), str(i.user.id)))
+        return bool(i.guild_id) and (m.is_bot_owner(str(i.user.id)) or m.is_admin(str(i.guild_id), str(i.user.id)))
 
     async def say(i, text, ephemeral=True):
         await i.response.send_message(text, ephemeral=ephemeral)

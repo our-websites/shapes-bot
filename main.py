@@ -38,7 +38,6 @@ from flask_cors import CORS
 from openai import OpenAI
 from slpp import slpp as lua
 
-import yshim
 import automod
 
 
@@ -79,9 +78,1243 @@ import logging
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="[%(levelname)s] %(name)s: %(message)s")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)     # one line per web request drowned everything else
 from tables import Table
-from yshim import app_commands, commands, discord
+# ====================================================================================================
+# The discord.py-shaped layer (this used to be yshim.py): the small slice of the discord.py API that shapes-bot uses,
+# built on top of yapper.py.
+#
+# It exists so the ~40 command bodies could be ported with very few changes. What you get:
+#
+#   * Embed / Color      -> embed dicts for Yapper (see "Embeds" below)
+#   * ui.View / ui.Button / @ui.button -> Yapper buttons. Clicks are routed back to the callbacks.
+#   * Interaction        -> wraps a Yapper command message (or a button click). It offers the calls the commands
+#                           already make: response.send_message / defer / edit_message, followup.send,
+#                           edit_original_response.
+#   * tree.command(...)  -> registers a Yapper command and parses "/command some args" into the function's parameters.
+#
+# Things Yapper cannot do (so they do not exist here): select menus, context menus, ephemeral replies to
+# commands. Buttons support ephemeral replies; for commands they are posted normally.
+#
+# Embeds
+#   The Yapper docs were not readable while this was written, so embeds are sent as Discord-style dicts
+#   (title, description, url, color, fields, footer, thumbnail, image, author, timestamp). If Yapper rejects them
+#   (HTTP 400/422) the layer switches itself to a readable plain-text version for the rest of the run.
+#   YAPPER_EMBED_MODE=auto (default) | embed (never fall back) | text (never send embeds).
+#   If the format is different, fix Embed.to_dict() below, it is the only place that builds it.
+# ====================================================================================================
+import functools
+import inspect
+import itertools
+import random
+import secrets
+import traceback
+import types
 
-# Emoji used by the Discord version were custom server emoji. yshim.clean() turns them into plain text/emoji.
+from yapper import YapperError
+
+BOT = None
+EMBED_MODE = os.environ.get("YAPPER_EMBED_MODE", "auto").strip().lower()
+_embeds_ok = EMBED_MODE != "text"
+_uid = itertools.count(1)
+
+OWNER_USERNAMES = {x.strip().lower() for x in os.environ.get("OWNER_USERNAMES", "leandre,pj,lecanact,phis,shapes").split(",") if x.strip()}
+
+
+# --------------------------------------------------------------------------- text cleanup
+
+EMOJI_FALLBACK = {
+    "RobloxVerified": "☑️", "RobloxPremium": "💎", "RobloxAdmin": "🛡️", "VerifiedInstagram": "☑️",
+    "loading": "⏳",
+}
+SHORTCODES = {
+    ":x:": "❌", ":warning:": "⚠️", ":white_check_mark:": "✅", ":flag_gb:": "🇬🇧", ":hourglass:": "⏳",
+    ":thumbsup:": "👍", ":tada:": "🎉",
+}
+_CUSTOM_EMOJI = re.compile(r"<a?:(\w+):\d+>")
+_TS = re.compile(r"<t:(-?\d+)(?::([tTdDfFR]))?>")
+
+
+def _relative(dt):
+    secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+    future = secs < 0
+    secs = abs(secs)
+    for unit, size in (("year", 31536000), ("month", 2592000), ("day", 86400), ("hour", 3600), ("minute", 60)):
+        if secs >= size:
+            n = secs // size
+            label = f"{n} {unit}{'' if n == 1 else 's'}"
+            return f"in {label}" if future else f"{label} ago"
+    return "in a few seconds" if future else "just now"
+
+
+def fmt_unix(ts, style="f"):
+    """A readable replacement for Discord's <t:...> timestamps (Yapper does not render those)."""
+    dt = datetime.fromtimestamp(int(ts), timezone.utc)
+    if style == "R":
+        return _relative(dt)
+    day = f"{dt:%B} {dt.day}, {dt.year}"
+    return {
+        "t": f"{dt:%H:%M} UTC", "T": f"{dt:%H:%M:%S} UTC", "d": f"{dt:%m/%d/%Y}", "D": day,
+        "f": f"{day} {dt:%H:%M} UTC", "F": f"{dt:%A}, {day} {dt:%H:%M} UTC",
+    }.get(style, f"{day} {dt:%H:%M} UTC")
+
+
+def clean(text):
+    """Strip Discord-only syntax (custom emoji, <t:..> timestamps, :shortcodes:, '-#' small text)."""
+    if not isinstance(text, str) or not text:
+        return text
+    text = _CUSTOM_EMOJI.sub(lambda m: EMOJI_FALLBACK.get(m.group(1), ""), text)
+    text = _TS.sub(lambda m: fmt_unix(m.group(1), m.group(2) or "f"), text)
+    for code, char in SHORTCODES.items():
+        text = text.replace(code, char)
+    return re.sub(r"(?m)^-# ", "", text)
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+# --------------------------------------------------------------------------- Color and Embed
+
+class Color:
+    def __init__(self, value=0):
+        self.value = int(value)
+
+    def __int__(self):
+        return self.value
+
+    def __eq__(self, other):
+        return int(other) == self.value if isinstance(other, (int, Color)) else NotImplemented
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __repr__(self):
+        return f"Color(0x{self.value:06x})"
+
+    @classmethod
+    def random(cls):
+        return cls(random.randint(0, 0xFFFFFF))
+
+
+for _name, _val in {
+    "blue": 0x3498DB, "red": 0xE74C3C, "green": 0x2ECC71, "purple": 0x9B59B6, "orange": 0xE67E22,
+    "gold": 0xF1C40F, "teal": 0x1ABC9C, "dark_blue": 0x206694, "dark_red": 0x992D22, "dark_green": 0x1F8B4C,
+    "dark_purple": 0x71368A, "dark_orange": 0xA84300, "dark_gold": 0xC27C0E, "dark_teal": 0x11806A,
+    "yellow": 0xFEE75C, "dark_gray": 0x607D8B, "light_gray": 0x979C9F, "blurple": 0x5865F2,
+}.items():
+    setattr(Color, _name, classmethod(lambda cls, v=_val: cls(v)))
+
+
+class _Field:
+    def __init__(self, name, value, inline):
+        self.name, self.value, self.inline = name, value, inline
+
+
+class Embed:
+    def __init__(self, *, title=None, description=None, color=None, colour=None, url=None, timestamp=None, **_):
+        self.title = title
+        self.description = description
+        self.color = color if color is not None else colour
+        self.url = url
+        self.timestamp = timestamp
+        self.fields = []
+        self._footer = None
+        self._thumbnail = None
+        self._image = None
+        self._author = None
+
+    def add_field(self, *, name, value, inline=True):
+        self.fields.append(_Field(name, value, inline))
+        return self
+
+    def clear_fields(self):
+        self.fields.clear()
+        return self
+
+    def set_footer(self, *, text=None, icon_url=None):
+        self._footer = {"text": text, "icon_url": icon_url}
+        return self
+
+    def set_thumbnail(self, *, url=None):
+        self._thumbnail = url
+        return self
+
+    def set_image(self, *, url=None):
+        self._image = url
+        return self
+
+    def set_author(self, *, name, url=None, icon_url=None):
+        self._author = {"name": name, "url": url, "icon_url": icon_url}
+        return self
+
+    def _color_int(self):
+        if self.color is None:
+            return None
+        try:
+            return int(self.color)
+        except (TypeError, ValueError):
+            return None
+
+    def to_dict(self):
+        """The embed as Yapper receives it. Change this if Yapper's embed format differs."""
+        d = {}
+        if self.title:
+            d["title"] = clean(str(self.title))[:256]
+        if self.description:
+            d["description"] = clean(str(self.description))[:4096]
+        if self.url:
+            d["url"] = str(self.url)
+        color = self._color_int()
+        if color is not None:
+            d["color"] = color
+        if self.fields:
+            # Yapin allows 10 fields per embed (Discord allowed 25): the rest go into the description as lines.
+            rows = [{"name": (clean(str(f.name))[:256] or "\u200b"), "value": (clean(str(f.value))[:1024] or "\u200b"),
+                     "inline": bool(f.inline)} for f in self.fields]
+            d["fields"] = rows[:10]
+            if len(rows) > 10:
+                extra = "\n".join(f"**{r['name']}**: {r['value']}" for r in rows[10:])
+                d["description"] = ((d.get("description", "") + "\n\n") if d.get("description") else "") + extra
+                d["description"] = d["description"][:4096]
+        if self._footer and self._footer.get("text"):           # footer.text is required, an icon alone is invalid
+            d["footer"] = {k: (clean(v)[:2048] if k == "text" else v) for k, v in self._footer.items() if v}
+        if self._thumbnail:
+            d["thumbnail"] = {"url": self._thumbnail}
+        if self._image:
+            d["image"] = {"url": self._image}
+        if self._author and self._author.get("name"):
+            d["author"] = {k: (str(v)[:256] if k == "name" else v) for k, v in self._author.items() if v}
+        if isinstance(self.timestamp, datetime):
+            d["timestamp"] = self.timestamp.astimezone(timezone.utc).isoformat()
+        return d
+
+    def to_text(self):
+        """Readable plain-text version, used when embeds are unavailable."""
+        lines = []
+        if self.title:
+            title = clean(str(self.title))
+            lines.append(f"**{title}**" + (f"\n{self.url}" if self.url else ""))
+        if self.description:
+            lines.append(clean(str(self.description)))
+        for f in self.fields:
+            name, value = clean(str(f.name)).strip(), clean(str(f.value)).strip()
+            if name in ("", "​") and value in ("", "​"):
+                continue
+            lines.append(f"**{name}:** {value}" if "\n" not in value else f"**{name}**\n{value}")
+        for label, url in (("Image", self._image), ("Thumbnail", self._thumbnail)):
+            if url:
+                lines.append(url)
+        if self._footer and self._footer.get("text"):
+            lines.append(f"_{clean(self._footer['text'])}_")
+        return "\n".join(lines).strip()
+
+
+# --------------------------------------------------------------------------- users and permissions
+
+def _norm_id(v):
+    return int(v) if isinstance(v, str) and v.isdigit() else v
+
+
+_USER_CACHE = {}
+
+
+SITE_URL = (os.environ.get("YAPPER_SITE_URL") or "https://www.yapin.gg").rstrip("/")
+
+
+def _image_url(value):
+    """A usable absolute https image URL from whatever the API gave (string, {"url": ...}, relative path, //host)."""
+    if isinstance(value, dict):
+        value = _first(value, "url", "src", "href")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or value.lower() in ("null", "none", "undefined"):
+        return None
+    if value.startswith("//"):
+        value = "https:" + value
+    elif value.startswith("/"):
+        value = SITE_URL + value
+    elif value.startswith("http://"):
+        value = "https://" + value[len("http://"):]     # embeds and images only load over https
+    if not value.startswith("https://"):
+        return None
+    return value.replace(" ", "%20")
+
+
+FILES_URL = (os.environ.get("YAPPER_FILES_URL") or "https://files.yapper.website").rstrip("/")
+
+
+def _asset_url(value, bucket):
+    """Yapin gives pictures as a PATH, not a link (OpenAPI: avatar_path, banner_path, icon_path, attachment_path):
+    https://files.yapper.website/<bucket>/<path>, and a path starting with / lives on https://www.yapin.gg.
+    A full https link is passed through, so older/other fields that already hold a URL keep working."""
+    if isinstance(value, dict):
+        value = _first(value, "url", "path")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if value.startswith(("http://", "https://", "//")):
+        return _image_url(value)
+    if value.startswith("/"):
+        return SITE_URL + value.replace(" ", "%20")
+    return f"{FILES_URL}/{bucket}/{value.lstrip('/')}".replace(" ", "%20")
+
+
+def fetch_user(user_id):
+    """The raw Yapper user dict (cached for 5 minutes), or {}."""
+    key = str(user_id)
+    hit = _USER_CACHE.get(key)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    try:
+        data = dict(BOT.user(user_id))
+    except Exception:
+        data = {}
+    _USER_CACHE[key] = (time.time(), data)
+    return data
+
+
+def _first(data, *keys):
+    for k in keys:
+        v = data.get(k) if isinstance(data, dict) else None
+        if v not in (None, ""):
+            return v
+    return None
+
+
+class _Asset:
+    def __init__(self, url):
+        self.url = url
+
+    def with_size(self, _size):
+        return self
+
+    def __str__(self):
+        return self.url or ""
+
+
+class _Perms:
+    def __init__(self, administrator):
+        self.administrator = administrator
+
+
+class YUser:
+    """A Yapper user shaped like a discord.py user (id, name, display_name, mention, ...)."""
+
+    def __init__(self, id, name=None, display_name=None, data=None, bot=False):
+        self.id = _norm_id(id)
+        self.data = dict(data or {})
+        self.name = name or _first(self.data, "username", "name", "display_name") or str(id)
+        self.display_name = display_name or _first(self.data, "display_name", "displayName") or self.name
+        self._bot_hint = bool(bot)
+        self._guild_id = None
+
+    @property
+    def is_bot(self):
+        """Yapin's user object has no bot flag in its API description, so this looks at every sign: the message event's
+        author_bot, a "bot" badge, a bot object/flag (the bot's own /me has one), or a type of "bot"."""
+        d = self.data
+        kind = str(_first(d, "type", "kind", "account_type", "user_type") or "").lower()
+        badges = {str(b).lower().replace(" ", "_") for b in (d.get("badges") or []) if isinstance(b, str)}
+        flag = d.get("bot")
+        return bool(self._bot_hint or flag is True or isinstance(flag, dict) or d.get("is_bot") is True or d.get("isBot") is True
+                    or d.get("author_bot") is True or kind == "bot" or badges & {"bot", "verified_bot", "app"})
+
+    @property
+    def bot(self):
+        return self.is_bot
+
+    @classmethod
+    def from_api(cls, data):
+        return cls(_first(data, "id", "user_id") or "unknown", data=data)
+
+    @classmethod
+    def from_message(cls, msg):
+        uid = msg.get("author_id")
+        name = _first(msg, "author_username", "author_name", "username")
+        shown = _first(msg, "author_display_name", "display_name")
+        author = msg.get("author") if isinstance(msg.get("author"), dict) else None
+        data = dict(author or {})
+        if not (name or _first(data, "username", "name")):
+            data = fetch_user(uid)
+        return cls(uid, name=name, display_name=shown, data=data, bot=bool(msg.get("author_bot")))
+
+    @property
+    def mention(self):
+        return f"<@{self.id}>"
+
+    @property
+    def avatar_url(self):
+        return (_image_url(_first(self.data, "avatar_url", "avatarUrl", "image_url", "author_avatar_url"))
+                or _asset_url(_first(self.data, "avatar_path", "author_avatar_path", "avatar"), "avatars"))
+
+    @property
+    def banner_url(self):
+        return (_image_url(_first(self.data, "banner_url", "bannerUrl"))
+                or _asset_url(_first(self.data, "banner_path", "banner"), "banners"))
+
+    @property
+    def badges(self):
+        b = self.data.get("badges")
+        return [str(x) for x in b] if isinstance(b, (list, tuple)) else []
+
+    @property
+    def pronouns(self):
+        return _first(self.data, "pronouns")
+
+    @property
+    def display_avatar(self):
+        return _Asset(self.avatar_url)
+
+    @property
+    def created_at(self):
+        raw = _first(self.data, "created_at", "createdAt")
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")) if raw else None
+        except ValueError:
+            return None
+
+    @property
+    def guild_permissions(self):
+        gid = self._guild_id() if callable(self._guild_id) else self._guild_id
+        return _Perms(bool(gid) and is_admin(gid, self.id))
+
+    def __eq__(self, other):
+        return isinstance(other, YUser) and str(self.id) == str(other.id)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(str(self.id))
+
+    def __str__(self):
+        return str(self.name)
+
+
+class YRole:
+    def __init__(self, id, name=None, data=None):
+        self.id = _norm_id(id)
+        self.name = name or str(id)
+        self.data = dict(data or {})
+
+    @property
+    def mention(self):
+        return f"<@&{self.id}>"
+
+    def __str__(self):
+        return str(self.name)
+
+
+_MENTION = re.compile(r"^<@!?([^>\s]+)>$")
+_ROLE_MENTION = re.compile(r"^<@&([^>\s]+)>$")
+
+
+def resolve_user(token):
+    token = (token or "").strip()
+    m = _MENTION.match(token)
+    uid = m.group(1) if m else token.lstrip("@")
+    if not uid:
+        raise ValueError("no user given")
+    data = fetch_user(uid)
+    return YUser.from_api({**data, "id": data.get("id", uid)}) if data else YUser(uid)
+
+
+def resolve_role(token, server_id):
+    token = (token or "").strip()
+    m = _ROLE_MENTION.match(token)
+    wanted = (m.group(1) if m else token).lstrip("@#")
+    for r in BOT.roles(server_id):
+        if str(r.get("id")) == wanted or str(r.get("name", "")).lower() == wanted.lower():
+            return YRole(r.get("id"), r.get("name"), r)
+    raise ValueError(f"I couldn't find a role called {token}")
+
+
+_warned_owner = False
+
+
+def is_owner(user):
+    """Bot owners. Use OWNER_IDS (comma separated Yapper user ids). Usernames are only a fallback when no ids are
+    set, because a username can be claimed by someone else."""
+    global _warned_owner
+    if OWNER_IDS:
+        return str(user.id) in OWNER_IDS
+    if not _warned_owner:
+        _warned_owner = True
+        print("[shapes] OWNER_IDS is not set, so owner commands fall back to usernames. Set OWNER_IDS in .env.")
+    return str(user.name).lower() in OWNER_USERNAMES
+
+
+_ADMIN_PERMS = {"administrator", "admin", "manage_server", "manage_guild", "manage_community", "owner"}
+_STAFF_WORDS = re.compile(r"\b(admin(istrator)?s?|owner|co-?owner|moderators?|mods?|staff)\b", re.I)
+
+
+def _has_admin(blob):
+    """Does this member/role dict say it can manage the server? Yapin's field names aren't documented, so this accepts
+    booleans (is_admin, administrator…), permission lists/dicts of names, a Discord-style number (0x8 administrator,
+    0x20 manage server), and a plain rank like role: "admin"."""
+    if not isinstance(blob, dict):
+        return False
+    for key in ("is_admin", "admin", "administrator", "is_owner", "owner", "manage_server", "can_manage_server"):
+        if blob.get(key) is True:
+            return True
+    for key in ("role", "rank", "member_role", "server_role"):
+        v = blob.get(key)
+        if isinstance(v, str) and v.lower() in ("owner", "admin", "administrator", "co-owner", "coowner"):
+            return True
+    perms = blob.get("permissions", blob.get("perms"))
+    if isinstance(perms, (list, tuple, set)):
+        return any(str(p).lower().replace(" ", "_") in _ADMIN_PERMS for p in perms)
+    if isinstance(perms, dict):
+        return any(perms.get(k) for k in _ADMIN_PERMS)
+    if isinstance(perms, str) and perms.isdigit():
+        perms = int(perms)
+    if isinstance(perms, int) and not isinstance(perms, bool):
+        return bool(perms & 0x8 or perms & 0x20)
+    return False
+
+
+_denied_logged = set()
+
+
+def is_admin(server_id, user_id):
+    """Best effort: bot owners, the server owner, a member/role flagged as administrator, or a role named like
+    Admin / Owner / Moderator / Staff (only admins can create roles, so a name is a fair sign)."""
+    if str(user_id) in OWNER_IDS:
+        return True
+    try:
+        server = BOT.server(server_id)
+        owner_keys = ("owner_id", "ownerId", "owner", "created_by", "creator_id", "founder_id")
+        if any(str(server.get(k) if not isinstance(server.get(k), dict) else server[k].get("id")) == str(user_id) for k in owner_keys if server.get(k) is not None):
+            return True
+        member = BOT.member(server_id, user_id)
+        if _has_admin(member) or (isinstance(member.get("user"), dict) and _has_admin(member["user"])):
+            return True
+        role_ids = {str(r.get("id") if isinstance(r, dict) else r) for r in (member.get("roles") or member.get("role_ids") or [])}
+        for r in BOT.roles(server_id):
+            if str(r.get("id")) in role_ids and (_has_admin(r) or _STAFF_WORDS.search(str(r.get("name") or ""))):
+                return True
+        key = (str(server_id), str(user_id))
+        if key not in _denied_logged:     # once per person, to help work out which field Yapin uses
+            _denied_logged.add(key)
+            print(f"[admin check] {user_id} is not an admin in {server_id}. member fields: {sorted(member)}; "
+                  f"server fields: {sorted(server)}; roles: {[r.get('name') for r in BOT.roles(server_id) if str(r.get('id')) in role_ids]}")
+    except Exception as e:
+        print(f"[admin check] failed for {user_id} in {server_id}: {e}")
+    return False
+
+
+# --------------------------------------------------------------------------- sending
+
+_PRIVATE_TEXT = re.compile(r"^\s*(?::x:|❌|⚠️|:warning:|usage:|only\b|you (?:need|can't|cannot|haven't|do not|don't)|couldn't|could not|i couldn't|invalid|no such|not found|unknown|this command only)", re.I)
+_PRIVATE_TITLE = re.compile(r"\b(error|failed|not found|invalid|couldn't|could not|unable|no results|missing|denied|private)\b", re.I)
+
+
+def looks_private(content, embed):
+    """Replies that only matter to the person who ran the command (errors, usage hints, 'not found') are sent
+    privately, so a typo doesn't leave a pile of error messages in the channel."""
+    if isinstance(content, str) and _PRIVATE_TEXT.match(content):
+        return True
+    title = getattr(embed, "title", None) if embed is not None else None
+    return bool(title and _PRIVATE_TITLE.search(str(title)))
+
+
+class SentMessage:
+    def __init__(self, channel_id, data):
+        data = data or {}
+        self.id = data.get("id")
+        self.channel_id = channel_id
+        self.data = data
+
+    async def edit(self, *, content=None, embed=None, view=None):
+        _edit(self.channel_id, self.id, content, embed, view)
+        return self
+
+    async def delete(self):
+        BOT.delete(self.channel_id, self.id)
+
+
+_embed_failures = 0
+
+
+def _disable_embeds(err):
+    """One refused embed (too long, a bad link…) only costs that message its embed. If embeds keep being refused,
+    something is wrong with the format itself, so after a few in a row the shim stops trying them for this run."""
+    global _embeds_ok, _embed_failures
+    _embed_failures += 1
+    print(f"[shapes] Yapin refused an embed ({err}); sending that message as plain text.")
+    if _embed_failures >= 5 and _embeds_ok:
+        _embeds_ok = False
+        print("[shapes] Embeds were refused 5 times in a row, so the rest of this run uses plain text. "
+              "Set YAPPER_EMBED_MODE=text to skip the attempt, or fix Embed.to_dict() in main.py.")
+
+
+def _embed_worked():
+    global _embed_failures
+    _embed_failures = 0
+
+
+def _components(view):
+    if view is None:
+        return None
+    _touch(view)
+    return view.to_components()
+
+
+def _join(*parts):
+    return "\n".join(p for p in parts if p).strip()
+
+
+def _link_buttons(comps):
+    """[(label, url)] of every link button in a component tree."""
+    out = []
+    if isinstance(comps, dict):
+        if comps.get("url") and comps.get("label"):
+            out.append((str(comps["label"]), str(comps["url"])))
+        for v in comps.values():
+            if isinstance(v, (list, dict)):
+                out += _link_buttons(v)
+    elif isinstance(comps, list):
+        for v in comps:
+            out += _link_buttons(v)
+    return out
+
+
+def _send_msg(channel_id, text, embeds=None, comps=None, reply_to=None, ephemeral=False, via=None):
+    text = str(text or "")
+    if ephemeral and comps:
+        # Private messages may not show buttons (they can't be edited or looked up again), so every link button is also
+        # written out as a plain link underneath: the person always has a way to open it.
+        links = [f"[{label}]({url})" for label, url in _link_buttons(comps)]
+        if links:
+            text = _join(text, " · ".join(dict.fromkeys(links)))
+    if len(text) > 2000:       # Yapin's limit for message content
+        text = text[:1997] + "…"
+    if via is not None:        # the answer to a slash command: Yapin shows "<user> used /cmd" above it, and ephemeral is truly private
+        kind = "ephemeral" if ephemeral else "reply"
+        try:
+            out = via._answer(kind, text, embeds, comps)
+        except YapperError as e:
+            if not comps:
+                raise
+            print(f"[buttons] Yapin' refused the buttons on this {kind} answer ({e}); sending it without them")
+            out = via._answer(kind, text, embeds)       # the server refused buttons on this answer: send it without them
+        return out if isinstance(out, dict) else {}
+    if not ephemeral:
+        return BOT.send(channel_id, text, embeds=embeds, components=comps, reply_to=reply_to)
+    body = {"content": text, "ephemeral": True}   # only the person who ran the command sees it
+    if reply_to:
+        body["reply_to"] = reply_to
+    if embeds:
+        body["embeds"] = embeds
+    if comps:
+        body["components"] = comps
+    return BOT.api("POST", f"/channels/{channel_id}/messages", body).get("message") or {}
+
+
+def _post(channel_id, content=None, embed=None, view=None, reply_to=None, ephemeral=False, via=None):
+    comps = _components(view) or None
+    text = clean(content) if content else ""
+    if embed is not None and _embeds_ok:
+        try:
+            sent = SentMessage(channel_id, _send_msg(channel_id, text, [embed.to_dict()], comps, reply_to, ephemeral, via))
+            _embed_worked()
+            return sent
+        except YapperError as e:
+            if EMBED_MODE == "embed" or e.status not in (400, 422):
+                raise
+            _disable_embeds(e)
+    if embed is not None:
+        text = _join(text, embed.to_text())
+    return SentMessage(channel_id, _send_msg(channel_id, text or "\u200b", None, comps, reply_to, ephemeral, via))
+
+
+def _edit(channel_id, message_id, content=None, embed=None, view=None):
+    comps = _components(view)
+    text = clean(content) if content is not None else None
+    if embed is not None and _embeds_ok:
+        try:
+            return BOT.edit(channel_id, message_id, content=text if text is not None else "", embeds=[embed.to_dict()], components=comps)
+        except YapperError as e:
+            if EMBED_MODE == "embed" or e.status not in (400, 422):
+                raise
+            _disable_embeds(e)
+    if embed is not None:
+        return BOT.edit(channel_id, message_id, content=_join(text, embed.to_text()) or "​", embeds=[], components=comps)
+    return BOT.edit(channel_id, message_id, content=text, components=comps)
+
+
+def post(channel_id, content=None, embed=None, view=None, reply_to=None):
+    """Send a message from anywhere (events, background tasks). Returns a SentMessage."""
+    return _post(channel_id, content, embed, view, reply_to)
+
+
+# --------------------------------------------------------------------------- buttons and views
+
+class ButtonStyle:
+    primary = "primary"
+    secondary = "secondary"
+    success = "success"
+    danger = "danger"
+    link = "link"
+    blurple = "primary"
+    gray = "secondary"
+    grey = "secondary"
+    green = "success"
+    red = "danger"
+
+
+def _button_emoji(e):
+    return e if isinstance(e, str) and e and not e.startswith("<") else None
+
+
+class Button:
+    def __init__(self, *, style="secondary", label=None, disabled=False, custom_id=None, url=None, emoji=None, row=None):
+        self.style = style
+        self.label = label
+        self.disabled = disabled
+        self.custom_id = custom_id
+        self.url = url
+        self.emoji = emoji
+        self.callback = None
+        self.view = None
+        self._uid = next(_uid)
+
+    @property
+    def is_link(self):
+        return self.style == "link" or bool(self.url)
+
+    def _to_dict(self, view):
+        label = self.label or _button_emoji(self.emoji) or ("Open" if self.is_link else "•")
+        if self.is_link:
+            return yapper.link_button(str(label), self.url)
+        return yapper.btn(str(label), f"v:{view._vid}:{self._uid}", self.style or "secondary",
+                          emoji=_button_emoji(self.emoji), disabled=bool(self.disabled))
+
+
+def _button_deco(*, label=None, style="secondary", emoji=None, custom_id=None, disabled=False, row=None):
+    def deco(fn):
+        fn.__button__ = dict(label=label, style=style, emoji=emoji, custom_id=custom_id, disabled=disabled)
+        return fn
+    return deco
+
+
+VIEWS = {}
+_VIEWS_LOCK = threading.Lock()
+
+
+class View:
+    def __init__(self, *, timeout=180.0):
+        self.timeout = timeout
+        self.children = []
+        self.message = None
+        self._vid = secrets.token_hex(4)
+        self._deadline = None
+        self._finished = False
+        for cls in reversed(type(self).__mro__):
+            for attr in vars(cls).values():
+                spec = getattr(attr, "__button__", None)
+                if spec:
+                    btn = Button(**spec)
+                    btn.callback = functools.partial(self._call_decorated, attr, btn)
+                    self.add_item(btn)
+
+    async def _call_decorated(self, fn, button, interaction):
+        return await fn(self, interaction, button)
+
+    def add_item(self, item):
+        if len(self.children) >= 25:
+            raise ValueError("a view holds at most 25 buttons")
+        item.view = self
+        self.children.append(item)
+        return self
+
+    def remove_item(self, item):
+        if item in self.children:
+            self.children.remove(item)
+        return self
+
+    def clear_items(self):
+        self.children.clear()
+        return self
+
+    def stop(self):
+        self._finished = True
+        with _VIEWS_LOCK:
+            VIEWS.pop(self._vid, None)
+
+    def is_finished(self):
+        return self._finished
+
+    async def interaction_check(self, interaction):
+        return True
+
+    async def on_timeout(self):
+        pass
+
+    def to_components(self):
+        rows, cur = [], []
+        for item in self.children:
+            cur.append(item._to_dict(self))
+            if len(cur) == 5:
+                rows.append(yapper.row(*cur))
+                cur = []
+        if cur:
+            rows.append(yapper.row(*cur))
+        return rows
+
+
+def _touch(view):
+    """Remember a view that has clickable (non-link) buttons, so clicks can find it. Expires after its timeout."""
+    if not any(not c.is_link for c in view.children):
+        return
+    view._deadline = time.time() + (view.timeout if view.timeout else 6 * 3600)
+    with _VIEWS_LOCK:
+        VIEWS[view._vid] = view
+
+
+def _sweeper():
+    while True:
+        time.sleep(5)
+        now = time.time()
+        with _VIEWS_LOCK:
+            expired = [v for v in VIEWS.values() if v._deadline and v._deadline < now]
+            for v in expired:
+                VIEWS.pop(v._vid, None)
+        for v in expired:
+            if v.timeout is not None and not v._finished:
+                threading.Thread(target=_run_coro, args=(v.on_timeout(),), daemon=True).start()
+
+
+def _run_coro(coro):
+    try:
+        asyncio.run(coro)
+    except Exception:
+        traceback.print_exc()
+
+
+def _on_click(i):
+    threading.Thread(target=_click_thread, args=(i,), daemon=True, name="button-click").start()
+
+
+def _click_thread(i):
+    parts = str(i.custom_id or "").split(":")
+    view = VIEWS.get(parts[1]) if len(parts) == 3 else None
+    item = next((c for c in view.children if str(c._uid) == parts[2]), None) if view else None
+    if not item or not item.callback:
+        try:
+            i.ephemeral("That button has expired. Run the command again.")
+        except Exception:
+            pass
+        return
+    inter = Interaction(click=i)
+
+    async def run():
+        if await view.interaction_check(inter) is False:
+            return
+        _touch(view)
+        await item.callback(inter)
+
+    try:
+        asyncio.run(run())
+    except Exception as e:
+        traceback.print_exc()
+        if not inter._responded:
+            try:
+                i.ephemeral(f"Something went wrong: {e}")
+                inter._responded = True
+            except Exception:
+                pass
+    if not inter._responded:
+        try:
+            i.ack()
+        except Exception:
+            pass
+
+
+ui = types.SimpleNamespace(View=View, Button=Button, button=_button_deco)
+
+
+# --------------------------------------------------------------------------- private (ephemeral) replies
+
+# --------------------------------------------------------------------------- Interaction
+
+class _Response:
+    def __init__(self, inter):
+        self._i = inter
+
+    async def defer(self, *, ephemeral=False, **_):
+        self._i._defer(ephemeral)
+
+    async def send_message(self, content=None, *, embed=None, embeds=None, view=None, ephemeral=False, **_):
+        return self._i._send(content, embed, view, ephemeral)
+
+    async def edit_message(self, *, content=None, embed=None, view=None, **_):
+        return self._i._edit_message(content, embed, view)
+
+    async def send_modal(self, modal):
+        """Open a yapper.Modal for the person (only as the first answer). Comes back to bot.on_modal(<modal's custom_id>)."""
+        target = self._i._click if self._i._click is not None else self._i._msg
+        show = getattr(target, "show_modal", None)
+        if show is None:
+            raise NotImplementedError("This message can't open a form (it needs to be a slash command)")
+        self._i._responded = True
+        return show(modal)
+
+
+class _Followup:
+    def __init__(self, inter):
+        self._i = inter
+
+    async def send(self, content=None, *, embed=None, embeds=None, view=None, ephemeral=False, wait=False, **_):
+        return self._i._send(content, embed, view, ephemeral)
+
+
+class Interaction:
+    """One command call (a Yapper message) or one button click, with discord.py-style helpers."""
+
+    def __init__(self, msg=None, click=None):
+        self._msg = msg
+        self._click = click
+        self._original = None
+        self._responded = False
+        self._deferred = False
+        self._sent_first = False
+        self._answered = False          # the slash command's one interaction answer has been used
+        self._placeholder = None
+        self.created_at = datetime.now(timezone.utc)
+        if msg is not None:
+            self.channel_id = msg.get("channel_id")
+            self._guild_id = _first(msg, "server_id", "guild_id")
+            self.user = YUser.from_message(msg)
+        else:
+            self.channel_id = _first(click, "channel_id")
+            self._guild_id = _first(click, "server_id", "guild_id")
+            self.user = YUser(click.get("user_id"), name=click.get("username"))
+        self.user._guild_id = lambda: self.guild_id
+        self.response = _Response(self)
+        self.followup = _Followup(self)
+
+    @property
+    def guild_id(self):
+        if self._guild_id is None and self.channel_id is not None:
+            ch = BOT.channel(self.channel_id)
+            self._guild_id = _first(ch or {}, "server_id", "guild_id")
+        return self._guild_id
+
+    @property
+    def is_dm(self):
+        return self.guild_id is None
+
+    # -- internals used by response / followup
+    def _command_msg(self):
+        """The slash-command event to answer through (None for typed !commands and clicks, which are answered another way)."""
+        m = self._msg
+        return m if m is not None and callable(getattr(m, "_answer", None)) and m.get("interaction") else None
+
+    def _defer(self, ephemeral=False):
+        self._deferred = True
+        via = self._command_msg()
+        if via is not None and not self._answered and not ephemeral:
+            # a command must be answered quickly: put a placeholder up now, the real answer replaces it
+            try:
+                sent = _post(self.channel_id, "⏳ Working on it…", via=via)
+            except Exception:
+                traceback.print_exc()
+                return
+            self._answered = True
+            if sent.id:
+                self._placeholder = self._original = sent
+
+    def _send(self, content, embed, view, ephemeral):
+        self._responded = True
+        if not ephemeral and not self._sent_first and looks_private(content, embed):
+            ephemeral = True
+        if self._click is not None:
+            embeds = None
+            text = clean(content) if content else ""
+            if embed is not None:
+                if _embeds_ok:
+                    embeds = [embed.to_dict()]
+                else:
+                    text = _join(text, embed.to_text())
+            comps = _components(view) or None
+            if ephemeral:
+                answer = getattr(self._click, "_answer", None)
+                if answer is None:      # older yapper.py: private replies cannot carry components
+                    self._click.ephemeral(text, embeds)
+                    return None
+                try:
+                    answer("ephemeral", text, embeds, comps)
+                except YapperError:
+                    if not comps:
+                        raise
+                    answer("ephemeral", text, embeds)   # server refused buttons on a private reply
+            else:
+                self._click.reply(text, embeds, comps)
+            return None
+        if self._placeholder is not None and not ephemeral:
+            sent, self._placeholder = self._placeholder, None
+            _edit(self.channel_id, sent.id, content if content else "", embed, view)
+            self._sent_first = True
+            return sent
+        via = None if self._answered else self._command_msg()
+        # slash commands have no chat message to quote; typed !commands quote theirs once
+        reply_to = None if (self._sent_first or self._command_msg() is not None) else (self._msg or {}).get("id")
+        sent = _post(self.channel_id, content, embed, view, reply_to=reply_to, ephemeral=ephemeral, via=via)
+        if via is not None:
+            self._answered = True
+        self._sent_first = True
+        if self._original is None:
+            self._original = sent
+        return sent
+
+    def _edit_message(self, content, embed, view):
+        """Click only: change the message the button is on."""
+        self._responded = True
+        embeds = None
+        text = clean(content) if content is not None else None
+        if embed is not None:
+            if _embeds_ok:
+                embeds = [embed.to_dict()]
+                text = text if text is not None else ""
+            else:
+                text = _join(text, embed.to_text()) or "​"
+                embeds = []
+        self._click.update(text, embeds, _components(view))
+
+    async def edit_original_response(self, *, content=None, embed=None, view=None, **_):
+        if self._original is None:
+            return self._send(content, embed, view, False)
+        self._placeholder = None
+        await self._original.edit(content=content, embed=embed, view=view)
+        return self._original
+
+
+# --------------------------------------------------------------------------- commands
+
+class _Usage(Exception):
+    pass
+
+
+class _Spec:
+    def __init__(self, name, description, fn):
+        self.name = name
+        self.description = description
+        self.fn = fn
+        self.params = list(inspect.signature(fn).parameters.values())[1:]
+
+    @property
+    def usage(self):
+        bits = []
+        for p in self.params:
+            bits.append(f"[{p.name}]" if p.default is not inspect.Parameter.empty else f"<{p.name}>")
+        return f"/{self.name} " + " ".join(bits) if bits else f"/{self.name}"
+
+
+def _unwrap(ann):
+    if typing.get_origin(ann) is typing.Union:
+        args = [a for a in typing.get_args(ann) if a is not type(None)]
+        return args[0] if args else str
+    return ann
+
+
+def _convert(token, ann, inter):
+    ann = _unwrap(ann)
+    try:
+        if ann is int:
+            return int(token)
+        if ann is bool:
+            low = token.lower()
+            if low in ("true", "yes", "y", "on", "enable", "enabled", "1"):
+                return True
+            if low in ("false", "no", "n", "off", "disable", "disabled", "0"):
+                return False
+            raise ValueError(token)
+        if ann is YUser:
+            return resolve_user(token)
+        if ann is YRole:
+            return resolve_role(token, inter.guild_id)
+    except YapperError:
+        raise _Usage(f"I couldn't find {token}.")
+    except ValueError as e:
+        raise _Usage(str(e) if str(e) != token else f"{token} isn't valid here.")
+    return token.strip("\"'") if token[:1] in "\"'" and token[-1:] == token[:1] and len(token) > 1 else token
+
+
+def _next_token(rest):
+    m = re.match(r'\s*("([^"]*)"|\'([^\']*)\'|(\S+))\s*(.*)$', rest, re.S)
+    return (m.group(1), m.group(5)) if m else (rest, "")
+
+
+def _parse(spec, raw, inter):
+    rest = (raw or "").strip()
+    kwargs = {}
+    for idx, p in enumerate(spec.params):
+        ann = _unwrap(p.annotation)
+        last = idx == len(spec.params) - 1
+        if not rest:
+            if p.default is inspect.Parameter.empty:
+                raise _Usage(f"Usage: {spec.usage}")
+            continue
+        if last and ann in (str, inspect.Parameter.empty):
+            token, rest = rest, ""
+        else:
+            token, rest = _next_token(rest)
+        kwargs[p.name] = _convert(token, p.annotation, inter)
+    return kwargs
+
+
+COMMAND_HOOKS = []      # functions called as hook(command_name, msg) whenever someone runs a command (e.g. command logging)
+
+
+def _run_command(spec, msg):
+    inter = Interaction(msg=msg)
+    for hook in COMMAND_HOOKS:
+        try:
+            hook(spec.name, msg)
+        except Exception:
+            traceback.print_exc()
+    print(f"[cmd] /{spec.name} by @{msg.get('author_username') or msg.get('username') or msg.get('author_id')} "
+          f"in {msg.get('server_id') or 'a DM'}")
+    try:
+        kwargs = _parse(spec, msg.get("args"), inter)
+    except _Usage as e:
+        _safe_reply(inter, str(e) if str(e).startswith("Usage") else f"{e}\nUsage: {spec.usage}")
+        return
+    except Exception:
+        traceback.print_exc()
+        return
+    try:
+        asyncio.run(spec.fn(inter, **kwargs))
+    except Exception:
+        print(f"[cmd] /{spec.name} failed:")
+        traceback.print_exc()
+        _safe_reply(inter, f"⚠️ Something went wrong running /{spec.name}.")
+
+
+def _safe_reply(inter, text):
+    try:
+        inter._send(text, None, None, False)
+    except Exception:
+        traceback.print_exc()
+
+
+class Tree:
+    """Stands in for discord.py's command tree: @tree.command(name=..., description=...)."""
+
+    def __init__(self):
+        self.commands = {}
+        self.unsupported = []
+
+    def command(self, name=None, description=""):
+        def deco(fn):
+            spec = _Spec((name or fn.__name__).lower(), description, fn)
+            self.commands[spec.name] = spec
+            return fn
+        return deco
+
+    def context_menu(self, name=None):
+        """Right-click commands do not exist on Yapper. They are recorded so /help can say so."""
+        def deco(fn):
+            self.unsupported.append(name or fn.__name__)
+            return fn
+        return deco
+
+    def get_commands(self):
+        return list(self.commands.values())
+
+
+tree = Tree()
+
+
+def _pool_api(bot):
+    """Swap bot.api for a keep-alive version. The SDK opens a brand-new TLS connection for every call (urllib), which
+    is most of the delay on each reply and on /ping. One pooled requests.Session reuses the connection instead.
+    Same behaviour as the SDK: 429 / 503-busy are waited out and retried, other failures raise YapperError."""
+    import random
+    import requests
+    from requests.adapters import HTTPAdapter
+
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=32))
+    session.headers.update({"Authorization": f"Bot {bot.token}", "Content-Type": "application/json",
+                            "User-Agent": "shapes-bot (yapper.py)"})
+    original = bot.api
+
+    def api(method, path, body=None, timeout=40, retries=3):
+        try:
+            r = session.request(method, bot.base + path, data=None if body is None else json.dumps(body), timeout=timeout)
+        except requests.RequestException:
+            return original(method, path, body, timeout, retries)   # let the SDK's own fallback logic handle it
+        try:
+            data = r.json() if r.content else {}
+        except ValueError:
+            data = {}
+        if r.status_code < 400:
+            return data
+        err = data if isinstance(data, dict) else {}
+        busy = r.status_code == 503 and "retry_after" in err
+        wait = 0.0
+        if r.status_code == 429 or busy:
+            try:
+                wait = float(r.headers.get("Retry-After") or err.get("retry_after") or 0)
+            except (TypeError, ValueError):
+                wait = 0.0
+        if 0 < wait <= 60 and retries > 0:
+            time.sleep(wait * (1 + random.random() * 0.5))
+            return api(method, path, body, timeout, retries - 1)
+        if r.status_code in (502, 504):
+            return original(method, path, body, timeout, retries)
+        raise YapperError(err.get("error") or f"{method} {path} failed ({r.status_code})", r.status_code, wait or None)
+
+    bot.api = api
+
+
+def install(bot):
+    """Call once, after every command is defined and before bot.run()."""
+    global BOT
+    BOT = bot
+    try:
+        _pool_api(bot)
+    except Exception as e:
+        print(f"[shim] connection pooling unavailable, using the SDK's default: {e}")
+    for spec in tree.commands.values():
+        def handler(msg, spec=spec):
+            threading.Thread(target=_run_command, args=(spec, msg), daemon=True, name=f"cmd-{spec.name}").start()
+        bot.add_command(spec.name, spec.description, handler)
+    bot.button("v:")(_on_click)
+    threading.Thread(target=_sweeper, daemon=True, name="view-sweeper").start()
+
+
+# --------------------------------------------------------------------------- discord.py-shaped names
+# Lets the command bodies keep writing discord.Embed(...), discord.Color.blue(), app_commands.describe(...).
+
+def _noop_decorator(*_a, **_k):
+    def deco(fn):
+        return fn
+    return deco
+
+
+class _Choice:
+    def __init__(self, name, value):
+        self.name, self.value = name, value
+
+
+discord = types.SimpleNamespace(
+    Embed=Embed, Color=Color, Colour=Color, Interaction=Interaction, User=YUser, Member=YUser, Role=YRole,
+    ui=ui, ButtonStyle=ButtonStyle, utils=types.SimpleNamespace(utcnow=utcnow),
+)
+app_commands = types.SimpleNamespace(
+    allowed_installs=_noop_decorator, allowed_contexts=_noop_decorator, describe=_noop_decorator,
+    choices=_noop_decorator, default_permissions=_noop_decorator, Choice=_Choice,
+)
+commands = types.SimpleNamespace(bot_has_permissions=_noop_decorator)
+
+# ====================================================================================================
+# end of the discord.py-shaped layer
+# ====================================================================================================
+
+# Emoji used by the Discord version were custom server emoji. clean() turns them into plain text/emoji.
 Emojis = {
     "loading": "<a:loading:1416950730094542881>",
     "RobloxEmojis": {
@@ -128,8 +1361,8 @@ DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "
 
 # === Yapper bot ===
 bot = yapper.Bot()
-bot.tree = yshim.tree
-yshim.BOT = bot
+bot.tree = tree
+BOT = bot
 owner = "leandre"
 MainURL = "https://shapes-yapper.oriaxen.com"
 InviteURL = os.environ.get("YAPPER_INVITE_URL", "https://our-websites.github.io/shapes.lol/yapin?s=true")
@@ -221,7 +1454,7 @@ def IsInteger(s):
 
 
 def isotodiscordtimestamp(iso_timestamp_str: str, format_type: str = "D") -> str:
-    """ISO timestamp -> a <t:unix:style> marker. yshim.clean() turns the marker into readable text when sending."""
+    """ISO timestamp -> a <t:unix:style> marker. clean() turns the marker into readable text when sending."""
     try:
         if '.' in iso_timestamp_str and iso_timestamp_str.endswith('Z'):
             iso_timestamp_str = iso_timestamp_str.split('.')[0] + '+00:00'
@@ -260,7 +1493,7 @@ def server_of(channel_id, hint=None):
     key = str(channel_id)
     if key not in _chan_server:
         ch = bot.channel(channel_id)
-        _chan_server[key] = str(yshim._first(ch or {}, "server_id", "guild_id") or "") or None
+        _chan_server[key] = str(_first(ch or {}, "server_id", "guild_id") or "") or None
     return _chan_server[key]
 
 
@@ -284,7 +1517,7 @@ def total_members():
         return _member_cache["value"]
     total = 0
     for s in bot.servers():
-        n = yshim._first(s, "member_count", "members_count", "memberCount")
+        n = _first(s, "member_count", "members_count", "memberCount")
         if n is None:
             try:
                 n = len(bot.members(s.get("id")))
@@ -321,7 +1554,7 @@ def _counter_label(user_id):
     """'<@id> (@username)' for the last person to count, or None."""
     if not user_id:
         return None
-    name = yshim.fetch_user(user_id).get("username")
+    name = fetch_user(user_id).get("username")
     return f"<@{user_id}>" + (f" (@{name})" if name else "")
 
 
@@ -345,7 +1578,7 @@ async def need_admin(interaction):
     if interaction.is_dm:
         await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
         return False
-    if not yshim.is_admin(interaction.guild_id, interaction.user.id):
+    if not is_admin(interaction.guild_id, interaction.user.id):
         await interaction.response.send_message("You need to be a server admin to use this command.", ephemeral=True)
         return False
     return True
@@ -370,7 +1603,7 @@ async def servercount(interaction: discord.Interaction):
 @bot.tree.command(name="getdata", description="Owner only: /getdata <embedDB|countingDB|usersDB|autoroleDB|AI_DB> <key>")
 async def getdata(interaction: discord.Interaction, database: str, key: str):
     # Private reply (ephemeral): only the person who ran the command sees it.
-    if not yshim.is_owner(interaction.user):
+    if not is_owner(interaction.user):
         await interaction.response.send_message(":x: You don't have permission to use this command! :x:", ephemeral=True)
         return
     db = DATABASES.get(database)
@@ -464,7 +1697,7 @@ class ConfirmStop(discord.ui.View):
         super().__init__(timeout=60)
 
     async def interaction_check(self, click):
-        if not yshim.is_owner(click.user):
+        if not is_owner(click.user):
             await click.response.send_message("Only the bot owner can press this.", ephemeral=True)
             return False
         return True
@@ -486,7 +1719,7 @@ class ConfirmStop(discord.ui.View):
 
 @bot.tree.command(name="stop", description="Stop the bot (asks you to confirm).")
 async def stop(interaction: discord.Interaction):
-    if not yshim.is_owner(interaction.user):
+    if not is_owner(interaction.user):
         await interaction.response.send_message(f"Only {owner} can use this command.", ephemeral=True)
         return
     await interaction.response.send_message("⚠️ Stop the bot completely? It stays offline until someone starts it again.",
@@ -495,7 +1728,7 @@ async def stop(interaction: discord.Interaction):
 
 @bot.tree.command(name="restart", description="Restart the bot.")
 async def restart(interaction: discord.Interaction):
-    if not yshim.is_owner(interaction.user):
+    if not is_owner(interaction.user):
         await interaction.response.send_message(f"Only {owner} can use this command.", ephemeral=True)
         return
     await interaction.response.send_message(":white_check_mark: Restarting...", ephemeral=True)
@@ -528,7 +1761,7 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
         return
     sid = str(interaction.guild_id)
     data = {**default_counting(), **(countingDB.get(sid) or {})}
-    is_staff = yshim.is_admin(interaction.guild_id, interaction.user.id)
+    is_staff = is_admin(interaction.guild_id, interaction.user.id)
     if not is_staff:
         if not data.get("channel") and not data.get("enabled"):
             await interaction.response.send_message("Counting isn't set up in this server.", ephemeral=True)
@@ -695,9 +1928,9 @@ def _cmdlog_worker():
 
 
 def cmdlog_record(command, msg):
-    """yshim hook: runs for every command. Cheap when the server has no log; otherwise stores the line and queues the post."""
+    """Command hook: runs for every command. Cheap when the server has no log; otherwise stores the line and queues the post."""
     global _cmdlog_queue
-    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    sid = server_of(msg.get("channel_id"), _first(msg, "server_id", "guild_id"))
     if not sid or command == "cmdlog":
         return
     cfg = cmdlogcfgDB.get(str(sid))
@@ -716,7 +1949,7 @@ def cmdlog_record(command, msg):
     _cmdlog_queue.put((str(sid), row))
 
 
-yshim.COMMAND_HOOKS.append(cmdlog_record)
+COMMAND_HOOKS.append(cmdlog_record)
 
 
 def _cmdlog_status_embed(sid, color, note=None):
@@ -1005,11 +2238,11 @@ def global_cmdlog_rows(limit=200):
 
 
 def global_cmdlog_record(command, msg):
-    """yshim hook: every command in every server, for the bot owners. Off until an owner turns it on."""
+    """Command hook: every command in every server, for the bot owners. Off until an owner turns it on."""
     cfg = cmdlogcfgDB.get(BOTLOG_KEY)
     if not cfg or not cfg.get("enabled") or not cfg.get("commands") or command == "botlog":
         return
-    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    sid = server_of(msg.get("channel_id"), _first(msg, "server_id", "guild_id"))
     try:
         name = (dict(cached(f"server:{sid}", 30, lambda: bot.server(sid))).get("name") if sid else None) or ("a DM" if not sid else str(sid))
     except Exception:
@@ -1026,7 +2259,7 @@ def global_cmdlog_record(command, msg):
     botlog_post(embed)
 
 
-yshim.COMMAND_HOOKS.append(global_cmdlog_record)
+COMMAND_HOOKS.append(global_cmdlog_record)
 
 
 # Servers Shapes is in: noticed by comparing the list now with the one saved last time, so adds and removals are seen even
@@ -1169,8 +2402,8 @@ def welcome_server(sid, name, data=None):
     except Exception as e:
         print(f"[servers] couldn't list channels of {name or sid} to welcome them: {e}")
         channels = []
-    preferred = str(yshim._first(data, "system_channel_id", "default_channel_id", "general_channel_id") or "")
-    text = [c for c in channels if _is_text(str(yshim._first(c, "type", "kind") or "text").lower())]
+    preferred = str(_first(data, "system_channel_id", "default_channel_id", "general_channel_id") or "")
+    text = [c for c in channels if _is_text(str(_first(c, "type", "kind") or "text").lower())]
     text.sort(key=lambda c: (str(c.get("id")) != preferred, "general" not in str(c.get("name", "")).lower(), int(c.get("position") or 0)))
     for channel in text[:5]:                       # the first one it lets us post in
         try:
@@ -1179,7 +2412,7 @@ def welcome_server(sid, name, data=None):
             break
         except Exception as e:
             print(f"[servers] couldn't welcome #{channel.get('name')}: {e}")
-    owner = yshim._first(data, "owner_id", "ownerId")
+    owner = _first(data, "owner_id", "ownerId")
     owner = str(owner.get("id") if isinstance(owner, dict) else owner) if owner is not None else None
     if owner:
         try:
@@ -1196,7 +2429,7 @@ def welcome_server(sid, name, data=None):
 def _server_event(kind, sid, name, data, total):
     name = name or str(sid)
     fields = [{"name": "Server", "value": f"{name}\\n`{sid}`", "inline": True}]
-    members = yshim._first(data, "member_count", "members_count", "memberCount")
+    members = _first(data, "member_count", "members_count", "memberCount")
     if members is not None:
         fields.append({"name": "Members", "value": f"{members:,}" if isinstance(members, int) else str(members), "inline": True})
     owner = data.get("owner_id")
@@ -1320,7 +2553,7 @@ def autorole_applies(cfg, server_id, user_id):
     if not cfg["enabled"] or not cfg["role_id"] or str(user_id) in cfg["exempt_users"]:
         return False
     if not cfg["include_bots"]:
-        return not yshim.YUser(user_id, data=yshim.fetch_user(user_id) or {}).is_bot
+        return not YUser(user_id, data=fetch_user(user_id) or {}).is_bot
     return True
 
 
@@ -1359,7 +2592,7 @@ def _autorole_view(server_id, owner_id):
         button = discord.ui.Button(label=label, style=style)
 
         async def pressed(click):
-            if str(click.user.id) != str(owner_id) or not yshim.is_admin(server_id, click.user.id):
+            if str(click.user.id) != str(owner_id) or not is_admin(server_id, click.user.id):
                 await click.response.send_message("Only the admin who opened this panel can use it.", ephemeral=True)
                 return
             current = get_autorole(server_id)
@@ -1433,7 +2666,7 @@ async def autorole(interaction: discord.Interaction, action: str = "status", *, 
         elif token.lower().endswith((" true", " on")):
             token = token.rsplit(" ", 1)[0]
         try:
-            role = yshim.resolve_role(token.strip().strip('"'), sid)
+            role = resolve_role(token.strip().strip('"'), sid)
         except ValueError as e:
             return await say(f"{e}. Use `/autorole <role name>`, or `/autorole status` to see the settings.")
         cfg.update(role_id=str(role.id), enabled=enable)
@@ -1531,7 +2764,7 @@ def _exempt(sid, uid, channel_id, cfg):
     key = (sid, str(uid))
     hit = _admin_cache.get(key)
     if not hit or hit[0] < time.time():
-        hit = (time.time() + 120, bool(yshim.is_admin(sid, uid)))
+        hit = (time.time() + 120, bool(is_admin(sid, uid)))
         _admin_cache[key] = hit
     if hit[1]:
         return True
@@ -1548,7 +2781,7 @@ def handle_automod(msg):
     """Returns True when the message was removed (so other handlers, like counting, skip it)."""
     if msg.get("author_bot") or msg.get("command"):
         return False
-    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    sid = server_of(msg.get("channel_id"), _first(msg, "server_id", "guild_id"))
     if not sid:
         return False
     stored = automodDB.get(sid)
@@ -1638,7 +2871,7 @@ def _automod_view(sid, owner_id):
         button = discord.ui.Button(label=label, style=discord.ButtonStyle.success if on else discord.ButtonStyle.secondary)
 
         async def pressed(click):
-            if str(click.user.id) != str(owner_id) or not yshim.is_admin(sid, click.user.id):
+            if str(click.user.id) != str(owner_id) or not is_admin(sid, click.user.id):
                 await click.response.send_message("Only the admin who opened this panel can change it.", ephemeral=True)
                 return
             current = get_automod(sid)
@@ -1738,7 +2971,7 @@ async def automod_command(interaction: discord.Interaction, action: str = "statu
         cfg["exempt_channels"] = [c for c in cfg["exempt_channels"] if c != cid] if cid in cfg["exempt_channels"] else cfg["exempt_channels"] + [cid]
     elif action == "exemptrole":
         try:
-            role = yshim.resolve_role(a, sid) if a else None
+            role = resolve_role(a, sid) if a else None
         except ValueError:
             role = None
         if not role:
@@ -1799,16 +3032,16 @@ def server_summary(sid):
     roles = bot.roles(sid)
     members = cached(f"allmembers:{sid}", 120, lambda: _all_members(sid))
     bots = sum(1 for m in members if m["bot"])
-    total = int(yshim._first(info, "member_count", "members_count", "memberCount") or len(members))
-    texts = sum(1 for c in channels if str(yshim._first(c, "type", "kind") or "text") == "text")
-    categories = {str(yshim._first(c.get("category") or {}, "id") or c.get("category_id")) for c in channels if c.get("category") or c.get("category_id")}
-    owner = yshim._first(info, "owner_id", "ownerId")
+    total = int(_first(info, "member_count", "members_count", "memberCount") or len(members))
+    texts = sum(1 for c in channels if str(_first(c, "type", "kind") or "text") == "text")
+    categories = {str(_first(c.get("category") or {}, "id") or c.get("category_id")) for c in channels if c.get("category") or c.get("category_id")}
+    owner = _first(info, "owner_id", "ownerId")
     owner = str(owner.get("id") if isinstance(owner, dict) else owner) if owner is not None else None
     return {"id": sid, "name": info.get("name") or "Server", "description": str(info.get("description") or "")[:400], "owner": owner,
             "members": max(total, len(members)), "humans": len(members) - bots, "bots": bots,
             "channels": len(channels), "text": texts, "voice": len(channels) - texts, "categories": len(categories), "roles": len(roles),
             "extra": [(label, str(info[key])) for key, label in (("verified", "Verified"), ("public", "Public"), ("boost_level", "Boost level")) if info.get(key) not in (None, "", False)],
-            "icon": _icon_of(info), "banner": yshim._asset_url(yshim._first(info, "banner_path", "banner_url", "banner"), "banners")}
+            "icon": _icon_of(info), "banner": _asset_url(_first(info, "banner_path", "banner_url", "banner"), "banners")}
 
 
 # --- Last.fm: the Shapes API does all of it (linking, the account, the profile lookups); the bot just asks it ---
@@ -1860,7 +3093,7 @@ async def lastfm(interaction: discord.Interaction, action: str = "", user: disco
     if action.lower() not in ("", "link", "unlink") and user is None:
         # "/lastfm @someone" (or a bare user ID) lands in the first slot, so read it as the person to show
         try:
-            user = yshim.resolve_user(action)
+            user = resolve_user(action)
         except ValueError:
             user = None
         if user is None:
@@ -1907,11 +3140,11 @@ async def lastfm(interaction: discord.Interaction, action: str = "", user: disco
 def _profile_target(interaction, user):
     """The user to look up. Fills in the full profile from Yapper so avatar/banner/bio are available."""
     target = user or interaction.user
-    data = yshim.fetch_user(target.id)
+    data = fetch_user(target.id)
     if data:
         target.data = {**target.data, **{k: v for k, v in data.items() if v not in (None, "")}}   # the full profile wins
-        target.name = yshim._first(data, "username", "name") or target.name
-        target.display_name = yshim._first(data, "display_name", "displayName") or target.display_name
+        target.name = _first(data, "username", "name") or target.name
+        target.display_name = _first(data, "display_name", "displayName") or target.display_name
     return target
 
 
@@ -1939,7 +3172,7 @@ async def yapinuser(interaction: discord.Interaction, user: discord.User = None)
     target = _profile_target(interaction, user)
     handle = f"@{target.name}"
     embed = discord.Embed(title=target.display_name + ("  ·  🤖 Bot" if target.is_bot else ""), color=ecolor(interaction.user.id))
-    bio = yshim._first(target.data, "bio", "about", "description")
+    bio = _first(target.data, "bio", "about", "description")
     lines = [f"{handle}" + (f" · {target.pronouns}" if target.pronouns else "")]
     if bio:
         lines.append("> " + str(bio).strip().replace("\n", "\n> ")[:400])
@@ -2087,7 +3320,7 @@ async def roblox2yapin(interaction: discord.Interaction, user: str):
         await interaction.edit_original_response(embed=discord.Embed(
             title=f"{Username} has hidden their Yapin link", color=discord.Color.red()))
         return
-    person = await asyncio.to_thread(yshim.fetch_user, yapin_id)
+    person = await asyncio.to_thread(fetch_user, yapin_id)
     handle = f"@{person.get('username')}" if person.get("username") else yapin_id
     embed = discord.Embed(title=f"Yapin user for {Username}", description=f"**{person.get('display_name') or handle}** ({handle})", color=color)
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
@@ -2795,7 +4028,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
             Discord = None
             found = await asyncio.to_thread(yapin_of_roblox, UserID)
             if found and found[0] and not found[1]:
-                person = await asyncio.to_thread(yshim.fetch_user, found[0])
+                person = await asyncio.to_thread(fetch_user, found[0])
                 Discord = f"@{person['username']}" if person.get("username") else found[0]
 
             profileurl = f"https://www.roblox.com/users/{UserID}/profile"
@@ -5687,7 +6920,7 @@ def parse_count(text):
 def handle_counting(msg):
     if msg.get("author_bot") or msg.get("command"):
         return
-    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    sid = server_of(msg.get("channel_id"), _first(msg, "server_id", "guild_id"))
     if not sid:
         return
     data = countingDB.get(sid)
@@ -5743,7 +6976,7 @@ def handle_counting(msg):
 
     react("wrong")
     data["highestnumber"] = max(highest, number)
-    name = yshim.fetch_user(author).get("username")
+    name = fetch_user(author).get("username")
     who = f"{mention} (@{name})" if name else mention
     if number == 0:
         bot.send(channel, f"{emo['wrong']} {who} ruined it at 1, the next number is 1 (again)")
@@ -5794,9 +7027,9 @@ def on_member_join(ev):
 @bot.on("test")
 def on_test(ev):
     """The "Send test event" button in Yapin's developer settings."""
-    note = yshim._first(dict(ev), "message", "note")
+    note = _first(dict(ev), "message", "note")
     print(f"[test] ✅ Test event received{f': {note}' if note else ''}. The bot is connected and getting events. "
-          f"(event id {yshim._first(dict(ev), 'id') or '?'}, bot ready: {bot_ready})")
+          f"(event id {_first(dict(ev), 'id') or '?'}, bot ready: {bot_ready})")
 
 
 @bot.on("ready")
@@ -5920,7 +7153,7 @@ def admin_required(f):
 
 
 def _name(d):
-    return yshim._first(d, "username", "display_name", "name") or str(yshim._first(d, "id", "user_id") or "?")
+    return _first(d, "username", "display_name", "name") or str(_first(d, "id", "user_id") or "?")
 
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -6033,7 +7266,7 @@ def admin_logout():
 def _server_rows():
     rows = []
     for s in cached("servers", 15, bot.servers):
-        n = yshim._first(s, "member_count", "members_count", "memberCount")
+        n = _first(s, "member_count", "members_count", "memberCount")
         rows.append({"id": s.get("id"), "name": s.get("name") or str(s.get("id")), "members": n if n is not None else ""})
     return rows
 
@@ -6048,13 +7281,13 @@ def dashboard():
 
 def _avatar_of(d):
     """Profile picture link: Yapin sends a path (avatar_path), the bot's own /me sends a full avatar_url."""
-    return (yshim._image_url(yshim._first(d, "avatar_url", "avatarUrl", "image_url", "author_avatar_url"))
-            or yshim._asset_url(yshim._first(d, "avatar_path", "author_avatar_path", "avatar"), "avatars"))
+    return (_image_url(_first(d, "avatar_url", "avatarUrl", "image_url", "author_avatar_url"))
+            or _asset_url(_first(d, "avatar_path", "author_avatar_path", "avatar"), "avatars"))
 
 
 def _icon_of(d):
-    return (yshim._image_url(yshim._first(d, "icon_url", "iconUrl", "image_url"))
-            or yshim._asset_url(yshim._first(d, "icon_path", "icon"), "icons"))
+    return (_image_url(_first(d, "icon_url", "iconUrl", "image_url"))
+            or _asset_url(_first(d, "icon_path", "icon"), "icons"))
 
 
 _AVATAR_COLORS = ("#6366f1", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#3b82f6")
@@ -6080,14 +7313,14 @@ def _person(d):
     """A flat, UI-friendly version of a member/user dict (some APIs nest the user under "user")."""
     inner = d.get("user") if isinstance(d.get("user"), dict) else {}
     merged = {**inner, **{k: v for k, v in d.items() if k != "user"}}
-    uid = yshim._first(merged, "user_id", "id")
+    uid = _first(merged, "user_id", "id")
     return {
-        "id": str(uid), "name": yshim._first(merged, "username", "name") or str(uid),
-        "display": yshim._first(merged, "nickname", "display_name", "displayName", "nick") or yshim._first(merged, "username", "name") or str(uid),
-        "avatar": _avatar_of(merged) or default_avatar_url(uid, yshim._first(merged, "nickname", "display_name", "username", "name")),
-        "bot": yshim.YUser(uid, data=merged).is_bot or str(uid) == str((bot.me or {}).get("id")),
+        "id": str(uid), "name": _first(merged, "username", "name") or str(uid),
+        "display": _first(merged, "nickname", "display_name", "displayName", "nick") or _first(merged, "username", "name") or str(uid),
+        "avatar": _avatar_of(merged) or default_avatar_url(uid, _first(merged, "nickname", "display_name", "username", "name")),
+        "bot": YUser(uid, data=merged).is_bot or str(uid) == str((bot.me or {}).get("id")),
         "roles": [str(r.get("id") if isinstance(r, dict) else r) for r in (merged.get("roles") or merged.get("role_ids") or [])],
-        "joined": yshim._first(merged, "joined_at", "joinedAt", "created_at"),
+        "joined": _first(merged, "joined_at", "joinedAt", "created_at"),
     }
 
 
@@ -6098,10 +7331,10 @@ def _group_channels(channels):
     for c in channels:
         c = dict(c)
         row = {"id": str(c.get("id")), "name": c.get("name") or str(c.get("id")),
-               "type": str(yshim._first(c, "type", "kind") or "text").lower(), "topic": c.get("topic") or "",
+               "type": str(_first(c, "type", "kind") or "text").lower(), "topic": c.get("topic") or "",
                "private": bool(c.get("private")), "position": c.get("position") or 0}
         cat = c.get("category") if isinstance(c.get("category"), dict) else None
-        cid = yshim._first(cat or {}, "id") or c.get("category_id")
+        cid = _first(cat or {}, "id") or c.get("category_id")
         if cid is None:
             loose.append(row)
             continue
@@ -6133,7 +7366,7 @@ def api_overview():
         return jsonify({"ready": False}), 503
     servers = []
     for s in cached("servers", 15, bot.servers):
-        n = yshim._first(s, "member_count", "members_count", "memberCount")
+        n = _first(s, "member_count", "members_count", "memberCount")
         servers.append({**dict(s), "id": str(s.get("id")), "name": s.get("name") or str(s.get("id")), "member_count": n,
                         "icon": _icon_of(s)})
     return jsonify({
@@ -6151,8 +7384,8 @@ def api_server(server_id):
         info = cached(f"server:{server_id}", 30, lambda: bot.server(server_id))
         return jsonify({
             "server": dict(info), "categories": _group_channels(channels),
-            "roles": sorted(({"id": str(r.get("id")), "name": r.get("name") or "role", "color": yshim._first(r, "color", "colour"),
-                              "position": r.get("position") or 0, "admin": yshim._has_admin(r)} for r in roles),
+            "roles": sorted(({"id": str(r.get("id")), "name": r.get("name") or "role", "color": _first(r, "color", "colour"),
+                              "position": r.get("position") or 0, "admin": _has_admin(r)} for r in roles),
                             key=lambda r: -int(r["position"] or 0)),
         })
     except yapper.YapperError as e:
@@ -6175,29 +7408,29 @@ def _message_row(m):
     m = dict(m)
     author = dict(m.get("author")) if isinstance(m.get("author"), dict) else {}
     if not author and m.get("author_id"):
-        author = dict(yshim.fetch_user(m.get("author_id")) or {})      # messages only carry author_id; profiles are cached
+        author = dict(fetch_user(m.get("author_id")) or {})      # messages only carry author_id; profiles are cached
     person = _person({**author, "id": author.get("id") or m.get("author_id")}) if (author or m.get("author_id")) else {"id": "", "name": "?", "display": "?", "avatar": None, "bot": False}
-    name = person["display"] if author else (yshim._first(m, "author_display_name", "author_username", "author_name") or person["display"])
+    name = person["display"] if author else (_first(m, "author_display_name", "author_username", "author_name") or person["display"])
     images = []
     for e in (m.get("embeds") or []):
         if isinstance(e, dict):
             for key in ("image", "thumbnail"):
                 u = e.get(key)
-                u = yshim._image_url(u.get("url") if isinstance(u, dict) else u)
+                u = _image_url(u.get("url") if isinstance(u, dict) else u)
                 if u:
                     images.append(u)
     for att in (m.get("attachments") or m.get("files") or []):
         if isinstance(att, dict):
-            u = yshim._image_url(yshim._first(att, "url", "proxy_url", "src"))
+            u = _image_url(_first(att, "url", "proxy_url", "src"))
             ctype = str(att.get("content_type") or att.get("type") or "")
             if u and (ctype.startswith("image") or re.search(r"\.(png|jpe?g|gif|webp|avif)(\?|$)", u, re.I)):
                 images.append(u)
-    pic = yshim._asset_url(m.get("attachment_path"), "attachments")
+    pic = _asset_url(m.get("attachment_path"), "attachments")
     if pic and re.search(r"\.(png|jpe?g|gif|webp|avif)(\?|$)", pic, re.I):
         images.append(pic)
     elif pic:
         m["content"] = (m.get("content") or "") + ("\n" if m.get("content") else "") + pic      # shows as a link
-    return {"id": str(m.get("id")), "author": name, "author_id": person["id"], "avatar": person["avatar"] or yshim._image_url(m.get("author_avatar_url")),
+    return {"id": str(m.get("id")), "author": name, "author_id": person["id"], "avatar": person["avatar"] or _image_url(m.get("author_avatar_url")),
             "bot": bool(m.get("author_bot")) or person["bot"], "content": m.get("content") or "", "created_at": m.get("created_at"),
             "embeds": [{"title": e.get("title"), "description": e.get("description"), "url": e.get("url")}
                        for e in (m.get("embeds") or []) if isinstance(e, dict)], "images": images[:6]}
@@ -6330,7 +7563,7 @@ def _valid_image(url):
     url = (url or "").strip()
     if not url:
         return None
-    clean = yshim._image_url(url)
+    clean = _image_url(url)
     if not clean:
         raise ValueError("The image link must be a public https address.")
     return clean
@@ -6365,11 +7598,11 @@ def track_dm(msg):
     """Remember who has messaged the bot so their DM shows up in the dashboard."""
     if msg.get("author_bot"):
         return
-    sid = server_of(msg.get("channel_id"), yshim._first(msg, "server_id", "guild_id"))
+    sid = server_of(msg.get("channel_id"), _first(msg, "server_id", "guild_id"))
     if sid:
         return
     uid = str(msg.get("author_id"))
-    name = yshim._first(msg, "author_display_name", "author_username", "author_name") or uid
+    name = _first(msg, "author_display_name", "author_username", "author_name") or uid
     dmDB.set(uid, {"user_id": uid, "channel_id": str(msg.get("channel_id")), "name": name,
                    "last": int(time.time()), "preview": str(msg.get("content") or "")[:80]})
 
@@ -6704,7 +7937,7 @@ def _entity(kind, entity_id):
         info = dict(cached(f"server:{entity_id}", 30, lambda: bot.server(entity_id)))
         return {"kind": "server", "id": entity_id, "name": info.get("name") or entity_id,
                 "avatar": _icon_of(info),
-                "note": f"{yshim._first(info, 'member_count', 'members_count', 'memberCount') or '?'} members"}
+                "note": f"{_first(info, 'member_count', 'members_count', 'memberCount') or '?'} members"}
     p = _person(dict(bot.user(entity_id)))
     return {"kind": "user", "id": entity_id, "name": p["display"], "avatar": p["avatar"], "note": f"@{p['name']}" + (" · bot" if p["bot"] else "")}
 
@@ -6803,7 +8036,7 @@ def leaderboard_rows():
 @app.route("/count/commands", methods=["GET"])
 @_public(300)
 def get_command_count():
-    return {"Commands": str(len(yshim.tree.commands))}, 200
+    return {"Commands": str(len(tree.commands))}, 200
 
 
 @app.route("/botinfo", methods=["GET"])
@@ -6864,7 +8097,7 @@ def mutualservers():
             sid = s.get("id")
             try:
                 entry = {"name": s.get("name"), "iconurl": _icon_of(s),
-                         "owner": yshim._first(s, "owner_id", "ownerId", "owner"), "channels": len(bot.channels(sid)),
+                         "owner": _first(s, "owner_id", "ownerId", "owner"), "channels": len(bot.channels(sid)),
                          "roles": len(bot.roles(sid)), "members": [], "bots": []}
                 for p in _all_members(sid):
                     (entry["bots"] if p["bot"] else entry["members"]).append({"name": p["name"], "id": p["id"]})
@@ -6907,6 +8140,6 @@ def run_web():
 
 
 if __name__ == "__main__":
-    yshim.install(bot)
+    install(bot)
     threading.Thread(target=run_web, daemon=True, name="web").start()
     bot.run()

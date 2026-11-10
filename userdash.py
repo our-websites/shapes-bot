@@ -31,7 +31,7 @@ PAGE = 10
 
 def register(m):
     """Attach the routes to m.app. `m` is the main module (bot, caches, databases, validators)."""
-    app, yshim, bot = m.app, m.yshim, m.bot
+    app, bot = m.app, m.bot
     app.jinja_loader = jinja2.ChoiceLoader([app.jinja_loader, jinja2.FileSystemLoader(os.path.join(SITE_DIR, "templates"))])
     app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
     app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
@@ -49,7 +49,7 @@ def register(m):
 
     def commands():
         """The command list: it only changes when the bot restarts, so it is built once per five minutes at most."""
-        return m.cached("commands", 300, lambda: [{"name": n, "description": s.description, "usage": s.usage} for n, s in sorted(yshim.tree.commands.items())])
+        return m.cached("commands", 300, lambda: [{"name": n, "description": s.description, "usage": s.usage} for n, s in sorted(m.tree.commands.items())])
 
     def paged(items):
         pages = max(1, -(-len(items) // PAGE))
@@ -105,7 +105,7 @@ def register(m):
             items, page, pages = paged(commands())
             return render_template("commands.html", items=items, page=page, pages=pages)
         out = {c["name"]: {"name": c["name"], "description": c["description"], "usage": c["usage"],
-                           "options": [p.name for p in yshim.tree.commands[c["name"]].params], "type": "slash_command"} for c in commands()}
+                           "options": [p.name for p in m.tree.commands[c["name"]].params], "type": "slash_command"} for c in commands()}
         return jsonify({"Commands": out, "success": True}), 200
 
     # ------------------------------------------------------------------ who the person is
@@ -239,11 +239,11 @@ def register(m):
 
     def _sign_in(info):
         uid = str(info["id"])
-        person = m._person(dict(yshim.fetch_user(uid))) if m.bot_ready else {}
+        person = m._person(dict(m.fetch_user(uid))) if m.bot_ready else {}
         session.clear()
         session["yuser"] = {"id": uid, "name": info.get("username") or person.get("name") or uid,
                             "display": info.get("display_name") or person.get("display") or info.get("username") or uid,
-                            "avatar": person.get("avatar") or yshim._asset_url(info.get("avatar_path"), "avatars") or m.default_avatar_url(uid, info.get("username") or uid)}
+                            "avatar": person.get("avatar") or m._asset_url(info.get("avatar_path"), "avatars") or m.default_avatar_url(uid, info.get("username") or uid)}
         session.permanent = True
         return redirect("/dashboard")
 
@@ -326,12 +326,12 @@ def register(m):
             owner = server.get("owner_id")
             if owner is not None and str(owner.get("id") if isinstance(owner, dict) else owner) == str(uid):
                 return True, True
-            if yshim._has_admin(member) or (isinstance(member.get("user"), dict) and yshim._has_admin(member["user"])):
+            if m._has_admin(member) or (isinstance(member.get("user"), dict) and m._has_admin(member["user"])):
                 return True, True
             mine = {str(r.get("id") if isinstance(r, dict) else r) for r in (member.get("roles") or member.get("role_ids") or [])}
             if mine:
                 for r in m.cached(f"roles:{sid}", 60, lambda: [dict(x) for x in bot.roles(sid)]):
-                    if str(r.get("id")) in mine and yshim._has_admin(r):
+                    if str(r.get("id")) in mine and m._has_admin(r):
                         return True, True
         except Exception as e:
             print(f"[dashboard] permission check failed for {uid} in {sid}: {e}")
@@ -352,7 +352,7 @@ def register(m):
             if not member:
                 return None
             return {"id": sid, "name": s.get("name") or sid, "icon": m._icon_of(s),
-                    "members": yshim._first(s, "member_count", "members_count", "memberCount"),
+                    "members": m._first(s, "member_count", "members_count", "memberCount"),
                     "manage": manage, "staff_access": manage and m.is_staff_user(uid), "counting": counting_brief(sid)}
         with ThreadPoolExecutor(max_workers=8) as pool:
             rows = [r for r in pool.map(one, servers) if r]
@@ -378,13 +378,13 @@ def register(m):
         server = dict(m.cached(f"server:{sid}", 30, lambda: bot.server(sid)))
         groups = m._group_channels([dict(c) for c in bot.channels(sid)])
         text = [{"id": ch["id"], "name": ch["name"], "category": g["name"]} for g in groups for ch in g["channels"] if m._is_text(ch["type"])]
-        roles = [{"id": str(r.get("id")), "name": r.get("name") or str(r.get("id")), "admin": bool(yshim._has_admin(dict(r))), "color": r.get("color") if isinstance(r.get("color"), str) else None}
+        roles = [{"id": str(r.get("id")), "name": r.get("name") or str(r.get("id")), "admin": bool(m._has_admin(dict(r))), "color": r.get("color") if isinstance(r.get("color"), str) else None}
                  for r in bot.roles(sid) if str(r.get("name", "")).lower() != "@everyone"]
         counting = {**m.default_counting(), **(m.countingDB.get(sid) or {})}
         counting["emojis"] = m.counting_emojis(counting)
-        counting["last_name"] = (yshim.fetch_user(counting["lastcounter"]).get("username") if counting.get("lastcounter") else None)
+        counting["last_name"] = (m.fetch_user(counting["lastcounter"]).get("username") if counting.get("lastcounter") else None)
         return {"server": {"id": sid, "name": server.get("name") or sid, "icon": m._icon_of(server),
-                           "members": yshim._first(server, "member_count", "members_count", "memberCount")},
+                           "members": m._first(server, "member_count", "members_count", "memberCount")},
                 "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
                 "owner": m.is_server_owner(sid, current_user()["id"]) or m.is_bot_owner(current_user()["id"]),
                 "staff": m.is_staff_user(current_user()["id"]), "bot_owner": m.is_bot_owner(current_user()["id"])}
@@ -496,7 +496,7 @@ def register(m):
         return len(recent) > limit
 
     def text_channels(sid):
-        return {str(c.get("id")): c.get("name") for c in bot.channels(sid) if m._is_text(str(yshim._first(c, "type", "kind") or "text").lower())}
+        return {str(c.get("id")): c.get("name") for c in bot.channels(sid) if m._is_text(str(m._first(c, "type", "kind") or "text").lower())}
 
     @app.route("/me/servers/<sid>/say", methods=["POST"])
     @login_required
@@ -610,7 +610,7 @@ def register(m):
             return jsonify({"error": "That role isn't in this server."}), 400
         me = current_user()["id"]
         powerful = m.is_server_owner(sid, me) or m.is_staff_user(me)
-        if not powerful and yshim._has_admin(role):
+        if not powerful and m._has_admin(role):
             return jsonify({"error": "Only the server owner can hand out roles that manage the server."}), 403
         if str(role.get("name", "")).lower() == "@everyone" or role.get("is_default") is True:
             return jsonify({"error": "Everyone already has that role."}), 400
