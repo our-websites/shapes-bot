@@ -22,7 +22,10 @@
 <p class="sub">Link up to <span id="max">50</span> Roblox accounts by signing in with Roblox (OAuth2, nothing goes in your bio). Pick one to verify you automatically in servers that use Roblox verification.</p>
 <div id="status" class="note"></div><div id="list"></div>
 <p><button id="link">Link a Roblox account</button></p>
-<p class="note">Discord uses the same accounts: sign up with Yapin’ first, then link your Discord account to it. Whenever you verify or are auto-verified, you get a message with the account that was used.</p>
+<h2 style="font-size:18px;margin:28px 0 4px">Discord</h2>
+<p class="sub">Link your Discord account to this Yapin’ account and the same Roblox accounts work in Discord servers too. You sign in with Discord to prove it’s yours; only your Discord ID is saved.</p>
+<div id="discord"></div>
+<p class="note">Whenever you verify or are auto-verified, you get a message with the account that was used.</p>
 </main><script>
 const $ = s => document.querySelector(s), list = $('#list'), status = $('#status');
 const post = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json());
@@ -30,6 +33,20 @@ const el = (t, a = {}, ...k) => { const e = document.createElement(t); for (cons
 async function load() {
   const r = await fetch('/me/roblox'); if (r.status === 401) { location.href = '/dashboard/login'; return; }
   const d = await r.json(); list.replaceChildren(); $('#max').textContent = d.max || 50;
+  const dc = $('#discord'); dc.replaceChildren();
+  if (d.discord_id) {
+    const un = el('button', { class: 'danger' }, 'Unlink');
+    un.onclick = async () => { if (confirm('Unlink your Discord account? Your Roblox accounts stay linked to Yapin’.')) { await post('/me/roblox/discord/unlink'); load(); } };
+    dc.append(el('div', { class: 'card' }, el('div', { class: 'who' }, el('b', {}, 'Discord linked ', el('span', { class: 'badge' }, 'connected')), el('span', {}, 'ID ' + d.discord_id)), un));
+  } else {
+    const ln = el('button', {}, 'Link Discord');
+    ln.onclick = async () => {
+      status.textContent = 'Making your Discord sign-in link…'; status.className = 'note';
+      const x = await post('/me/roblox/discord/link');
+      if (x.url) location.href = x.url; else { status.textContent = x.data || 'Couldn’t start linking.'; status.className = 'note err'; }
+    };
+    dc.append(el('div', { class: 'card' }, el('div', { class: 'who' }, el('b', {}, 'No Discord account linked'), el('span', {}, 'Not linked yet')), ln));
+  }
   if (!d.accounts || !d.accounts.length) list.append(el('p', { class: 'note' }, 'No accounts linked yet.'));
   for (const a of d.accounts || []) {
     const auto = el('button', { class: 'ghost' }, a.auto_verify ? 'Auto-verify: on' : 'Auto-verify: off');

@@ -16,16 +16,22 @@ channels, recent messages, and to send messages as the bot. `/commands`, `/botin
 
 ## Storage
 
-Data lives in Cloudflare D1 (`cfstore.py`), which is free for this bot's size: create a D1 database (Workers & Pages -> D1),
+Data lives in Cloudflare D1 (`tables.py`), which is free for this bot's size: create a D1 database (Workers & Pages -> D1),
 then set `CLOUDFLARE_API_TOKEN` (permission: D1 Edit), `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_D1_DATABASE_ID`.
-The table is created automatically. Without those variables the bot falls back to local `.json` files.
-To copy old data across, run `python migrate_pickledb.py`.
+Each store is its own real table (`bot_counting`, `bot_embed`, `bot_users`, `bot_autorole`, `bot_ai`, `bot_automod`, `bot_audit`,
+`bot_cmdlog`, `bot_cmdlog_config`, `bot_actions`, `bot_dms`, `bot_partners`, `bot_holds`, `bot_welcomed`, `bot_rverify`), created
+automatically, with typed columns and an `extra_json` column that keeps anything that has no column, so nothing is dropped.
+Without the variables the bot falls back to local `.json` files. To copy old pickledb data across, run `python migrate_pickledb.py`.
+
+**Moving off the old key/value table:** on the first start the rows of the old `kv` table are copied into the new tables, read back from D1
+and compared. Only when every row matches is it marked done (`bot_meta`). If anything differs the bot keeps using `kv` for that run and retries
+next start (the log says `[tables] ...`). `kv` is never deleted by the bot; drop it yourself once you're happy. `/botinfo` shows which
+backend each store is on (`d1-tables`, `d1-kv` or `local-json`).
 
 ## Files
 
-- `main.py`: commands, events, web server
-- `yshim.py`: a small discord.py-shaped layer on top of `yapper.py` (embeds, buttons, command arguments)
-- `cfstore.py`: Cloudflare D1 storage with a pickledb-style API
+- `main.py`: commands, events, web server, and the small discord.py-shaped layer on top of `yapper.py` (embeds, buttons, command arguments; the section near the top, formerly `yshim.py`)
+- `tables.py`: Cloudflare D1 storage as real tables, with the same get / set / remove / items API
 - `migrate_pickledb.py`: one-time import of the old `.db` files
 
 ## Last.fm linking
@@ -59,6 +65,10 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 
 `/vortexgame <game ID>` and `/vortexinfo <user ID>` (IDs, not usernames) show a game or user with link buttons. `/vortexcookie` opens a private form (so the cookie never appears in chat) that saves your own Vortex login so lookups are made as you and also show your friend/follow status; submitting the form empty deletes it.
 
+## Command logs and webhooks
+
+`/cmdlog` (per server) and the bot owners' global log both post through webhooks. A Yapin' webhook belongs to one channel, so logs share one when they log into the same channel (a server log in the global log's channel reuses its webhook instead of making another), and an existing `Shapes ...` webhook of the bot in a channel is reused before a new one is made. Moving a log to another channel only deletes its old webhook if no other log still uses it. A passing error posts just that one line as the bot; only when Yapin' refuses a webhook does a log fall back to the bot, and it tries webhooks again every hour.
+
 ## When Shapes is added or removed
 
 - **Welcome:** the first time Shapes joins a server it posts a short welcome in the first channel it can write to and DMs the owner. It never welcomes the same server twice.
@@ -71,4 +81,4 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 The bot owner runs `/partner add <server id> [description]` (inside the server, the id can be left out) to feature a server at `/partners`. Shapes tries to create an invite for it, otherwise reuses one the server already has (a vanity link first); `/partner invite <server id> <https://www.yapin.gg/... link>` sets one by hand. The page shows the server's icon, name, member / channel / role counts and the description you wrote (or the server's own description when you wrote none). Also: `/partner description`, `/partner remove`, `/partner list`. The same data is at `/api/partners`. Only yapin.gg invite links are accepted.
 
 ## Roblox verification
-OAuth2 through the Shapes API (no bio text). `/verify` (link / accounts / auto / remove / verify here), `/verifysetup` (group, nickname template, verified/unverified role, mirror, DM prompt), `/sync`. Group roles are mirrored 1:1 into Yapin' roles; members sync when they verify or auto-verify, on `/sync`, and by a backup sync every 24 hours measured in elapsed UTC seconds (daylight saving and leap years can't shift it). Accounts are managed at `/roblox` (linked from the dashboard). The API tells the bot about new verifications at `POST /internal/verified`; set `BOT_NOTIFY_URLS` on the API if the bot isn't at `BOT_URL`.
+OAuth2 through the Shapes API (no bio text). `/verify` (link / accounts / auto / remove / verify here), `/verifysetup` (group, nickname template, verified/unverified role, mirror, DM prompt), `/sync`. Group roles are mirrored 1:1 into Yapin' roles; members sync when they verify or auto-verify, on `/sync`, and by a backup sync every 24 hours measured in elapsed UTC seconds (daylight saving and leap years can't shift it). Accounts are managed at `/roblox` (linked from the dashboard), which also links or unlinks your Discord account (Discord OAuth in the API, so Discord servers see the same Roblox accounts). The API tells the bot about new verifications at `POST /internal/verified`; set `BOT_NOTIFY_URLS` on the API if the bot isn't at `BOT_URL`.
