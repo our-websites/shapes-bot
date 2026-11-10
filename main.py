@@ -1535,7 +1535,74 @@ COUNTING_EMOJI_NAMES = {"correct": "correct", "right": "correct", "good": "corre
 
 def default_counting():
     return {"channel": None, "number": 0, "enabled": False, "warnings": 0, "lastcounter": None, "highestnumber": 0, "banned": False,
-            "emojis": dict(COUNTING_EMOJI_DEFAULT)}
+            "emojis": dict(COUNTING_EMOJI_DEFAULT), "max_warnings": COUNTING_MAX_WARNINGS, "lastmessage": None, "lastmessage_at": None}
+
+
+COUNTING_MAX_WARNINGS = 3          # mistakes allowed before the count is ruined; a bot owner can change it per server
+
+
+def counting_limit(data):
+    """How many warnings this server gets (3 unless a bot owner changed it)."""
+    v = (data or {}).get("max_warnings")
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 50 else COUNTING_MAX_WARNINGS
+
+
+COUNT_WATCH_SECONDS = 15           # how often the last counted message is checked to see if it was deleted
+COUNT_WATCH_WINDOW = 900           # ...for this long after it was counted; later it is checked when the next message arrives
+
+
+def count_message_gone(channel, mid):
+    """True only when Yapin' says the message no longer exists. Any other trouble (network, rate limit) counts as 'still there'."""
+    try:
+        bot.message(channel, mid)
+        return False
+    except yapper.YapperError as e:
+        return getattr(e, "status", None) in (404, 410)
+    except Exception:
+        return False
+
+
+def announce_deleted_count(sid, data):
+    """The message with the last number was deleted: say so. The count itself stays where it was."""
+    channel, number, who = data.get("channel"), int(data.get("number") or 0), data.get("lastcounter")
+    data["lastmessage"] = None
+    countingDB.set(sid, data)
+    emo = counting_emojis(data)
+    mention = f"<@{who}>" if who else "Someone"
+    try:
+        bot.send(channel, f"{emo['warning']} {mention} deleted their message with the last number (**{number}**)! The next number is **{number + 1}**.")
+    except Exception as e:
+        print(f"[counting] couldn't announce a deleted count in {sid}: {e}")
+
+
+_count_watch_started = False
+
+
+def start_count_watch():
+    """Yapin' sends no 'message deleted' event, so look at the last counted message for a while after it was counted."""
+    global _count_watch_started
+    if _count_watch_started:
+        return
+    _count_watch_started = True
+
+    def loop():
+        while True:
+            time.sleep(COUNT_WATCH_SECONDS)
+            try:
+                now = time.time()
+                for sid, data in countingDB.items().items():
+                    if not isinstance(data, dict) or not data.get("enabled") or not data.get("lastmessage") or not data.get("channel"):
+                        continue
+                    if now - int(data.get("lastmessage_at") or 0) > COUNT_WATCH_WINDOW:
+                        continue
+                    mid = data["lastmessage"]
+                    if count_message_gone(data["channel"], mid) and data.get("lastmessage") == mid:
+                        announce_deleted_count(sid, data)
+                    time.sleep(0.2)
+            except Exception as e:
+                print(f"[counting] deleted-message check: {type(e).__name__}: {e}")
+
+    threading.Thread(target=loop, name="count-watch", daemon=True).start()
 
 
 def clean_emoji(value):
@@ -1762,6 +1829,21 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
     sid = str(interaction.guild_id)
     data = {**default_counting(), **(countingDB.get(sid) or {})}
     is_staff = is_admin(interaction.guild_id, interaction.user.id)
+    if action.lower() in ("warnings", "maxwarnings"):       # bot owners only, in any server
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("Only the bot owner can change how many warnings counting gives.", ephemeral=True)
+            return
+        try:
+            amount = int(str(value).strip())
+            if not 0 <= amount <= 50:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message(f"Usage: `/counting warnings <0-50>` (now **{counting_limit(data)}**; 0 ruins the count on the first mistake).", ephemeral=True)
+            return
+        data["max_warnings"] = amount
+        countingDB.set(sid, data)
+        await interaction.response.send_message(f"This server now gets **{amount}** warning{'s' if amount != 1 else ''} before the count is ruined.", ephemeral=True)
+        return
     if not is_staff:
         if not data.get("channel") and not data.get("enabled"):
             await interaction.response.send_message("Counting isn't set up in this server.", ephemeral=True)
@@ -1805,7 +1887,7 @@ async def counting(interaction: discord.Interaction, action: str = "", value: st
     embed = counting_stats_embed(data, ecolor(interaction.user.id), interaction.user.name)
     embed.title = "Counting Settings"
     embed.add_field(name="Enabled", value=f"`{data['enabled']}`", inline=True)
-    embed.add_field(name="Warnings", value=f"`{data['warnings']}`/3", inline=True)
+    embed.add_field(name="Warnings", value=f"`{data['warnings']}`/{counting_limit(data)}", inline=True)
     embed.add_field(name="Emoji", value=f"Correct {emo['correct']}  ·  Warning {emo['warning']}  ·  Wrong {emo['wrong']}", inline=False)
     embed.add_field(name="Change it", value="`/counting toggle` · `/counting channel #channel` · `/counting emoji <correct|warning|wrong> <emoji>`", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -7011,19 +7093,24 @@ def handle_counting(msg):
                 except Exception:
                     pass
 
+    if data.get("lastmessage") and time.time() - int(data.get("lastmessage_at") or 0) > COUNT_WATCH_WINDOW \
+            and count_message_gone(channel, data["lastmessage"]):
+        announce_deleted_count(sid, data)       # nobody was watching it any more; catch it now that the count goes on
+
     if str(value) == str(next_number) and author != last:
-        data.update(number=next_number, lastcounter=author, highestnumber=max(highest, next_number))
+        data.update(number=next_number, lastcounter=author, highestnumber=max(highest, next_number), lastmessage=str(mid), lastmessage_at=int(time.time()))
         save()
         react("correct")
         return
 
-    if author == last and warnings != 3:
+    limit = counting_limit(data)
+    if author == last and warnings < limit:
         react("warning")
         bot.send(channel, f"{emo['warning']} You can't count by yourself!", reply_to=mid)
         data["warnings"] = warnings + 1
         save()
         return
-    if warnings < 3:
+    if warnings < limit:
         react("warning")
         bot.send(channel, f"{emo['warning']} The next number is {next_number}", reply_to=mid)
         data["warnings"] = warnings + 1
@@ -7038,7 +7125,7 @@ def handle_counting(msg):
         bot.send(channel, f"{emo['wrong']} {who} ruined it at 1, the next number is 1 (again)")
     else:
         bot.send(channel, f"{emo['wrong']} {who} ruined it at {number}, the next number is 1")
-    data.update(number=0, warnings=0, lastcounter=None)
+    data.update(number=0, warnings=0, lastcounter=None, lastmessage=None, lastmessage_at=None)
     save()
 
 
@@ -7098,6 +7185,7 @@ def on_ready(me):
         print(f"could not set status: {e}")
     start_server_watch()
     start_verify_scheduler()
+    start_count_watch()
     print(f"[SYSTEM] Logged in as {me.username}, watching {len(bot.servers())} servers. Storage: {__import__('tables').backend_summary()}")
 
 
@@ -7945,9 +8033,13 @@ def _vcounting(v):
     for key in ("enabled", "banned"):
         if not isinstance(out[key], bool):
             raise ValueError(f'"{key}" must be true or false.')
-    for key in ("channel", "lastcounter"):
-        if out[key] is not None:
+    for key in ("channel", "lastcounter", "lastmessage"):
+        if out.get(key) is not None:
             out[key] = str(out[key])
+    if not isinstance(out.get("max_warnings"), int) or isinstance(out["max_warnings"], bool) or not 0 <= out["max_warnings"] <= 50:
+        raise ValueError('"max_warnings" must be a whole number from 0 to 50.')
+    if out.get("lastmessage_at") is not None and (not isinstance(out["lastmessage_at"], int) or isinstance(out["lastmessage_at"], bool)):
+        raise ValueError('"lastmessage_at" must be a unix time in seconds, or null.')
     if not isinstance(out.get("emojis"), dict):
         raise ValueError('"emojis" must be an object like {"correct": "👍", "warning": "⚠️", "wrong": "❌"}.')
     out["emojis"] = {k: clean_emoji(out["emojis"].get(k)) or d for k, d in COUNTING_EMOJI_DEFAULT.items()}

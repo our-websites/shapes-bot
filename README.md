@@ -65,6 +65,10 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 
 `/vortexgame <game ID>` and `/vortexinfo <user ID>` (IDs, not usernames) show a game or user with link buttons. `/vortexcookie` opens a private form (so the cookie never appears in chat) that saves your own Vortex login so lookups are made as you and also show your friend/follow status; submitting the form empty deletes it.
 
+## Counting
+
+`/counting` (admins: `toggle`, `channel`, `emoji`). A server gets 3 warnings before a mistake ruins the count; a bot owner can change that per server with `/counting warnings <0-50>` (0 ruins it on the first mistake). The bot remembers the message that holds the last number and, if it is deleted, says who deleted it and what the next number is. Yapin' sends no "message deleted" event, so the bot checks that message every 15 seconds for 15 minutes after it was counted, and once more when the next number arrives. It only reacts to a clear "not found" from Yapin', never to a passing error, and it can't tell who deleted a message (a moderator's delete is announced as the counter's).
+
 ## Command logs and webhooks
 
 `/cmdlog` (per server) and the bot owners' global log both post through webhooks. A Yapin' webhook belongs to one channel, so logs share one when they log into the same channel (a server log in the global log's channel reuses its webhook instead of making another), and an existing `Shapes ...` webhook of the bot in a channel is reused before a new one is made. Moving a log to another channel only deletes its old webhook if no other log still uses it. A passing error posts just that one line as the bot; only when Yapin' refuses a webhook does a log fall back to the bot, and it tries webhooks again every hour.
