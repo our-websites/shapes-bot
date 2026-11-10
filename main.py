@@ -1856,12 +1856,8 @@ def cmdlog_configure(server_id, channel_id=None, enabled=None, confirm_public=Fa
             warning = ("Everyone in this server can read that channel, so everyone would see who runs which command. "
                        "Pick a private channel, or confirm that you want public logs.")
         else:
-            if cfg.get("webhook_id"):
-                try:
-                    bot.delete_webhook(cfg["webhook_id"])
-                except Exception:
-                    pass
-            cfg.update(channel=channel_id, mode=None, webhook_id=None,
+            release_log_webhook(str(server_id), cfg)
+            cfg.update(channel=channel_id, mode=None, webhook_id=None, retry_webhook_at=None,
                        public_ok=channel_id if channel_is_public(server_id, channel_id) else None)
     elif confirm_public and cfg["channel"] and channel_is_public(server_id, cfg["channel"]):
         cfg["public_ok"] = cfg["channel"]
@@ -1887,28 +1883,101 @@ def _cmdlog_embed(row):
     return {"title": f"/{row['command']}", "fields": fields, "footer": {"text": "Shapes command log"}}
 
 
+# ---- log webhooks: the per-server command logs and the global log (botlog) all post through webhooks, and share one when
+# they log into the same channel (a Yapin' webhook belongs to one channel, and the sender name is set per message). ----
+
+WEBHOOK_RETRY_SECONDS = 3600        # after Yapin' refuses webhooks for a channel, try again this often
+_WEBHOOK_GONE = (401, 403, 404, 410)    # on a send: the webhook was deleted or its access was taken away
+_WEBHOOK_REFUSED = (400, 401, 403, 404)  # on a create: Yapin' won't give the bot a webhook in that channel
+
+
+def _log_configs():
+    """{key: config} for every log: server ids for the command logs, BOTLOG_KEY for the global one."""
+    return {k: c for k, c in cmdlogcfgDB.items().items() if isinstance(c, dict)}
+
+
+def release_log_webhook(key, cfg):
+    """Let go of a log's webhook. It is only deleted from Yapin' when no other log still uses it."""
+    wid = str(cfg.get("webhook_id") or "")
+    if wid and not any(str(c.get("webhook_id") or "") == wid for k, c in _log_configs().items() if k != key):
+        try:
+            bot.delete_webhook(wid)
+        except Exception:
+            pass
+
+
+def find_log_webhook(key, channel):
+    """A webhook we can reuse in this channel instead of making one: the one another log (the global log, say) already
+    posts through there, otherwise a leftover 'Shapes ...' webhook of the bot. None when there isn't one."""
+    for k, c in _log_configs().items():
+        if k != key and c.get("webhook_id") and str(c.get("channel") or "") == str(channel) and c.get("mode") == "webhook":
+            return str(c["webhook_id"])
+    try:
+        for w in bot.my_webhooks():
+            w = dict(w)
+            if str(_first(w, "channel_id", "channelId") or "") == str(channel) and str(w.get("name") or "").startswith("Shapes") and w.get("id"):
+                return str(w["id"])
+    except Exception as e:
+        print(f"[logs] couldn't list the bot's webhooks: {e}")
+    return None
+
+
+def post_log(key, cfg, embed, username, label):
+    """Post one embed to the log's channel through its webhook (found, shared or made on first use). The bot posts directly
+    only for that one line when something passing goes wrong, and from then on only if Yapin' refuses webhooks there."""
+    channel = cfg["channel"]
+
+    def save():
+        cmdlogcfgDB.set(key, cfg)
+
+    if cfg.get("mode") == "bot" and time.time() >= float(cfg.get("retry_webhook_at") or 0):
+        cfg.update(mode=None, retry_webhook_at=None)      # time to see whether webhooks work now
+        save()
+    if cfg.get("mode") != "bot":
+        for _ in range(2):
+            made = False
+            try:
+                if not cfg.get("webhook_id"):
+                    made = True
+                    wid = find_log_webhook(key, channel) or str(bot.create_webhook(channel, username).id)
+                    cfg.update(mode="webhook", webhook_id=wid, retry_webhook_at=None)
+                    save()
+                    made = False
+                bot.send_webhook(cfg["webhook_id"], "", username=username, embeds=[embed])
+                return
+            except yapper.YapperError as e:
+                if made and e.status in _WEBHOOK_REFUSED:
+                    print(f"[{label}] Yapin' won't give a webhook in {channel} ({e}); posting as the bot, trying webhooks again in an hour")
+                    cfg.update(mode="bot", webhook_id=None, retry_webhook_at=time.time() + WEBHOOK_RETRY_SECONDS)
+                    save()
+                    break
+                if not made and e.status in _WEBHOOK_GONE:
+                    print(f"[{label}] its webhook is gone ({e}); finding or making another")
+                    dead = str(cfg.get("webhook_id") or "")
+                    for k, c in _log_configs().items():       # a shared webhook is gone for every log that used it
+                        if k != key and dead and str(c.get("webhook_id") or "") == dead:
+                            c.update(webhook_id=None)
+                            cmdlogcfgDB.set(k, c)
+                    cfg.update(webhook_id=None)
+                    save()
+                    continue
+                print(f"[{label}] webhook post failed ({e}); posting this one as the bot")
+                break
+            except Exception as e:
+                print(f"[{label}] webhook post failed ({e}); posting this one as the bot")
+                break
+    try:
+        bot.send(channel, "", embeds=[embed])
+    except Exception as e:
+        print(f"[{label}] couldn't post: {e}")
+
+
 def cmdlog_deliver(server_id, row):
-    """Post one log line to the server's log channel: through a webhook when Yapin' lets the bot make one, otherwise as the bot."""
+    """Post one log line to the server's log channel (through the log's webhook, see post_log)."""
     cfg = get_cmdlog(server_id)
     if not cfg["enabled"] or not cfg["channel"]:
         return
-    embed = _cmdlog_embed(row)
-    if cfg["mode"] != "bot":
-        try:
-            if not cfg["webhook_id"]:
-                hook = bot.create_webhook(cfg["channel"], "Shapes Command Log")
-                cfg.update(mode="webhook", webhook_id=str(hook.id))
-                cmdlogcfgDB.set(str(server_id), cfg)
-            bot.send_webhook(cfg["webhook_id"], "", username="Shapes Command Log", embeds=[embed])
-            return
-        except Exception as e:
-            print(f"[cmdlog] webhook unavailable in {server_id} ({e}); posting as the bot instead")
-            cfg.update(mode="bot", webhook_id=None)
-            cmdlogcfgDB.set(str(server_id), cfg)
-    try:
-        bot.send(cfg["channel"], "", embeds=[embed])
-    except Exception as e:
-        print(f"[cmdlog] couldn't post in {server_id}: {e}")
+    post_log(str(server_id), cfg, _cmdlog_embed(row), "Shapes Command Log", f"cmdlog {server_id}")
 
 
 def _cmdlog_worker():
@@ -2164,12 +2233,8 @@ def resolve_any_channel(token):
 def botlog_configure(channel_id=None, enabled=None, commands=None, events=None):
     cfg = get_botlog()
     if channel_id is not None and str(channel_id) != str(cfg["channel"] or ""):
-        if cfg.get("webhook_id"):
-            try:
-                bot.delete_webhook(cfg["webhook_id"])
-            except Exception:
-                pass
-        cfg.update(channel=str(channel_id), mode=None, webhook_id=None)
+        release_log_webhook(BOTLOG_KEY, cfg)
+        cfg.update(channel=str(channel_id), mode=None, webhook_id=None, retry_webhook_at=None)
     if enabled is not None:
         cfg["enabled"] = bool(enabled) and bool(cfg["channel"])
     if commands is not None:
@@ -2184,22 +2249,7 @@ def _botlog_deliver(embed):
     cfg = get_botlog()
     if not cfg["enabled"] or not cfg["channel"]:
         return
-    if cfg["mode"] != "bot":
-        try:
-            if not cfg["webhook_id"]:
-                hook = bot.create_webhook(cfg["channel"], "Shapes Log")
-                cfg.update(mode="webhook", webhook_id=str(hook.id))
-                cmdlogcfgDB.set(BOTLOG_KEY, cfg)
-            bot.send_webhook(cfg["webhook_id"], "", username="Shapes Log", embeds=[embed])
-            return
-        except Exception as e:
-            print(f"[botlog] webhook unavailable ({e}); posting as the bot instead")
-            cfg.update(mode="bot", webhook_id=None)
-            cmdlogcfgDB.set(BOTLOG_KEY, cfg)
-    try:
-        bot.send(cfg["channel"], "", embeds=[embed])
-    except Exception as e:
-        print(f"[botlog] couldn't post: {e}")
+    post_log(BOTLOG_KEY, cfg, embed, "Shapes Log", "botlog")
 
 
 def _botlog_worker():
