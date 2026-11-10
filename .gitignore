@@ -5,3 +5,5 @@ akey.txt
 README.md
 roblosecurity.txt
 APIBaseURL.txt
+__pycache__/
+*.pyc
