@@ -1913,12 +1913,18 @@ def find_log_webhook(key, channel):
         if k != key and c.get("webhook_id") and str(c.get("channel") or "") == str(channel) and c.get("mode") == "webhook":
             return str(c["webhook_id"])
     try:
-        for w in bot.my_webhooks():
-            w = dict(w)
-            if str(_first(w, "channel_id", "channelId") or "") == str(channel) and str(w.get("name") or "").startswith("Shapes") and w.get("id"):
-                return str(w["id"])
+        mine = {str(w.get("id")): dict(w) for w in bot.my_webhooks() if w.get("id")}      # the bot's own, newest first
+        if mine:
+            try:
+                here = {str(w.get("id")) for w in bot.webhooks(channel)}                  # everything in this channel
+            except Exception:
+                here = {i for i, d in mine.items() if str(_first(d, "channel_id", "channelId", "channel") or "") == str(channel)}
+            ours = [i for i in mine if i in here]
+            ours.sort(key=lambda i: not str(mine[i].get("name") or "").startswith("Shapes"))   # our named ones first, newest first
+            if ours:
+                return ours[0]
     except Exception as e:
-        print(f"[logs] couldn't list the bot's webhooks: {e}")
+        print(f"[logs] couldn't look for an existing webhook: {e}")
     return None
 
 
