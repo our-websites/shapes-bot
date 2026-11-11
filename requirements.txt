@@ -11,4 +11,3 @@ flask-cors
 openai
 PyNaCl
 dotenv
-cloudflare
