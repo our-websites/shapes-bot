@@ -5655,6 +5655,10 @@ def create_instagram_embed(username, profile_info, requester_name):
     
     return embed
         
+# === Roblox verification (/robloxverify, /robloxpanel, /sync) ===
+import rverify
+rverify.init(sys.modules[__name__])
+
 # === Bot Runner in Thread ===
 def run_bot():
     bot.run(token)
