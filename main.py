@@ -22,6 +22,7 @@ import re
 import socket
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import typing
 import urllib
@@ -1414,6 +1415,14 @@ def yapin_of_roblox(roblox):
     if not data or not data.get("success"):
         return None
     return (data.get("data"), bool(data.get("hidden")))
+def owner_of_roblox(roblox):
+    """{"yapin_id", "discord_id"} of whoever linked this Roblox account; {} when nobody did, it is hidden, or the API is down."""
+    data = shapes_api("GET", f"/internal/lookup/roblox/{urllib.parse.quote(str(roblox), safe='')}")
+    if not data or not data.get("success") or data.get("hidden"):
+        return {}
+    return {"yapin_id": data.get("yapin_id") or data.get("data"), "discord_id": data.get("discord_id")}
+
+
 GoogleAPIKey = _secret("GOOGLE_API_KEY", "GoogleToken.txt")
 ADMIN_KEY = _secret("ADMIN_KEY", "akey.txt")
 
@@ -1511,19 +1520,40 @@ def resolve_channel(server_id, token):
 _member_cache = {"at": 0, "value": 0}
 
 
+def human_count(sid, total=None):
+    """People in a server, bots left out. The API's member_count includes bots, so count from the member list (cached for
+    two minutes) and fall back to that total only when the list can't be read. Past 5,000 members the list is a sample, so
+    the bots in it are taken off the reported total instead."""
+    try:
+        members = cached(f"allmembers:{sid}", 120, lambda: _all_members(sid))
+    except Exception:
+        members = None
+    if members:
+        bots = sum(1 for p in members if p["bot"])
+        if len(members) < 5000:
+            return len(members) - bots
+        return max(0, int(total or len(members)) - bots)
+    return int(total) if total is not None else None
+
+
+def human_counts(servers):
+    """{server id: people} for a list of server dicts, looked up a few at a time."""
+    def one(s):
+        total = _first(s, "member_count", "members_count", "memberCount")
+        try:
+            total = int(total) if total is not None else None
+        except (TypeError, ValueError):
+            total = None
+        return str(s.get("id")), human_count(s.get("id"), total)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(pool.map(one, servers))
+
+
 def total_members():
     """Approximate number of people across every server the bot is in (cached for 5 minutes)."""
     if time.time() - _member_cache["at"] < 300:
         return _member_cache["value"]
-    total = 0
-    for s in bot.servers():
-        n = _first(s, "member_count", "members_count", "memberCount")
-        if n is None:
-            try:
-                n = len(bot.members(s.get("id")))
-            except Exception:
-                n = 0
-        total += int(n)
+    total = sum(int(n or 0) for n in human_counts(list(bot.servers())).values())
     _member_cache.update(at=time.time(), value=total)
     return total
 
@@ -2567,7 +2597,10 @@ def welcome_server(sid, name, data=None):
 def _server_event(kind, sid, name, data, total):
     name = name or str(sid)
     fields = [{"name": "Server", "value": f"{name}\\n`{sid}`", "inline": True}]
-    members = _first(data, "member_count", "members_count", "memberCount")
+    try:
+        members = human_count(sid, _first(data, "member_count", "members_count", "memberCount"))
+    except Exception:
+        members = _first(data, "member_count", "members_count", "memberCount")
     if members is not None:
         fields.append({"name": "Members", "value": f"{members:,}" if isinstance(members, int) else str(members), "inline": True})
     owner = data.get("owner_id")
@@ -2825,7 +2858,7 @@ async def help_command(interaction: discord.Interaction):
         "• /robloxinfo - User information\n• /roblox2yapin - Find a Roblox user's linked account\n• /yapin2roblox - Find a user's Roblox\n"
         "• /britishuser - Check if a user is British\n• /iteminfo - Item information\n• /placeinfo - Place/game information\n"
         "• /badge - Badge information\n• /badges - Check a user's badges\n• /recentbadges - Latest badges\n• /outfits - A user's outfits\n"
-        "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox\n• /vortexgame <game ID>, /vortexinfo <user ID>, /vortexcookie - Vortex"), inline=False)
+        "• /limiteds - Scan for limiteds\n• /bundle - Bundle information\n• /asset - Asset information\n• /avatar - Avatar\n• /linkroblox - Link your Roblox\n• /robloxverify - Verify with Roblox, hide accounts\n• /robloxpanel - Roblox verification setup (admins)\n• /vortexgame <game ID>, /vortexinfo <user ID>, /vortexcookie - Vortex"), inline=False)
     embed.add_field(name="Utility", value=(
         "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI (/clearai deletes your history)\n• /github - GitHub user\n"
         "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp - spook.bio"), inline=False)
@@ -3176,7 +3209,7 @@ def server_summary(sid):
     owner = _first(info, "owner_id", "ownerId")
     owner = str(owner.get("id") if isinstance(owner, dict) else owner) if owner is not None else None
     return {"id": sid, "name": info.get("name") or "Server", "description": str(info.get("description") or "")[:400], "owner": owner,
-            "members": max(total, len(members)), "humans": len(members) - bots, "bots": bots,
+            "members": human_count(sid, total), "humans": human_count(sid, total), "bots": bots,
             "channels": len(channels), "text": texts, "voice": len(channels) - texts, "categories": len(categories), "roles": len(roles),
             "extra": [(label, str(info[key])) for key, label in (("verified", "Verified"), ("public", "Public"), ("boost_level", "Boost level")) if info.get(key) not in (None, "", False)],
             "icon": _icon_of(info), "banner": _asset_url(_first(info, "banner_path", "banner_url", "banner"), "banners")}
@@ -4164,10 +4197,12 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                     print(f"Error fetching terminated user data: {e}")
 
             Discord = None
-            found = await asyncio.to_thread(yapin_of_roblox, UserID)
-            if found and found[0] and not found[1]:
-                person = await asyncio.to_thread(fetch_user, found[0])
-                Discord = f"@{person['username']}" if person.get("username") else found[0]
+            owner = await asyncio.to_thread(owner_of_roblox, UserID)       # hidden accounts come back empty
+            if owner.get("yapin_id"):
+                person = await asyncio.to_thread(fetch_user, owner["yapin_id"])
+                Discord = f"@{person['username']}" if person.get("username") else owner["yapin_id"]
+            if owner.get("discord_id"):
+                Discord = f"{Discord}\nDiscord: {owner['discord_id']}" if Discord else f"Discord: {owner['discord_id']}"
 
             profileurl = f"https://www.roblox.com/users/{UserID}/profile"
 
@@ -4290,7 +4325,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
 
             if Discord != None:
                 embed.add_field(
-                    name="Yapin",
+                    name="Owner",
                     value=f"```txt\n{Discord}\n```",
                     inline=False
                 )
@@ -7408,11 +7443,10 @@ def admin_logout():
 
 
 def _server_rows():
-    rows = []
-    for s in cached("servers", 15, bot.servers):
-        n = _first(s, "member_count", "members_count", "memberCount")
-        rows.append({"id": s.get("id"), "name": s.get("name") or str(s.get("id")), "members": n if n is not None else ""})
-    return rows
+    servers = list(cached("servers", 15, bot.servers))
+    counts = human_counts(servers)
+    return [{"id": s.get("id"), "name": s.get("name") or str(s.get("id")), "members": counts.get(str(s.get("id")), "") if counts.get(str(s.get("id"))) is not None else ""}
+            for s in servers]
 
 
 @app.route("/admin", methods=["GET"])
@@ -7420,7 +7454,10 @@ def _server_rows():
 def dashboard():
     if not bot_ready:
         return Response("<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=3><body style='font-family:system-ui;padding:3rem'>The bot is still starting. This page refreshes on its own.", mimetype="text/html")
-    return Response(_web_file("app.html"), mimetype="text/html")
+    # Sign out only belongs to the password login: a signed-in staff member leaves through the user dashboard, and inside an iframe
+    # (the user dashboard's Admin tab) there is nothing to sign out of. The page also removes it when it finds itself framed.
+    out = '<a href="/logout" id="signout">Sign out</a>' if session.get("admin") is True else ""
+    return Response(_web_file("app.html").replace("<!--SIGNOUT-->", out), mimetype="text/html")
 
 
 def _avatar_of(d):
@@ -7509,9 +7546,10 @@ def api_overview():
     if not bot_ready:
         return jsonify({"ready": False}), 503
     servers = []
-    for s in cached("servers", 15, bot.servers):
-        n = _first(s, "member_count", "members_count", "memberCount")
-        servers.append({**dict(s), "id": str(s.get("id")), "name": s.get("name") or str(s.get("id")), "member_count": n,
+    raw = list(cached("servers", 15, bot.servers))
+    counts = human_counts(raw)                    # people only: the API's own count includes bots
+    for s in raw:
+        servers.append({**dict(s), "id": str(s.get("id")), "name": s.get("name") or str(s.get("id")), "member_count": counts.get(str(s.get("id"))),
                         "icon": _icon_of(s)})
     return jsonify({
         "ready": True, "me": {**dict(bot.me or {}), "avatar": _avatar_of(dict(bot.me or {}))}, "uptime_seconds": int(time.time() - started_at),
@@ -8085,7 +8123,7 @@ def _entity(kind, entity_id):
         info = dict(cached(f"server:{entity_id}", 30, lambda: bot.server(entity_id)))
         return {"kind": "server", "id": entity_id, "name": info.get("name") or entity_id,
                 "avatar": _icon_of(info),
-                "note": f"{_first(info, 'member_count', 'members_count', 'memberCount') or '?'} members"}
+                "note": f"{human_count(entity_id, _first(info, 'member_count', 'members_count', 'memberCount')) or '?'} people"}
     p = _person(dict(bot.user(entity_id)))
     return {"kind": "user", "id": entity_id, "name": p["display"], "avatar": p["avatar"], "note": f"@{p['name']}" + (" · bot" if p["bot"] else "")}
 

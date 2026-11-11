@@ -164,7 +164,7 @@
     <button role="tab" data-view="data" aria-selected="false">Data</button>
   </nav>
   <div class="spacer"></div>
-  <div class="meta"><span id="stats"></span><a href="/logout">Sign out</a></div>
+  <div class="meta"><span id="stats"></span><!--SIGNOUT--></div>
 </header>
 
 <main>
@@ -310,7 +310,7 @@ async function openServer(id) {
     $('#serverpane').innerHTML = `
       <div class="detail">
         <div class="detail-head">${avatar(info.icon, info.name, 'sq')}<h1>${esc(info.name)}</h1>
-          <span class="muted">${info.member_count ?? '?'} members</span>
+          <span class="muted">${info.member_count ?? '?'} people</span>
           <div class="tabs" role="tablist">
             <button role="tab" data-pane="chat" aria-selected="true">Channels</button>
             <button role="tab" data-pane="members" aria-selected="false">Members</button>
@@ -583,5 +583,6 @@ function wireRec(kind, id, r, i) {
 loadOverview().catch(e => { $('#serverlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
 setInterval(() => loadOverview().catch(() => {}), 60000);
 </script>
+<script>if (window.self !== window.top) { const so = document.getElementById("signout"); if (so) so.remove(); }</script>
 </body>
 </html>

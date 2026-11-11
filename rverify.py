@@ -18,6 +18,66 @@ SYNC_EVERY = 24 * 60 * 60           # seconds of real elapsed time
 CHECK_EVERY = 300                   # how often the scheduler looks at the clock
 _locks = {}
 _prompted = {}
+_DENIED = ("permission", "missing access", "hierarchy", "higher", "forbidden", "manage roles", "not allowed", "can't", "cannot")
+
+
+class Issues:
+    """What went wrong during one sync, grouped so the person gets one clear explanation instead of 500 identical errors."""
+
+    def __init__(self, role_names=None):
+        self.role_names = role_names or {}
+        self.kinds = {}               # kind -> {"n": count, "names": set, "sample": text}
+        self.blocked = set()          # role ids that were refused: stop trying them for everyone else
+        self.nick_ok = self.nick_denied = 0
+
+    @staticmethod
+    def denied(e):
+        status = getattr(e, "status", None)
+        return status in (401, 403) or (status in (400, None) and any(w in str(e).lower() for w in _DENIED))
+
+    def add(self, kind, e, name=None):
+        """kind: create-role | edit-role | delete-role | give-role | take-role | nickname. Returns True when it was a refusal."""
+        refused = self.denied(e)
+        key = kind if refused else "other"
+        d = self.kinds.setdefault(key, {"n": 0, "names": set(), "sample": ""})
+        d["n"] += 1
+        if name:
+            d["names"].add(str(name))
+        d["sample"] = d["sample"] or f"{kind}: {e}" + (f" (HTTP {e.status})" if getattr(e, "status", None) else "")
+        return refused
+
+    def name(self, rid):
+        return self.role_names.get(str(rid), str(rid))
+
+    def lines(self):
+        """Plain-language explanations, most important first."""
+        out = []
+        def names(k):
+            n = sorted(self.kinds[k]["names"])
+            return (" (" + ", ".join(n[:8]) + (", …" if len(n) > 8 else "") + ")") if n else ""
+        manage = [k for k in ("create-role", "edit-role", "delete-role") if k in self.kinds]
+        if manage:
+            what = {"create-role": "create", "edit-role": "rename", "delete-role": "delete"}
+            out.append("I'm not allowed to " + "/".join(what[k] for k in manage) + f" roles{names(manage[0])}. Give my role the **Manage Roles** permission "
+                       "(Server settings → Roles → my role → Permissions), then run `/sync` again. Without it I can only use roles that already exist.")
+        given = [k for k in ("give-role", "take-role") if k in self.kinds]
+        if given:
+            n = sum(self.kinds[k]["n"] for k in given)
+            nm = sorted(set().union(*(self.kinds[k]["names"] for k in given)))
+            out.append(f"I couldn't change {n} role assignment{'s' if n != 1 else ''}" + (f" for **{', '.join(nm[:8])}**" if nm else "") +
+                       ". A bot can only hand out roles that sit **below its own highest role**: drag my role above "
+                       + ("those roles" if nm else "them") + " in Server settings → Roles, and make sure it has **Manage Roles**.")
+        if "nickname" in self.kinds:
+            n = self.kinds["nickname"]["n"]
+            out.append(f"I couldn't change {n} nickname{'s' if n != 1 else ''}. I need the **Manage Nicknames** permission and my role must be above "
+                       "the member's highest role. The server owner and people with a higher role than mine can't be renamed by a bot.")
+        if "other" in self.kinds:
+            d = self.kinds["other"]
+            out.append(f"{d['n']} other error{'s' if d['n'] != 1 else ''} from Yapin', for example: `{d['sample'][:200]}`")
+        return out
+
+    def text(self):
+        return "\n".join(f"• {l}" for l in self.lines())
 
 
 def init(m):
@@ -49,11 +109,12 @@ def init(m):
         d = api("GET", f"/internal/roblox/group/{cfg['group_id']}/member/{rid}")
         return (d or {}).get("role") if d and d.get("success") else False       # False = Roblox didn't answer
 
-    def mirror_roles(sid, cfg, report=None):
+    def mirror_roles(sid, cfg, report=None, issues=None):
         """Make the Yapin' roles match the group's roles when mirroring is on: create missing ones, rename changed ones, delete
         ones the group dropped (only roles this bot made, never one that was already there). Returns {roblox role id: yapin
         role id}; `report` (a dict) gets counts of what changed."""
         report = report if report is not None else {}
+        issues = issues if issues is not None else Issues()
         for k in ("created", "renamed", "deleted"):
             report.setdefault(k, 0)
         st = dict(stateDB.get(sid) or {})
@@ -76,6 +137,9 @@ def init(m):
                         time.sleep(2.2)
                     except Exception as e:
                         print(f"[verify] rename {r['name']}: {e}")
+                        issues.add("edit-role", e, have[current].get("name"))
+                        if Issues.denied(e):
+                            mirror = False                       # no point asking again for every other role
                 continue
             if r["name"].lower() in by_name:                     # a role with that name already exists: use it
                 mapping[rid] = by_name[r["name"].lower()]
@@ -88,6 +152,9 @@ def init(m):
                     time.sleep(2.2)                              # 30 role changes a minute
                 except Exception as e:
                     print(f"[verify] couldn't create role {r['name']}: {e}")
+                    issues.add("create-role", e, r["name"])
+                    if Issues.denied(e):
+                        mirror = False                           # missing Manage Roles: stop here, the rest would fail the same way
         for rid in [k for k in mapping if k not in group]:       # the group dropped this role
             yid = mapping[rid]
             if mirror and yid in made and yid in have:
@@ -97,6 +164,7 @@ def init(m):
                     time.sleep(2.2)
                 except Exception as e:
                     print(f"[verify] couldn't delete role {yid}: {e}")
+                    issues.add("delete-role", e, issues.name(yid))
                     continue                                     # keep it in the map so the next sync tries again
             made.discard(yid)
             mapping.pop(rid, None)
@@ -111,7 +179,7 @@ def init(m):
             return dict(st["roles"])
         return mirror_roles(sid, cfg)
 
-    def ensure_verified_role(sid, cfg):
+    def ensure_verified_role(sid, cfg, issues=None):
         if cfg.get("verified_role_id") == "create":
             try:
                 rid = str(bot.create_role(sid, "Verified").get("id"))
@@ -119,10 +187,12 @@ def init(m):
                 cfg["verified_role_id"] = rid
             except Exception as e:
                 print(f"[verify] couldn't create the Verified role: {e}")
+                if issues is not None:
+                    issues.add("create-role", e, "Verified")
                 cfg["verified_role_id"] = ""
         return cfg.get("verified_role_id") or None
 
-    def sync_member(sid, uid, acct, cfg, mapping):
+    def sync_member(sid, uid, acct, cfg, mapping, issues=None):
         """Bring one member in line: roles from their group rank, the verified role, the nickname. acct=None unverifies."""
         try:
             member = bot.member(sid, uid)
@@ -144,17 +214,28 @@ def init(m):
         elif ur:
             want.add(ur)
         drop |= {x for x in (vr, ur) if x and x != "create"}
-        for r in want - mine:
-            bot.add_role(sid, uid, r)
-        for r in (drop - want) & mine:
-            bot.remove_role(sid, uid, r)
+        issues = issues if issues is not None else Issues()
+        for r in (want - mine) - issues.blocked:
+            try:
+                bot.add_role(sid, uid, r)
+            except Exception as e:
+                if issues.add("give-role", e, issues.name(r)):
+                    issues.blocked.add(r)                        # refused once for this role: skip it for everyone else
+        for r in ((drop - want) & mine) - issues.blocked:
+            try:
+                bot.remove_role(sid, uid, r)
+            except Exception as e:
+                if issues.add("take-role", e, issues.name(r)):
+                    issues.blocked.add(r)
         if acct:
             nick = template(cfg, acct, role_name)
-            if nick and (member.get("nickname") or member.get("nick")) != nick:
+            if nick and (member.get("nickname") or member.get("nick")) != nick and not (issues.nick_denied >= 5 and not issues.nick_ok):
                 try:
                     bot.set_nickname(sid, uid, nick)
-                except Exception:
-                    pass                                         # e.g. the server owner can't be renamed
+                    issues.nick_ok += 1
+                except Exception as e:
+                    if issues.add("nickname", e):                # e.g. the server owner can't be renamed
+                        issues.nick_denied += 1
         return "ok"
 
     def dm_verified(uid, acct, how, server_name=None):
@@ -176,6 +257,12 @@ def init(m):
         except Exception:
             return None
 
+    def remember(sid, counts, issues):
+        """Keep the last sync's result and problems so the dashboard can show them."""
+        st = dict(stateDB.get(sid) or {})
+        st["last"] = {"at": int(time.time()), "counts": counts, "problems": issues.lines()}
+        stateDB.set(sid, st)
+
     def apply_one(sid, uid, how_hint=None, notify=True):
         """Verify/auto-verify one member of a configured server, then sync them. Returns the account or None."""
         cfg = cfg_of(sid)
@@ -184,8 +271,12 @@ def init(m):
         res = (api("POST", f"/internal/guild/yapin/{sid}/resolve", {"user_ids": [str(uid)]}) or {}).get("members", {}).get(str(uid))
         if not res:
             return None
-        ensure_verified_role(sid, cfg)
-        sync_member(sid, uid, res, cfg, mapping_for(sid, cfg))
+        issues = Issues({str(r["id"]): r.get("name") for r in bot.roles(sid)})
+        ensure_verified_role(sid, cfg, issues)
+        sync_member(sid, uid, res, cfg, mapping_for(sid, cfg), issues)
+        if issues.kinds:
+            print(f"[verify] {uid} in {sid}: " + " | ".join(issues.lines()))
+            remember(sid, {"single": True}, issues)
         if notify and how_hint != "quiet":
             dm_verified(uid, res, res.get("how"), server_name(sid))
         return res
@@ -201,8 +292,9 @@ def init(m):
             cfg = cfg_of(sid)
             if not cfg:
                 return {"error": "no group set"}
-            ensure_verified_role(sid, cfg)
-            mapping = mirror_roles(sid, cfg, counts)
+            issues = Issues({str(r["id"]): r.get("name") for r in bot.roles(sid)})
+            ensure_verified_role(sid, cfg, issues)
+            mapping = mirror_roles(sid, cfg, counts, issues)
             after, ids = None, []
             while True:
                 page = bot.members(sid, after=after)
@@ -220,7 +312,7 @@ def init(m):
                 found.update((api("POST", f"/internal/guild/yapin/{sid}/resolve", {"user_ids": ids[i:i + 500]}) or {}).get("members", {}))
             for n, uid in enumerate(ids):
                 try:
-                    r = sync_member(sid, uid, found.get(uid), cfg, mapping)
+                    r = sync_member(sid, uid, found.get(uid), cfg, mapping, issues)
                     counts["synced" if found.get(uid) and r == "ok" else "unverified" if r == "ok" else "skipped"] += 1
                 except Exception as e:
                     counts["errors"] += 1
@@ -229,6 +321,8 @@ def init(m):
                 if progress and n % 25 == 0:
                     progress(n, len(ids))
             api("POST", f"/internal/guild/yapin/{sid}/synced", {})
+            counts["problems"] = issues.lines()
+            remember(sid, {k: v for k, v in counts.items() if k != "problems"}, issues)
             return counts
         finally:
             lock.release()
@@ -360,8 +454,9 @@ def init(m):
                 return reply("I couldn't make a Roblox sign-in link right now.")
             return reply(f"Sign in with Roblox to verify (OAuth2, nothing goes in your bio). The link works for 10 minutes and only for you:\n{link}\n"
                          "When you finish I'll verify you here automatically.")
-        acct = res["account"]
-        reply(f"Verified as [{acct['name']}]({acct['profile']}) (`{acct['id']}`). I'm updating your roles and nickname now.")
+        acct = res.get("account") or {}
+        who = f"[{acct.get('name')}]({acct.get('profile')}) (`{acct.get('id')}`)" if acct.get("id") else "your Roblox account"
+        reply(f"Verified as {who}. I'm updating your roles and nickname now.")
         threading.Thread(target=apply_one, args=(sid, uid), daemon=True).start()
     bot.button("rv:")(on_panel_click)
 
@@ -519,7 +614,7 @@ def init(m):
         sid = str(interaction.guild_id)
         if not await asyncio.to_thread(cfg_of, sid):
             return await say(interaction, "Set the group first: `/robloxpanel group <id>`.")
-        await say(interaction, "Syncing every member now. This can take a few minutes; I'll send you the result.")
+        await say(interaction, "Syncing every member now. This can take a few minutes; I'll send you the result, including anything I'm not allowed to do (missing permissions or a role that sits too high).")
 
         def job():
             counts = sync_guild(sid)
@@ -530,6 +625,8 @@ def init(m):
                         f"{counts['skipped']} skipped, {counts['errors']} errors.")
                 if counts["created"] or counts["renamed"] or counts["deleted"]:
                     text += f" Roles: {counts['created']} created, {counts['renamed']} renamed, {counts['deleted']} deleted."
+                if counts.get("problems"):
+                    text += "\n\n**Things that need fixing:**\n" + "\n".join(f"• {l}" for l in counts["problems"])
             else:
                 text = f"Sync failed: {counts.get('error')}"
             try:
@@ -539,4 +636,5 @@ def init(m):
         threading.Thread(target=job, daemon=True).start()
 
     m.rverify_sync = sync_guild
+    m.rverify_ensure_role = ensure_verified_role
     m.rverify_stats = lambda sid: api("GET", f"/internal/guild/yapin/{sid}/stats")
