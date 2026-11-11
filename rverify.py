@@ -556,7 +556,8 @@ def init(m):
                 return await say(interaction, "Give the Roblox group ID (the number in the group's URL).")
             body["group_id"] = value.strip()
         elif a == "nickname":
-            body["nickname_template"] = "" if value.lower() in ("off", "none", "") else value
+            v = value.strip()
+            body["nickname_template"] = "" if v.lower() in ("off", "none", "") else "{name}" if v.lower() in ("on", "true", "yes") else v
         elif a in ("role", "unverified"):
             if value.lower() == "create":
                 rid = "create"
