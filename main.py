@@ -741,6 +741,24 @@ async def update_guild_cache():
 
         await asyncio.sleep(30)
 
+COUNTING_DEFAULT_WARNINGS = 3
+COUNTING_MAX_WARNINGS = 50
+
+
+def counting_limit(data):
+    """How many warnings a server gets before the count is ruined (bot owners can change it per server)."""
+    try:
+        return max(0, min(COUNTING_MAX_WARNINGS, int(data.get("max_warnings", COUNTING_DEFAULT_WARNINGS))))
+    except (TypeError, ValueError):
+        return COUNTING_DEFAULT_WARNINGS
+
+
+def is_bot_owner(user):
+    """The people the restart/shutdown commands already trust, plus any ids in OWNER_IDS (comma separated)."""
+    ids = {x.strip() for x in os.environ.get("OWNER_IDS", "").split(",") if x.strip()}
+    return str(user.id) in ids or user.name in ("lcjunior1220", "sl.ip", "kiwixor")
+
+
 def IsInteger(s):
     try:
         int(s)
@@ -764,6 +782,7 @@ async def on_message(message):
         number = counting_data['number']
         channel = counting_data['channel']
         warnings = counting_data['warnings']
+        warning_limit = counting_limit(counting_data)
         LastCounter = counting_data['lastcounter']
         HighestNumber = counting_data['highestnumber']
         next_number = number + 1
@@ -833,7 +852,7 @@ async def on_message(message):
             if channel != message.channel.id:
                 return
             
-            if message.author.id == LastCounter and warnings != 3:
+            if message.author.id == LastCounter and warnings < warning_limit:
                 await message.add_reaction('⚠️')
                 await message.reply(f":warning: You can't count by yourself!")
                 warnings = warnings + 1
@@ -841,7 +860,7 @@ async def on_message(message):
                 countingDB.set(server.id, counting_data)
                 countingDB.save()
                 return
-            if warnings < 3:
+            if warnings < warning_limit:
                 await message.add_reaction('⚠️')
                 if number == 0:
                     await message.reply(f":warning: The next number is 1")
@@ -851,7 +870,7 @@ async def on_message(message):
                 countingDB.set(server.id, counting_data)
                 countingDB.save()
                 return
-            if warnings >= 3:
+            if warnings >= warning_limit:
                 await message.add_reaction('❌')
                 if number > HighestNumber:
                     HighestNumber = number
@@ -1513,8 +1532,16 @@ async def restart(interaction: discord.Interaction):
 @commands.bot_has_permissions(add_reactions=True, moderate_members=True, read_message_history=True, view_channel=True, send_messages=True)
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def counting(interaction: discord.Interaction):
+async def counting(interaction: discord.Interaction, warnings: typing.Optional[app_commands.Range[int, 0, 50]] = None):
     server = interaction.guild
+    if warnings is not None:      # bot owners only: how many warnings before the count is ruined (0 = ruined on the first mistake)
+        if not is_bot_owner(interaction.user):
+            return await interaction.response.send_message("Only the bot owners can change the warnings amount.", ephemeral=True)
+        data = countingDB.get(server.id) or {"channel": None, "number": 0, "enabled": False, "warnings": 0, "lastcounter": None, "highestnumber": 0}
+        data["max_warnings"] = int(warnings)
+        countingDB.set(server.id, data)
+        countingDB.save()
+        return await interaction.response.send_message(f"Counting here now allows **{warnings}** warning{'s' if warnings != 1 else ''} before the count is ruined.", ephemeral=True)
     print(server.id)
     counting_json = countingDB.get(server.id)
     countingData = counting_json
@@ -1565,7 +1592,7 @@ async def counting(interaction: discord.Interaction):
             await interaction.response.send_message(f"Counting channel set to <#{selected_channel_id}>.", ephemeral=True)
     embed = discord.Embed(
         title="Counting Settings",
-        description=f"**Current Settings:**\n- Counting Enabled: `{countingData['enabled']}`\n- Counting Channel: `<#{countingData['channel']}>`\n- Current Number: `{countingData['number']}`\n- Highest Number: `{countingData.get('highestnumber', 0)}`\n- Warnings: `{countingData['warnings']}`\n- Last Counter: `{countingData['lastcounter']}`",
+        description=f"**Current Settings:**\n- Counting Enabled: `{countingData['enabled']}`\n- Counting Channel: `<#{countingData['channel']}>`\n- Current Number: `{countingData['number']}`\n- Highest Number: `{countingData.get('highestnumber', 0)}`\n- Warnings: `{countingData['warnings']}/{counting_limit(countingData)}`\n- Last Counter: `{countingData['lastcounter']}`",
         color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
     )
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
