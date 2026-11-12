@@ -1,4 +1,4 @@
-"""Roblox verification for Yapin' servers (OAuth2 through the Shapes API, never bio text).
+"""Cog: Roblox verification for Yapin' servers (OAuth2 through the Shapes API, never bio text).
 
 People link Roblox accounts once (up to 100, shared with Discord through the API). A server owner points the bot at a
 Roblox group with /robloxpanel and the bot mirrors it 1:1: one Yapin' role per group role (created, renamed and deleted as
@@ -10,6 +10,8 @@ sync, never constantly.
 import hmac
 import threading
 import time
+
+import yapper
 import urllib.parse
 
 from flask import jsonify, request
@@ -341,7 +343,6 @@ def init(m):
 
     def start_scheduler():
         threading.Thread(target=scheduler, name="verify-scheduler", daemon=True).start()
-    m.start_verify_scheduler = start_scheduler
 
     # ------------------------------------------------------------------ joins and the API's notice
     def on_join(ev):
@@ -362,7 +363,6 @@ def init(m):
                              "description": f"{text}\n\nSign in with Roblox here (no bio changes needed): {link}"}])
                 except Exception as e:
                     print(f"[verify] couldn't DM the prompt to {uid}: {e}")
-    m.verify_on_join = on_join
 
     def start_link(uid, guild=""):
         d = api("POST", "/internal/roblox/start", {"platform": "yapin", "user_id": str(uid), "guild": guild})
@@ -639,3 +639,24 @@ def init(m):
     m.rverify_sync = sync_guild
     m.rverify_ensure_role = ensure_verified_role
     m.rverify_stats = lambda sid: api("GET", f"/internal/guild/yapin/{sid}/stats")
+    return {"join": on_join, "scheduler": start_scheduler}
+
+
+class Roblox(yapper.Cog):
+    """The Roblox verification feature: its commands, the Verify button, the join and ready listeners."""
+    name = "Roblox"
+
+    def cog_load(self):
+        self.hooks = init(self.bot.core)               # registers /robloxverify, /robloxpanel, /sync and the panel button
+
+    @yapper.listener("member_join")
+    def on_member_join(self, ev):
+        threading.Thread(target=self.hooks["join"], args=(ev,), daemon=True).start()
+
+    @yapper.listener("ready")
+    def on_ready(self, *_):
+        self.hooks["scheduler"]()
+
+
+def setup(bot):
+    bot.add_cog(Roblox(bot))
