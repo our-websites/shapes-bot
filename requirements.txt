@@ -4,10 +4,10 @@ requests
 pytz
 aiohttp
 bs4
-pickledb
 pandas
 slpp
 flask-cors
 openai
 PyNaCl
-dotenv
+python-dotenv
+cloudflare

@@ -1,9 +1,25 @@
 # Discord Bot Code For shapes.lol
-## Roblox verification, command logs
 
-- `/robloxverify` (verify here, `link`, `accounts`, `auto`, `remove`, `hide`/`show` one, several or `all` accounts), `/robloxpanel` (`group`, `nickname`, `role`, `unverified`, `mirror`, `prompt`, `title`, `text`, `send` a panel with a Verify button, `stats`) and `/sync`. With mirroring on, `/sync` creates, renames and deletes roles to match the Roblox group (it only deletes roles the bot made) and explains in plain words when Discord refuses (missing Manage Roles / Manage Nicknames, or the bot's role sitting below the roles it hands out).
-- Accounts live in the Shapes API and are shared with the Yapin' bot. A Discord account is attached to a Yapin' account from the Yapin' dashboard, so people who have not linked one are told how. `/linkroblox` stays for people who only want to link.
-- Set `SHAPES_API_TOKEN` (the API's `INTERNAL_TOKEN`; `Shapes_API_Key` still works) and add this bot's URL to the API's `BOT_NOTIFY_URLS` (for example `http://127.0.0.1:13455`) so new verifications DM people and sync their roles.
+One file: `main.py`. Features are cogs (classes in that file) and commands with a space are command groups.
+
+## Setup
+1. `pip install -r requirements.txt`
+2. Copy `.env.example` to `.env` and fill it in. Every secret and setting comes from there (or the host's environment variables).
+3. `python main.py`
+
+## Database
+The bot keeps its data in its own Cloudflare D1 database (separate from the Yapin' bot's; the two only share data through the Shapes API). Set `CLOUDFLARE_API_TOKEN` (D1: Edit), `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_D1_DATABASE_ID`. Tables are created on first start. On that first start the old pickleDB files (`counting.db`, `embed.db`, `users.db`, `autorole.db`, `ai.db`) next to `main.py` are copied in, read back and compared; the files themselves are never touched. Without the Cloudflare variables the bot keeps local `.db` files, so you can develop offline.
+
+## Commands with spaces
+- `/roblox`: `info`, `avatar`, `outfits`, `item`, `bundle`, `asset`, `place`, `badge`, `badges`, `recentbadges`, `limiteds`, `british`, `todiscord`, `fromdiscord`, `group` (group info by ID, link or name), plus verification: `verify`, `link`, `accounts`, `auto`, `remove`, `hide`, `show`, `sync`, and `panel` (`status`, `setgroup`, `nickname`, `role`, `unverified`, `mirror`, `prompt`, `title`, `text`, `stats`, `send`).
+- `/vortex`: `game`, `user`, `cookie` (PlayVortex lookups; the cookie is entered in a form, never in chat).
+- `/server info`
+
+## Roblox verification
+- People sign in with Roblox (OAuth2 through the Shapes API, nothing goes in their bio). **No Yapin' account is needed.** Accounts (up to 100) live in the Shapes API; a person who also has a Yapin' account can press Link Discord on the Yapin' dashboard to merge them. `/linkroblox` stays for people who only want to link.
+- With mirroring on, `/roblox sync` creates, renames and deletes roles to match the Roblox group (it only deletes roles the bot made) and explains in plain words when Discord refuses (missing Manage Roles / Manage Nicknames, or the bot's role sitting below the roles it hands out).
+- Set `SHAPES_API_TOKEN` and add this bot's URL to the API's `BOT_NOTIFY_URLS` (for example `http://127.0.0.1:13455`) so new verifications DM people and sync their roles.
+
+## Other
 - `/cmdlog` (server admins) logs commands to a channel through a webhook; `/botlog` (bot owners) logs every command and server add/remove. A webhook the bot already made in a channel is reused and shared between logs.
 - `/counting warnings:<0-50>` lets bot owners change how many warnings a server gets (default 3).
-
