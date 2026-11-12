@@ -30,7 +30,7 @@ backend each store is on (`d1-tables`, `d1-kv` or `local-json`).
 
 ## Files
 
-- `main.py`: commands, events, web server, and the small discord.py-shaped layer on top of `yapper.py` (embeds, buttons, command arguments; the section near the top, formerly `yshim.py`)
+- `main.py`: commands, events, web server, and the small discord.py-shaped layer on top of `yapper.py` (embeds, buttons, command arguments; the section near the top)
 - `tables.py`: Cloudflare D1 storage as real tables, with the same get / set / remove / items API
 - `migrate_pickledb.py`: one-time import of the old `.db` files
 
@@ -65,6 +65,10 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 
 `/vortexgame <game ID>` and `/vortexinfo <user ID>` (IDs, not usernames) show a game or user with link buttons. `/vortexcookie` opens a private form (so the cookie never appears in chat) that saves your own Vortex login so lookups are made as you and also show your friend/follow status; submitting the form empty deletes it.
 
+## Counting
+
+`/counting` (admins: `toggle`, `channel`, `emoji`). A server gets 3 warnings before a mistake ruins the count; a bot owner can change that per server with `/counting warnings <0-50>` (0 ruins it on the first mistake). The bot remembers the message that holds the last number and, if it is deleted, says who deleted it and what the next number is. Yapin' sends no "message deleted" event, so the bot checks that message every 15 seconds for 15 minutes after it was counted, and once more when the next number arrives. It only reacts to a clear "not found" from Yapin', never to a passing error, and it can't tell who deleted a message (a moderator's delete is announced as the counter's).
+
 ## Command logs and webhooks
 
 `/cmdlog` (per server) and the bot owners' global log both post through webhooks. A Yapin' webhook belongs to one channel, so logs share one when they log into the same channel (a server log in the global log's channel reuses its webhook instead of making another), and an existing `Shapes ...` webhook of the bot in a channel is reused before a new one is made. Moving a log to another channel only deletes its old webhook if no other log still uses it. A passing error posts just that one line as the bot; only when Yapin' refuses a webhook does a log fall back to the bot, and it tries webhooks again every hour.
@@ -81,4 +85,8 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 The bot owner runs `/partner add <server id> [description]` (inside the server, the id can be left out) to feature a server at `/partners`. Shapes tries to create an invite for it, otherwise reuses one the server already has (a vanity link first); `/partner invite <server id> <https://www.yapin.gg/... link>` sets one by hand. The page shows the server's icon, name, member / channel / role counts and the description you wrote (or the server's own description when you wrote none). Also: `/partner description`, `/partner remove`, `/partner list`. The same data is at `/api/partners`. Only yapin.gg invite links are accepted.
 
 ## Roblox verification
-OAuth2 through the Shapes API (no bio text). `/verify` (link / accounts / auto / remove / verify here), `/verifysetup` (group, nickname template, verified/unverified role, mirror, DM prompt), `/sync`. Group roles are mirrored 1:1 into Yapin' roles; members sync when they verify or auto-verify, on `/sync`, and by a backup sync every 24 hours measured in elapsed UTC seconds (daylight saving and leap years can't shift it). Accounts are managed at `/roblox` (linked from the dashboard), which also links or unlinks your Discord account (Discord OAuth in the API, so Discord servers see the same Roblox accounts). The API tells the bot about new verifications at `POST /internal/verified`; set `BOT_NOTIFY_URLS` on the API if the bot isn't at `BOT_URL`.
+OAuth2 through the Shapes API (no bio text). `/robloxverify` (verify here, `link`, `accounts`, `auto`, `remove`, `hide`/`show` one, several or `all` accounts, up to 100 accounts), `/robloxpanel` (`group`, `nickname`, `role`, `unverified`, `mirror`, `prompt`, `title`, `text`, `send` a panel with a Verify button, `stats`), `/sync`, and `/linkroblox` for people who only want to link. With mirroring on, `/sync` creates, renames and deletes Yapin' roles to match the group (it only deletes roles the bot made) and explains in plain words when Yapin' refuses (missing Manage Roles / Manage Nicknames, or the bot's role sitting below the roles it hands out). Members sync when they verify or press the panel button, on `/sync`, and by a backup sync every 24 hours measured in elapsed UTC seconds. `/robloxinfo` shows who owns an account unless they hid it, and `/groupinfo` shows a Roblox group (ID, link or name).  Accounts are managed at `/dashboard/roblox` (hide, link Discord); server owners and people with Manage Server run the panel, roles and stats at `/dashboard/roblox/manage` (counts only, never other people's accounts). The API tells the bot about new verifications at `POST /internal/verified`; set `BOT_NOTIFY_URLS` on the API if the bot isn't at `BOT_URL`.
+
+## Cogs
+
+Features live in `cogs/`, one topic per file, loaded at start with `bot.load_extensions("cogs")`. A cog file has a `yapper.Cog` class and a `setup(bot)`; `bot.core` is this file's module, for the shared helpers (`bot.core.cached`, the tables, `shapes_api`). `cogs/roblox.py` is the first one (verification commands, the Verify button, join and ready listeners). Yapin' has no command groups yet, so command names stay flat (`/robloxverify`, `/robloxpanel`).

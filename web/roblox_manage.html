@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roblox verification - Shapes</title>
+<link rel="icon" type="image/png" href="https://our-websites.github.io/cdn.shapes.lol/shapes/favicon.ico">
+<meta name="theme-color" content="#050505">
+<style>
+  :root { color-scheme: dark; --bg:#050505; --panel:#0d0d0f; --ink:#fff; --muted:#9b9b9f; --line:rgba(160,160,170,.25); --accent:#6366f1; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
+  main { max-width:820px; margin:0 auto; padding:24px 16px 48px; }
+  a { color:#9ab; } h1 { font-size:24px; margin:8px 0 4px; } h2 { font-size:17px; margin:0 0 10px; } p.sub { color:var(--muted); margin:0 0 18px; }
+  .top { display:flex; gap:12px; align-items:center; } .top a:first-of-type { margin-left:auto; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin:12px 0; }
+  label { display:block; color:var(--muted); font-size:13px; margin:12px 0 4px; }
+  input[type=text], select, textarea { width:100%; font:inherit; color:var(--ink); background:#050505; border:1px solid var(--line); border-radius:10px; padding:8px 10px; }
+  textarea { min-height:80px; resize:vertical; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:12px; } .row > * { flex:1; min-width:140px; }
+  .row.fit > * { flex:0 0 auto; }
+  button { font:inherit; background:var(--accent); color:#fff; border:0; border-radius:10px; padding:8px 14px; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; }
+  .stat { background:#050505; border:1px solid var(--line); border-radius:12px; padding:10px 12px; } .stat b { display:block; font-size:22px; } .stat span { color:var(--muted); font-size:12px; }
+  .bars { display:flex; align-items:flex-end; gap:4px; height:64px; margin-top:12px; } .bars i { flex:1; background:var(--accent); border-radius:3px 3px 0 0; min-height:2px; opacity:.85; }
+  .note { color:var(--muted); font-size:13px; } .ok { color:#7ee2a0; } .err { color:#ff8a8a; }
+  .check { display:flex; gap:8px; align-items:center; margin-top:12px; } .check input { width:auto; }
+</style></head><body><main>
+<div class="top"><h1>Roblox verification</h1><a href="/dashboard/roblox">My accounts</a><a href="/dashboard">← Dashboard</a></div>
+<p class="sub">Set up verification for a server you own or manage (owner, Administrator or Manage Server). You only ever see counts here, never other people’s accounts.</p>
+<label for="server">Server</label><select id="server"></select>
+<div id="msg" class="note" style="margin-top:8px"></div>
+<div id="body" style="display:none">
+  <div class="card"><h2>Stats</h2><div id="stats" class="stats"></div><div id="bars" class="bars" title="Verified per day, last 14 days"></div>
+    <div class="note" style="margin-top:6px">Verified per day, last 14 days. “Ever” counts everyone who verified here, even if they later left.</div></div>
+  <div class="card"><h2>Group and roles</h2>
+    <label for="group">Roblox group ID (the number in the group’s URL)</label><input type="text" id="group" inputmode="numeric">
+    <label for="nick">Nickname template (use {name}, {display}, {id}, {rank}; empty turns it off)</label><input type="text" id="nick" placeholder="{rank} | {name}">
+    <label for="vrole">Verified role</label><select id="vrole"></select>
+    <label for="urole">Unverified role (given to members who haven’t verified)</label><select id="urole"></select>
+    <div class="check"><input type="checkbox" id="mirror"><label for="mirror" style="margin:0">Mirror the group’s roles: create, rename and delete Yapin’ roles to match (only roles I made get deleted)</label></div>
+    <div class="check"><input type="checkbox" id="prompt"><label for="prompt" style="margin:0">DM new members a sign-in link when they join</label></div>
+    <label for="ptext">DM text (optional)</label><textarea id="ptext"></textarea>
+    <div class="row fit"><button id="save">Save</button><button class="ghost" id="sync">Sync everyone now</button></div>
+    <div class="note" id="syncnote" style="margin-top:8px">A backup sync also runs every 24 hours.</div>
+    <div id="problems" class="note err" style="margin-top:10px"></div></div>
+  <div class="card"><h2>Verification panel</h2>
+    <p class="note" style="margin-top:0">A message with a Verify button. Pressing it verifies the person with their linked Roblox account, or sends them a sign-in link.</p>
+    <label for="ptitle">Title</label><input type="text" id="ptitle" placeholder="Verify with Roblox">
+    <label for="pbody">Text</label><textarea id="pbody" placeholder="Leave empty for the default text"></textarea>
+    <label for="pchan">Channel</label><select id="pchan"></select>
+    <div class="row fit"><button id="send">Save and post panel</button></div>
+    <div class="note" id="plast" style="margin-top:8px"></div></div>
+</div>
+</main><script>
+const $ = s => document.querySelector(s), msg = $('#msg');
+const call = (path, body) => fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(async r => { if (r.status === 401) location.href = '/dashboard/login'; return { ok: r.ok, ...(await r.json().catch(() => ({}))) }; });
+const say = (t, bad) => { msg.textContent = t || ''; msg.className = 'note ' + (bad ? 'err' : t ? 'ok' : ''); };
+const opt = (v, t, sel) => { const o = document.createElement('option'); o.value = v; o.textContent = t; if (sel) o.selected = true; return o; };
+let sid = null;
+async function servers() {
+  const d = await call('/me/roblox/manage');
+  if (!d.servers || !d.servers.length) { say(d.error || 'You don’t own or manage any server the bot is in.', true); return; }
+  const sel = $('#server'); d.servers.forEach(s => sel.append(opt(s.id, s.name)));
+  const want = new URLSearchParams(location.search).get('server');
+  if (want && d.servers.some(s => s.id === want)) sel.value = want;
+  sel.onchange = () => open(sel.value); open(sel.value);
+}
+async function open(id) {
+  sid = id; say('Loading…'); $('#body').style.display = 'none';
+  const d = await call('/me/roblox/manage/' + encodeURIComponent(id));
+  if (!d.ok) { say(d.error || 'Couldn’t load that server.', true); return; }
+  say(''); $('#body').style.display = '';
+  const c = d.config || {};
+  $('#group').value = c.group_id || ''; $('#nick').value = c.nickname_template || ''; $('#ptext').value = c.prompt_text || '';
+  $('#mirror').checked = !!c.mirror_roles; $('#prompt').checked = !!c.prompt_dm;
+  for (const [el, cur, none, create] of [['#vrole', c.verified_role_id, 'None', 'Create a “Verified” role'], ['#urole', c.unverified_role_id, 'None', null]]) {
+    const s = $(el); s.replaceChildren(opt('', none, !cur)); if (create) s.append(opt('create', create));
+    (d.roles || []).forEach(r => s.append(opt(r.id, r.name, cur === r.id)));
+  }
+  $('#ptitle').value = c.panel_title || ''; $('#pbody').value = c.panel_text || '';
+  const ch = $('#pchan'); ch.replaceChildren(); (d.channels || []).forEach(x => ch.append(opt(x.id, '#' + x.name, x.id === c.panel_channel_id)));
+  $('#plast').textContent = c.panel_message_id ? 'A panel is posted. Posting again updates it when it’s in the same channel.' : 'No panel posted yet.';
+  const pr = $('#problems'); pr.replaceChildren();
+  const ls = d.last_sync;
+  if (ls && (ls.problems || []).length) {
+    const h = document.createElement('b'); h.textContent = 'The last sync hit problems:'; pr.append(h);
+    ls.problems.forEach(t => { const p = document.createElement('div'); p.textContent = '• ' + t.replace(/\*\*/g, ''); pr.append(p); });
+  } else if (ls && ls.counts && !ls.counts.single) { pr.className = 'note ok'; pr.textContent = 'Last sync finished without problems.'; }
+  const st = d.stats, box = $('#stats'), bars = $('#bars'); box.replaceChildren(); bars.replaceChildren();
+  if (!st) { box.append(Object.assign(document.createElement('div'), { className: 'note', textContent: 'Set the group to start counting.' })); return; }
+  for (const [n, l] of [[st.verified, 'Verified now'], [st.ever_verified, 'Ever verified'], [st.last_24h, 'Last 24 hours'], [st.last_7d, 'Last 7 days'], [st.last_30d, 'Last 30 days'], [st.accounts, 'Roblox accounts']]) {
+    const e = document.createElement('div'); e.className = 'stat'; e.innerHTML = '<b></b><span></span>'; e.firstChild.textContent = n ?? 0; e.lastChild.textContent = l; box.append(e);
+  }
+  const max = Math.max(1, ...(st.per_day || []).map(x => x.count));
+  (st.per_day || []).forEach(x => { const b = document.createElement('i'); b.style.height = Math.max(3, Math.round(x.count / max * 100)) + '%'; b.title = x.date + ': ' + x.count; bars.append(b); });
+}
+async function save(extra) {
+  const body = { group_id: $('#group').value.trim(), nickname_template: $('#nick').value.trim(), verified_role_id: $('#vrole').value,
+    unverified_role_id: $('#urole').value, mirror_roles: $('#mirror').checked, prompt_dm: $('#prompt').checked, prompt_text: $('#ptext').value,
+    panel_title: $('#ptitle').value, panel_text: $('#pbody').value };
+  const d = await call('/me/roblox/manage/' + encodeURIComponent(sid) + '/config', body);
+  if (!d.ok) { say(d.error || 'Couldn’t save.', true); return false; }
+  return true;
+}
+$('#save').onclick = async () => { if (await save()) { say('Saved.'); open(sid); } };
+$('#sync').onclick = async () => {
+  if (!(await save())) return;
+  const d = await call('/me/roblox/manage/' + encodeURIComponent(sid) + '/sync', {});
+  if (d.ok) $('#syncnote').textContent = 'Sync started. It can take a few minutes for a big server; roles and nicknames update as it goes.'; else say(d.error || 'Couldn’t start the sync.', true);
+};
+$('#send').onclick = async () => {
+  if (!(await save())) return;
+  const d = await call('/me/roblox/manage/' + encodeURIComponent(sid) + '/panel', { channel_id: $('#pchan').value });
+  if (d.ok) { say('Panel posted.'); open(sid); } else say(d.error || 'Couldn’t post the panel.', true);
+};
+servers();
+</script></body></html>
