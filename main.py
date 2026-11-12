@@ -510,13 +510,32 @@ _MENTION = re.compile(r"^<@!?([^>\s]+)>$")
 _ROLE_MENTION = re.compile(r"^<@&([^>\s]+)>$")
 
 
-def resolve_user(token):
+def resolve_user(token, inter=None):
+    """A user from a mention, an id, or a @username. Yapin's API only looks people up by id, so a username is matched to an id first
+    (the person running the command, then anyone in the servers the bot is in) and the lookups that need an id get the real one."""
     token = (token or "").strip()
     m = _MENTION.match(token)
     uid = m.group(1) if m else token.lstrip("@")
     if not uid:
         raise ValueError("no user given")
+    ids = getattr(inter, "_mentions", None) or {}
+    if not m and uid.lower() in ids:                       # the event said who was pinged: use its id, not the text
+        uid = ids[uid.lower()]
     data = fetch_user(uid)
+    if not data and not m:
+        wanted = uid.lower()
+        me = getattr(inter, "user", None)
+        if me is not None and str(getattr(me, "name", "")).lower() == wanted:
+            uid = str(me.id)
+        else:
+            try:
+                hit = next((p for p in _all_people() if p["name"].lower() == wanted), None)
+            except Exception:
+                hit = None
+            if hit:
+                uid = hit["id"]
+        if uid != token.lstrip("@"):
+            data = fetch_user(uid)
     return YUser.from_api({**data, "id": data.get("id", uid)}) if data else YUser(uid)
 
 
@@ -1132,7 +1151,7 @@ def _convert(token, ann, inter):
                 return False
             raise ValueError(token)
         if ann is YUser:
-            return resolve_user(token)
+            return resolve_user(token, inter)
         if ann is YRole:
             return resolve_role(token, inter.guild_id)
     except YapperError:
@@ -1168,8 +1187,46 @@ def _parse(spec, raw, inter):
 COMMAND_HOOKS = []      # functions called as hook(command_name, msg) whenever someone runs a command (e.g. command logging)
 
 
+def event_mentions(msg):
+    """{lowercase username: user id} for everyone the event itself says was mentioned. A ping in the chat box arrives as
+    "@name" text, but the event carries the real ids next to it, so those are trusted before any name guessing."""
+    found = {}
+
+    def walk(value, depth=0):
+        if depth > 4:
+            return
+        if isinstance(value, dict):
+            uid = value.get("user_id") or value.get("id")
+            name = value.get("username") or value.get("name") or value.get("display_name")
+            if uid and name and isinstance(name, str):
+                found.setdefault(name.lower().lstrip("@"), str(uid))
+            for v in value.values():
+                walk(v, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for v in value:
+                walk(v, depth + 1)
+    try:
+        for key, value in dict(msg).items():
+            if "mention" in str(key).lower() or str(key).lower() in ("options", "resolved", "users", "args_users"):
+                walk(value)
+    except Exception:
+        pass
+    return found
+
+
 def _run_command(spec, msg):
+    _dm_ctx.command = spec.name        # replies sent from here on are labelled with the command (DM log)
+    try:
+        _run_command_inner(spec, msg)
+    finally:
+        _dm_ctx.command = None
+
+
+def _run_command_inner(spec, msg):
     inter = Interaction(msg=msg)
+    inter._mentions = event_mentions(msg)
+    if "@" in str(msg.get("args") or "") or inter._mentions:     # what a ping looks like in the event (names and keys only), to check it against the logs
+        print(f"[cmd] mention data: keys={sorted(str(k) for k in dict(msg).keys())} ids={inter._mentions}")
     for hook in COMMAND_HOOKS:
         try:
             hook(spec.name, msg)
@@ -1177,6 +1234,11 @@ def _run_command(spec, msg):
             traceback.print_exc()
     print(f"[cmd] /{spec.name} by @{msg.get('author_username') or msg.get('username') or msg.get('author_id')} "
           f"in {msg.get('server_id') or 'a DM'}")
+    if not _first(msg, "server_id", "guild_id"):               # a command used in a DM is a DM to the bot
+        who = str(msg.get("author_id") or msg.get("user_id") or "")
+        if who:
+            _dm_channels[str(msg.get("channel_id"))] = who
+            log_dm("in", who, f"/{spec.name} {msg.get('args') or ''}".strip(), "command in a DM", name=msg.get("author_username") or msg.get("username"))
     try:
         kwargs = _parse(spec, msg.get("args"), inter)
     except _Usage as e:
@@ -1357,6 +1419,7 @@ cmdlogDB = Table("cmdlog")     # command log lines: "<server>:<ms>-<rand>" -> wh
 cmdlogcfgDB = Table("cmdlogcfg")   # per server: where the command log goes
 actionsDB = Table("actions")   # who did what from the dashboard: sends, DMs, settings, with username and time
 dmDB = Table("dms")       # DM channels the dashboard knows about: user id -> {channel_id, name, last}
+dmlogDB = Table("dmlog")  # every DM the bot sends or receives: "<ms>-<rand>" -> {at, dir, user_id, name, text, source}
 DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "autoroleDB": autoroleDB, "AI_DB": AI_DB,
              "automodDB": automodDB, "dmDB": dmDB, "auditDB": auditDB}
 
@@ -7770,6 +7833,95 @@ def api_send(channel_id):
 
 
 # --- direct messages ---
+# Every DM the bot sends or receives is written to dmlogDB: who, which way, what was said and what caused it (a command, the dashboard,
+# verification, a welcome message...). Sending goes through bot.send / bot.respond, so both are wrapped once here; receiving is
+# caught where the bot is DMed (on_dm) and where a command is run in a DM.
+_dm_channels = {}              # DM channel id -> the other person's user id (filled as DMs are opened, received or answered)
+_dm_ctx = threading.local()    # the command being run on this thread, so its replies are labelled with it
+_DM_KEEP = 5000
+_last_dm_trim = 0.0
+
+
+def _dm_text(content=None, embeds=None, layout=None):
+    parts = [str(content)] if content else []
+    for e in (embeds or []):
+        e = e if isinstance(e, dict) else getattr(e, "data", None) or {}
+        for key in ("title", "description"):
+            if e.get(key):
+                parts.append(str(e[key]))
+        for f in e.get("fields") or []:
+            parts.append(f"{f.get('name', '')}: {f.get('value', '')}")
+    if layout and not parts:
+        parts.append("(a layout message)")
+    return " | ".join(parts)[:1000]
+
+
+def _dm_source():
+    """What caused this message: the command being run, else the nearest function of ours on the stack."""
+    cmd = getattr(_dm_ctx, "command", None)
+    if cmd:
+        return f"/{cmd}"
+    frame = sys._getframe(2)
+    here = os.path.dirname(os.path.abspath(__file__))
+    while frame:
+        code = frame.f_code
+        if os.path.abspath(code.co_filename).startswith(here) and code.co_name not in ("<module>", "_dm_source", "log_dm", "send", "respond", "_send_logged", "_respond_logged"):
+            return f"{os.path.basename(code.co_filename)}:{code.co_name}"
+        frame = frame.f_back
+    return "bot"
+
+
+def log_dm(direction, user_id, text, source=None, name=None):
+    """Write one DM down. direction is "out" (the bot sent it) or "in" (someone sent it to the bot). Never raises."""
+    global _last_dm_trim
+    try:
+        stamp = time.time()
+        uid = str(user_id or "")
+        known = dmDB.get(uid) or {}
+        dmlogDB.set(f"{int(stamp * 1000)}-{os.urandom(2).hex()}", {
+            "at": int(stamp), "dir": direction, "user_id": uid, "name": name or known.get("name") or uid,
+            "text": str(text or "")[:1000], "source": str(source or "")[:80]})
+        print(f"[dm {'->' if direction == 'out' else '<-'}] {name or known.get('name') or uid}: {str(text or '')[:100]!r} ({source})")
+        if stamp - _last_dm_trim > 3600:
+            _last_dm_trim = stamp
+            rows = sorted(dmlogDB.items().items())
+            for key, _row in rows[:max(0, len(rows) - _DM_KEEP)]:
+                dmlogDB.remove(key)
+    except Exception as e:
+        print(f"[dm log] {type(e).__name__}: {e}")
+
+
+def _install_dm_logging():
+    raw_dm, raw_send, raw_respond = bot.dm, bot.send, bot.respond
+
+    def dm(user_id):
+        channel = raw_dm(user_id)
+        _dm_channels[str(channel)] = str(user_id)
+        return channel
+
+    def send(channel_id, content="", embeds=None, components=None, reply_to=None, files=None, **kw):
+        out = raw_send(channel_id, content, embeds=embeds, components=components, reply_to=reply_to, files=files, **kw)
+        who = _dm_channels.get(str(channel_id))
+        if who:
+            log_dm("out", who, _dm_text(content, embeds), _dm_source())
+        return out
+
+    def respond(interaction, kind, content=None, embeds=None, components=None, layout=None, modal=None):
+        out = raw_respond(interaction, kind, content=content, embeds=embeds, components=components, layout=layout, modal=modal)
+        try:
+            if kind in ("reply", "ephemeral", "update") and not _first(interaction, "server_id", "guild_id"):
+                who = str(interaction.get("user_id") or interaction.get("author_id") or "")
+                if who:
+                    _dm_channels[str(interaction.get("channel_id"))] = who
+                    log_dm("out", who, _dm_text(content, embeds, layout), _dm_source(), name=interaction.get("username"))
+        except Exception as e:
+            print(f"[dm log] {type(e).__name__}: {e}")
+        return out
+    bot.dm, bot.send, bot.respond = dm, send, respond
+
+
+_install_dm_logging()
+
 
 def track_dm(msg):
     """Remember who has messaged the bot so their DM shows up in the dashboard."""
@@ -7782,6 +7934,18 @@ def track_dm(msg):
     name = _first(msg, "author_display_name", "author_username", "author_name") or uid
     dmDB.set(uid, {"user_id": uid, "channel_id": str(msg.get("channel_id")), "name": name,
                    "last": int(time.time()), "preview": str(msg.get("content") or "")[:80]})
+    _dm_channels[str(msg.get("channel_id"))] = uid
+    log_dm("in", uid, msg.get("content") or "(attachment)", "DM to the bot", name=name)
+
+
+@app.route("/api/dms/log")
+@admin_required
+def api_dm_log():
+    """Everything the bot sent or received as a DM, newest first. ?user_id= limits it to one person."""
+    who = request.args.get("user_id", "").strip()
+    rows = [v for v in dmlogDB.items().values() if isinstance(v, dict) and (not who or v.get("user_id") == who)]
+    rows.sort(key=lambda r: -int(r.get("at") or 0))
+    return jsonify({"log": rows[:300], "total": len(rows)})
 
 
 @app.route("/api/dms")
@@ -8134,8 +8298,41 @@ def api_data_get(kind, entity_id):
         return _api_error(e)
     records = [{"db": name, "label": label, "about": about, "exists": DATABASES[name].exists(entity_id), "value": DATABASES[name].get(entity_id)}
                for name, label, about, _ in DATA_SCHEMA[kind]]
+    records = _api_records(kind, entity_id) + records
     log = [v for v in auditDB.items().values() if isinstance(v, dict) and str(v.get("key")) == entity_id]
     return jsonify({"entity": entity, "records": records, "history": sorted(log, key=lambda v: -v.get("at", 0))[:10]})
+
+
+def _api_records(kind, entity_id):
+    """Read-only records that live in the Shapes API, not in this bot's tables: a person's linked Roblox and Last.fm accounts, a
+    server's Roblox verification setup and numbers. (This is why Profile data looked empty for people who had linked accounts.)"""
+    out = []
+    try:
+        if kind == "user":
+            person = shapes_api("GET", f"/internal/person/yapin/{urllib.parse.quote(str(entity_id), safe='')}") or {}
+            accounts = person.get("accounts") or []
+            out.append({"db": "api:roblox", "label": "Roblox accounts", "readonly": True, "exists": bool(accounts or person.get("discord_id")),
+                        "about": "Linked through the Shapes API (shared with the Discord bot). Read-only here.",
+                        "value": {"discord_id": person.get("discord_id"),
+                                  "accounts": [{k: a.get(k) for k in ("id", "name", "display_name", "auto_verify", "hidden", "linked_at", "profile")} for a in accounts]}
+                        if (accounts or person.get("discord_id")) else None})
+            links = shapes_api("GET", f"/internal/links/{urllib.parse.quote(str(entity_id), safe='')}") or {}
+            out.append({"db": "api:lastfm", "label": "Last.fm", "readonly": True, "exists": bool(links.get("lastfm")),
+                        "about": "Linked through the Shapes API. Read-only here.", "value": links.get("lastfm")})
+        else:
+            cfg = (shapes_api("GET", f"/internal/guild/yapin/{urllib.parse.quote(str(entity_id), safe='')}/config") or {}).get("config")
+            stats = (shapes_api("GET", f"/internal/guild/yapin/{urllib.parse.quote(str(entity_id), safe='')}/stats") or {})
+            value = None
+            if cfg and cfg.get("group_id"):
+                value = {**{k: cfg.get(k) for k in ("group_id", "nickname_template", "mirror_roles", "verified_role_id", "unverified_role_id", "prompt_dm",
+                                                    "panel_channel_id", "panel_message_id", "last_sync_at")},
+                         "verified_now": stats.get("verified"), "verified_ever": stats.get("ever_verified"), "last_24h": stats.get("last_24h"),
+                         "last_7d": stats.get("last_7d"), "last_30d": stats.get("last_30d")}
+            out.append({"db": "api:roblox-setup", "label": "Roblox verification", "readonly": True, "exists": value is not None,
+                        "about": "Set with /robloxpanel; numbers from the Shapes API. Read-only here.", "value": value})
+    except Exception as e:
+        print(f"[admin] couldn't read the Shapes API records: {type(e).__name__}: {e}")
+    return out
 
 
 def _audit(db, key, action, before, after):

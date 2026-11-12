@@ -178,7 +178,7 @@
   <section class="view" id="v-dms" aria-label="Direct messages">
     <div class="layout">
       <div class="card">
-        <h2>Conversations</h2>
+        <h2>Conversations <button class="btn ghost" id="dmlogbtn" type="button" style="float:right;padding:2px 10px">DM log</button></h2>
         <div class="toolbar" style="position:relative">
           <input type="search" id="dmsearch" placeholder="Start a DM: search a name or paste an ID" autocomplete="off" aria-label="Find a person to message">
         </div>
@@ -444,12 +444,23 @@ async function loadDMs() {
   $('#dmlist').innerHTML = dms.length ? dms.map(d => `<button class="row" data-u="${esc(d.user_id)}" ${dmChannel === d.channel_id ? 'aria-current="true"' : ''}>${avatar(null, d.name)}<span class="name"><b>${esc(d.name)}</b><div class="muted" style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis">${esc(d.preview || '')}</div></span><span class="count">${esc(ago(d.last))}</span></button>`).join('')
     : '<div class="empty">No conversations yet. People who message the bot appear here, or start one above.</div>';
 }
+async function showDMLog(userId) {
+  dmChannel = null; clearInterval(dmPoll);
+  $('#dmpane').innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const d = await api('/api/dms/log' + (userId ? '?user_id=' + encodeURIComponent(userId) : ''));
+    $('#dmpane').innerHTML = `<div class="thread" style="height:100%"><div class="thread-head"><span>DM log${userId ? ' for this person' : ''}</span><span class="muted">${d.total} message${d.total === 1 ? '' : 's'}, newest first</span></div>
+      <div class="msgs" style="display:grid;gap:8px;align-content:start">${d.log.length ? d.log.map(r => `<div class="rec" style="padding:8px 12px"><div class="muted" style="font-size:12.5px">${r.dir === 'out' ? '→ Sent to' : '← Received from'} <b>${esc(r.name || r.user_id)}</b> · ${esc(ago(r.at))} · ${esc(r.source || '')}</div><div style="white-space:pre-wrap;word-break:break-word">${esc(r.text || '')}</div></div>`).join('') : '<div class="empty">No DMs yet. Every DM the bot sends or receives shows up here.</div>'}</div></div>`;
+  } catch (e) { $('#dmpane').innerHTML = `<div class="empty">Couldn’t load: ${esc(e.message)}</div>`; }
+}
+$('#dmlogbtn').onclick = () => showDMLog('');
 $('#dmlist').onclick = e => { const r = e.target.closest('.row'); if (r) openDM(dms.find(d => d.user_id === r.dataset.u)); };
 function openDM(d) {
   if (!d) return;
   dmChannel = d.channel_id; clearInterval(dmPoll);
-  $('#dmpane').innerHTML = `<div class="thread" style="height:100%"><div class="thread-head"><span>${esc(d.name)}</span><span class="muted" id="dstate"></span></div><div class="msgs" id="dmsgs"></div>
+  $('#dmpane').innerHTML = `<div class="thread" style="height:100%"><div class="thread-head"><span>${esc(d.name)}</span><span class="muted" id="dstate"></span><button class="btn ghost" type="button" id="dmlogone" style="padding:2px 10px">Log</button></div><div class="msgs" id="dmsgs"></div>
     <form class="composer" id="dform"><div class="line"><textarea id="dtext" rows="2" placeholder="Write to ${esc(d.name)}" maxlength="4000"></textarea><button class="btn" type="submit">Send</button></div><div class="inline"><input type="url" id="dimg" placeholder="Image link (optional, https)" style="flex:1"><span class="status" id="dstatus" role="status"></span></div></form></div>`;
+  $('#dmlogone').onclick = () => showDMLog(d.user_id);
   $('#dtext').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#dform').requestSubmit(); } };
   $('#dform').onsubmit = async e => {
     e.preventDefault(); const st = $('#dstatus'); st.className = 'status'; st.textContent = '';
@@ -558,11 +569,14 @@ async function openData(kind, id) {
 }
 const pretty = v => v === null || v === undefined ? '' : JSON.stringify(v, null, 2);
 function recHTML(r, i) {
+  if (r.readonly) return `<div class="rec" id="rec${i}"><header><h3>${esc(r.label)}</h3><code class="db">${esc(r.db)}</code><span class="muted">${esc(r.about)}</span>${r.exists ? '' : '<span class="badge">NOTHING LINKED</span>'}</header>
+    <pre style="margin:0;padding:10px 14px;overflow:auto;max-height:260px;font-size:12.5px">${r.exists ? esc(pretty(r.value)) : 'Nothing here yet.'}</pre></div>`;
   return `<div class="rec" id="rec${i}"><header><h3>${esc(r.label)}</h3><code class="db">${esc(r.db)}</code><span class="muted">${esc(r.about)}</span>${r.exists ? '' : '<span class="badge">NOTHING SAVED</span>'}</header>
     <textarea spellcheck="false" aria-label="${esc(r.label)} data (JSON)" placeholder="Nothing saved yet. Paste JSON here to create it.">${esc(pretty(r.value))}</textarea>
     <div class="inline"><button class="btn" data-a="save">Save</button><button class="btn ghost" data-a="revert">Revert</button><button class="btn danger" data-a="delete">Delete</button><span class="status" role="status"></span></div></div>`;
 }
 function wireRec(kind, id, r, i) {
+  if (r.readonly) return;
   const box = $('#rec' + i), ta = $('textarea', box), st = $('.status', box);
   const say = (m, c) => { st.className = 'status ' + (c || ''); st.textContent = m; };
   ta.onkeydown = e => { if (e.key === 'Tab') { e.preventDefault(); const p = ta.selectionStart; ta.setRangeText('  ', p, ta.selectionEnd, 'end'); } };
