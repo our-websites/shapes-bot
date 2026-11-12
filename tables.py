@@ -1,4 +1,4 @@
-"""Cloudflare D1 storage as real tables (replaces cfstore.py's one big key/value table).
+"""Cloudflare D1 storage as real tables, one table per bot store.
 
 Every bot "database" (counting, embed, users, ...) is its own table with typed columns:
 
@@ -285,7 +285,7 @@ atexit.register(_flush_all)
 
 
 class Table:
-    """One store: a dict-like with the same methods cfstore's class had."""
+    """One store: a dict-like (get / set / remove / exists / all / items / save)."""
 
     def __init__(self, name):
         self.name = name

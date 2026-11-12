@@ -80,7 +80,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="[%(levelname)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)     # one line per web request drowned everything else
 from tables import Table
 # ====================================================================================================
-# The discord.py-shaped layer (this used to be yshim.py): the small slice of the discord.py API that shapes-bot uses,
+# The discord.py-shaped layer: the small slice of the discord.py API that shapes-bot uses,
 # built on top of yapper.py.
 #
 # It exists so the ~40 command bodies could be ported with very few changes. What you get:
