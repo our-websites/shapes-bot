@@ -1,6 +1,7 @@
 import os
 import sys
 import threading
+import atexit
 import time
 import json
 import signal
@@ -11,7 +12,6 @@ import pytz
 import numbers
 #import pandas as pd # Last resort if i keep getting json errors
 from slpp import slpp as lua
-from pickledb import PickleDB
 from datetime import datetime, timezone
 from discord import app_commands
 import requests
@@ -56,12 +56,404 @@ Emojis = {
 chatgpt = OpenAI(api_key=os.getenv("OPENAI_KEY"), base_url="https://openrouter.ai/api/v1") # MapleAI is a scam.
 AIModel = "openai/gpt-oss-20b:free"
 
+# =============================================================================================================
+# Database: Cloudflare D1 (the Discord bot's own database, separate from the Yapin' bot's and never read by it).
+# Every store (counting, embed, users, ...) is a table with real columns, one row per key. Reads come from memory,
+# save() hands changes to a background writer, so nothing waits on the network. First start: rows from the old pickleDB
+# files (counting.db, embed.db, ...) are copied in once, read back and compared; the old files are left alone.
+# Without CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_D1_DATABASE_ID it keeps using local files.
+# =============================================================================================================
+FLUSH_INTERVAL = 3         # seconds between background passes (a set()/save() triggers one sooner)
+BATCH_SIZE = 50            # statements per request
+
+
+class Spec:
+    def __init__(self, table, pk, cols=(), scalar=None):
+        self.table, self.pk, self.cols, self.scalar = table, pk, tuple(cols), scalar
+        self.types = dict(self.cols)
+
+
+# column types: text, int, bool, json (any JSON value, kept as text)
+SPECS = {
+    "counting": Spec("bot_counting", "server_id", [("channel", "text"), ("number", "int"), ("enabled", "bool"), ("warnings", "int"),
+                                                   ("lastcounter", "text"), ("highestnumber", "int"), ("banned", "bool"), ("emojis", "json")]),
+    "embed": Spec("bot_embed", "user_id", [("color", "int")], scalar="color"),
+    "users": Spec("bot_users", "user_id"),
+    "autorole": Spec("bot_autorole", "server_id", [("role_id", "text"), ("enabled", "bool"), ("exempt_users", "json"), ("include_bots", "bool")]),
+    "ai": Spec("bot_ai", "user_id", [("username", "text"), ("user_messages", "json"), ("ai_responses", "json")]),
+    "rverify": Spec("bot_rverify", "server_id", [("roles", "json"), ("made", "json"), ("last", "json")]),
+    "cmdlog": Spec("bot_cmdlog", "log_id", [("channel", "text"), ("enabled", "bool"), ("events", "bool"), ("commands", "bool"),
+                                            ("refused", "bool"), ("retry_at", "int")]),
+    "lastonline": Spec("bot_lastonline", "roblox_id", [("at", "int")], scalar="at"),
+}
+# A store with no spec still works: it lives in bot_misc.
+
+META_SQL = "CREATE TABLE IF NOT EXISTS bot_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)"
+MISC_SQL = "CREATE TABLE IF NOT EXISTS bot_misc (db TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY (db, k))"
+
+_client = None
+_client_lock = threading.Lock()
+_stores = []
+_mode = None               # "d1" | "local"
+_mode_lock = threading.Lock()
+
+
+def _q(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
+def d1_configured():
+    return bool(os.environ.get("CLOUDFLARE_API_TOKEN") and os.environ.get("CLOUDFLARE_ACCOUNT_ID") and os.environ.get("CLOUDFLARE_D1_DATABASE_ID"))
+
+
+def _cf():
+    global _client
+    if not d1_configured():
+        return None
+    with _client_lock:
+        if _client is None:
+            from cloudflare import Cloudflare
+            _client = Cloudflare(api_token=os.environ["CLOUDFLARE_API_TOKEN"])
+    return _client
+
+
+def _query(sql, params=None):
+    page = _cf().d1.database.query(os.environ["CLOUDFLARE_D1_DATABASE_ID"], account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"], sql=sql,
+                                   **({"params": [str(p) for p in params]} if params else {}))
+    rows = []
+    for result in page:
+        rows.extend(getattr(result, "results", None) or [])
+    return rows
+
+
+def _batch(statements):
+    _cf().d1.database.query(os.environ["CLOUDFLARE_D1_DATABASE_ID"], account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"],
+                            batch=[{"sql": sql, "params": [str(p) for p in params]} for sql, params in statements])
+
+
+# ------------------------------------------------------------------------------------------------ rows <-> values
+
+def _fits(kind, v):
+    if kind == "text":
+        return isinstance(v, str)
+    if kind == "int":
+        return isinstance(v, int) and not isinstance(v, bool)
+    if kind == "bool":
+        return isinstance(v, bool)
+    return True
+
+
+def to_row(spec, value):
+    cols, extra = {n: None for n, _ in spec.cols}, {}
+    if not isinstance(value, dict):
+        if spec.scalar and _fits(spec.types[spec.scalar], value):
+            cols[spec.scalar] = value
+        else:
+            extra["__value__"] = value
+        return cols, extra
+    for k, v in value.items():
+        if v is None:
+            continue
+        kind = spec.types.get(k) if isinstance(k, str) else None
+        if kind and _fits(kind, v):
+            cols[k] = v
+        else:
+            extra[k] = v
+    return cols, extra
+
+
+def _py(kind, v):
+    if kind == "json":
+        return json.loads(v)
+    if kind == "bool":
+        return bool(int(v))
+    if kind == "int":
+        return int(v)
+    return str(v)
+
+
+def from_row(spec, row):
+    extra = json.loads(row["extra_json"]) if row.get("extra_json") else {}
+    if "__value__" in extra and len(extra) == 1:
+        return extra["__value__"]
+    if spec.scalar and row.get(spec.scalar) is not None and not extra:
+        return _py(spec.types[spec.scalar], row[spec.scalar])
+    rec = {n: _py(kind, row[n]) for n, kind in spec.cols if row.get(n) is not None}
+    rec.update(extra)
+    return rec
+
+
+def upsert_statement(spec, key, value):
+    cols, extra = to_row(spec, value)
+    names = [spec.pk] + [n for n, _ in spec.cols] + ["extra_json"]
+    frags, params = ["?"], [str(key)]
+    for name, kind in spec.cols:
+        v = cols[name]
+        if v is None:
+            frags.append("NULL")        # every bound value travels as text, so NULL goes in as a literal
+        elif kind == "json":
+            frags.append("?")
+            params.append(json.dumps(v, sort_keys=True))
+        elif kind == "bool":
+            frags.append("?")
+            params.append(1 if v else 0)
+        else:
+            frags.append("?")
+            params.append(v)
+    frags.append("?" if extra else "NULL")
+    if extra:
+        params.append(json.dumps(extra, sort_keys=True))
+    sets = ", ".join(f"{_q(n)} = excluded.{_q(n)}" for n in names[1:])
+    return (f"INSERT INTO {spec.table} ({', '.join(_q(n) for n in names)}) VALUES ({', '.join(frags)}) "
+            f"ON CONFLICT({_q(spec.pk)}) DO UPDATE SET {sets}"), params
+
+
+def create_statement(spec):
+    cols = ", ".join(f"{_q(n)} {'INTEGER' if k in ('int', 'bool') else 'TEXT'}" for n, k in spec.cols)
+    return f"CREATE TABLE IF NOT EXISTS {spec.table} ({_q(spec.pk)} TEXT PRIMARY KEY, {cols}{', ' if cols else ''}extra_json TEXT)"
+
+
+def _norm(v):
+    return {k: x for k, x in v.items() if x is not None} if isinstance(v, dict) else v
+
+
+def _fingerprint(value):
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+# ------------------------------------------------------------------------------------------------ setup
+
+def _ensure_mode():
+    global _mode
+    with _mode_lock:
+        if _mode:
+            return _mode
+        if not _cf():
+            _mode = "local"
+            print("[db] Cloudflare D1 isn't configured (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_D1_DATABASE_ID): using local files")
+            return _mode
+        _batch([(META_SQL, []), (MISC_SQL, [])] + [(create_statement(s), []) for s in SPECS.values()])
+        _mode = "d1"
+        return _mode
+
+
+def _meta_get(key):
+    rows = _query("SELECT v FROM bot_meta WHERE k = ?", [key])
+    return rows[0]["v"] if rows else None
+
+
+def _meta_set(key, value):
+    _query("INSERT INTO bot_meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", [key, value])
+
+
+def _flush_all_at_exit():
+    for s in list(_stores):
+        try:
+            s.flush()
+        except Exception as e:
+            print(f"[db] final save failed for {s.name}: {e}")
+
+
+atexit.register(_flush_all_at_exit)
+
+
+def flush_all():
+    """Write every store now (blocks). Returns True when everything was written."""
+    ok = True
+    for s in list(_stores):
+        ok = s.flush() and ok
+    return ok
+
+
+class Table:
+    """One store. Same methods the PickleDB objects had that the bot uses."""
+
+    def __init__(self, name, legacy_file=None):
+        self.name = name
+        self.spec = SPECS.get(name)
+        self._data = {}
+        self._written = {}               # key -> fingerprint of what D1 (or the file) holds
+        self._lock = threading.RLock()
+        self._io = threading.Lock()      # one write pass at a time
+        self._wake = threading.Event()
+        self._path = legacy_file or f"{name}.db"
+        self.mode = _ensure_mode()
+        self._load()
+        _stores.append(self)
+        threading.Thread(target=self._writer, name=f"db-{name}", daemon=True).start()
+
+    # ---- loading ----
+
+    def _read_legacy(self):
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            print(f"[db] could not read {self._path}: {e}")
+            return {}
+
+    def _load(self):
+        if self.mode == "local":
+            self._data = self._read_legacy()
+            self._written = {k: _fingerprint(v) for k, v in self._data.items()}
+            return
+        if self.spec:
+            for row in _query(f"SELECT * FROM {self.spec.table}"):
+                self._data[str(row[self.spec.pk])] = from_row(self.spec, row)
+        else:
+            for row in _query("SELECT k, v FROM bot_misc WHERE db = ?", [self.name]):
+                self._data[row["k"]] = json.loads(row["v"])
+        self._written = {k: _fingerprint(v) for k, v in self._data.items()}
+        self._import_legacy()
+
+    def _import_legacy(self):
+        """Copy the old pickleDB file in once, verified."""
+        mark = f"imported:{self.name}"
+        if _meta_get(mark) is not None:
+            return
+        old = self._read_legacy()
+        if not old:
+            _meta_set(mark, f"nothing to import {int(time.time())}")
+            return
+        todo = {k: v for k, v in old.items() if str(k) not in self._data}
+        statements = [self._statement(str(k), v) for k, v in todo.items()]
+        for i in range(0, len(statements), BATCH_SIZE):
+            _batch(statements[i:i + BATCH_SIZE])
+        back = {}
+        if self.spec:
+            back = {str(r[self.spec.pk]): from_row(self.spec, r) for r in _query(f"SELECT * FROM {self.spec.table}")}
+        else:
+            back = {r["k"]: json.loads(r["v"]) for r in _query("SELECT k, v FROM bot_misc WHERE db = ?", [self.name])}
+        bad = [str(k) for k, v in todo.items() if str(k) not in back or _norm(back[str(k)]) != _norm(json.loads(json.dumps(v)))]
+        if bad:
+            print(f"[db] import of {self._path} FAILED the read-back check for {len(bad)} of {len(todo)} rows (first: {', '.join(bad[:5])}); it will retry next start")
+            return
+        for k, v in todo.items():
+            self._data[str(k)] = back[str(k)]
+            self._written[str(k)] = _fingerprint(back[str(k)])
+        _meta_set(mark, f"{len(todo)} rows {int(time.time())}")
+        print(f"[db] imported {len(todo)} rows from {self._path} into D1 and verified every one ({self._path} is left as it was)")
+
+    # ---- dict-like API ----
+
+    def get(self, key, default=None):
+        with self._lock:
+            return self._data.get(str(key), default)
+
+    def set(self, key, value):
+        with self._lock:
+            self._data[str(key)] = value
+        self._wake.set()
+        return True
+
+    def exists(self, key):
+        with self._lock:
+            return str(key) in self._data
+
+    def remove(self, key):
+        with self._lock:
+            existed = self._data.pop(str(key), None) is not None
+        self._wake.set()
+        return existed
+
+    rem = remove
+
+    def all(self):
+        with self._lock:
+            return list(self._data.keys())
+
+    getall = all
+
+    def items(self):
+        with self._lock:
+            return dict(self._data)
+
+    def save(self):
+        """Ask the background writer to send what changed. Returns at once."""
+        self._wake.set()
+        return True
+
+    # ---- writing ----
+
+    def _statement(self, key, value):
+        if self.spec:
+            return upsert_statement(self.spec, key, value)
+        return ("INSERT INTO bot_misc (db, k, v) VALUES (?, ?, ?) ON CONFLICT(db, k) DO UPDATE SET v = excluded.v", [self.name, key, json.dumps(value)])
+
+    def _delete_statement(self, key):
+        if self.spec:
+            return (f"DELETE FROM {self.spec.table} WHERE {_q(self.spec.pk)} = ?", [key])
+        return ("DELETE FROM bot_misc WHERE db = ? AND k = ?", [self.name, key])
+
+    def flush(self):
+        """Write what changed, now. True if everything was written (a failure is kept and retried on the next pass)."""
+        with self._io:
+            with self._lock:
+                current = {k: (v, _fingerprint(v)) for k, v in self._data.items()}
+                written = dict(self._written)
+            dirty = {k: v for k, (v, fp) in current.items() if written.get(k) != fp}
+            deleted = [k for k in written if k not in current]
+            if not dirty and not deleted:
+                return True
+            if self.mode == "local":
+                try:
+                    with self._lock:
+                        snapshot = dict(self._data)
+                    tmp = self._path + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(snapshot, f)
+                    os.replace(tmp, self._path)
+                except Exception as e:
+                    print(f"[db] could not write {self._path}: {e}")
+                    return False
+                with self._lock:
+                    self._written = {k: _fingerprint(v) for k, v in snapshot.items()}
+                return True
+            work = [(("U", k), self._statement(k, v)) for k, v in dirty.items()] + [(("D", k), self._delete_statement(k)) for k in deleted]
+            ok = True
+            for i in range(0, len(work), BATCH_SIZE):
+                chunk = work[i:i + BATCH_SIZE]
+                try:
+                    _batch([s for _, s in chunk])
+                except Exception as e:
+                    ok = False
+                    print(f"[db] write failed for {self.name} ({len(chunk)} rows), will retry: {e}")
+                    continue
+                with self._lock:
+                    for (kind, k), _ in chunk:
+                        if kind == "U":
+                            self._written[k] = current[k][1]
+                        else:
+                            self._written.pop(k, None)
+            return ok
+
+    def _writer(self):
+        while True:
+            self._wake.wait(FLUSH_INTERVAL)
+            self._wake.clear()
+            time.sleep(0.2)              # let a burst of set() calls land in one pass
+            try:
+                self.flush()
+            except Exception as e:
+                print(f"[db] background save error in {self.name}: {e}")
+
+
+def summary():
+    return ", ".join(f"{s.name}={s.mode}" for s in _stores) or "no stores"
+
 #=== Database Setup ===
-countingDB = PickleDB('counting.db')
-embedDB = PickleDB('embed.db')
-usersDB = PickleDB('users.db')
-autoroleDB = PickleDB('autorole.db')
-AI_DB = PickleDB('ai.db')
+countingDB = Table('counting')
+embedDB = Table('embed')
+usersDB = Table('users')
+autoroleDB = Table('autorole')
+AI_DB = Table('ai')
+lastOnlineDB = Table('lastonline')       # roblox user id -> unix time they were last seen online
 
 # === Discord Bot Setup ===
 intents = discord.Intents.default()
@@ -110,20 +502,10 @@ APIBaseURL = "http://localhost:1337"
 
 # last online cache
 def load_cached_timestamps():
-    try:
-        with open('lastonline.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+    return lastOnlineDB.items()
 
 def update_cached_timestamp(user_id, timestamp):
-    try:
-        cached_timestamps = load_cached_timestamps()
-        cached_timestamps[str(user_id)] = timestamp
-        with open('lastonline.json', 'w') as f:
-            json.dump(cached_timestamps, f, indent=2)
-    except Exception as e:
-        print(f"Error updating cached timestamp: {e}")
+    lastOnlineDB.set(user_id, timestamp)
 
 # === Flask App Setup ===
 app = Flask(__name__)
@@ -694,10 +1076,6 @@ async def update_db():
     while True:
         await asyncio.sleep(0.5)
         if not bot.is_closed():
-            countingDB.save()
-            embedDB.save()
-            usersDB.save()
-            autoroleDB.save()
             #print(f"EmbedDB = {embedDB.all()}")
             #print(f"CountingDB = {countingDB.all()}")
             #print(f"UsersDB = {usersDB.all()}")
@@ -705,18 +1083,8 @@ async def update_db():
             for guild in bot.guilds:
                 if not countingDB.get(f"{guild.id}"):
                     countingDB.set(f"{guild.id}", {"channel":None,"number":0,"enabled":False,"warnings":0,"lastcounter":None,"highestnumber":0, "banned":False})
-                    countingDB.save()
         if bot.is_closed():
-            countingDB.save()
-            embedDB.save()
-            usersDB.save()
-            autoroleDB.save()
-            AI_DB.save()
-            print(f"Saved EmbedDB {embedDB.all()}")
-            print(f"Saved CountingDB {countingDB.all()}")
-            print(f"Saved UsersDB {usersDB.all()}")
-            print(f"Saved AutoRoleDB {autoroleDB.all()}")
-            print(f"Saved AI_DB {AI_DB.all()}")
+            flush_all()
             print("Bot Closed, Shutting Down Flask Server.")
             os._exit(0)
 
@@ -1497,11 +1865,7 @@ async def stop(interaction: discord.Interaction):
     if interaction.user.name == "lcjunior1220" or interaction.user.name == "sl.ip" or interaction.user.name == "kiwixor":
         await interaction.response.send_message(":white_check_mark: Shutdown Successfully!", ephemeral=False)
         
-        countingDB.save()
-        embedDB.save()
-        usersDB.save()
-        autoroleDB.save()
-        AI_DB.save()
+        flush_all()
         
         print("Bot shutdown initiated by command")
         
@@ -2271,22 +2635,6 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
             'join_date': '',
             'last_online': None
         }
-
-    def load_cached_timestamps():
-        try:
-            with open('lastonline.json', 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-
-    def update_cached_timestamp(user_id, timestamp):
-        try:
-            cached_timestamps = load_cached_timestamps()
-            cached_timestamps[str(user_id)] = timestamp
-            with open('lastonline.json', 'w') as f:
-                json.dump(cached_timestamps, f, indent=2)
-        except Exception as e:
-            print(f"Error updating cached timestamp: {e}")
 
     try:
         response = requests.post(url, json=request_payload)
