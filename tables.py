@@ -55,6 +55,7 @@ SPECS = {
                                                          ("webhook_id", "text")]),
     "actions": Spec("bot_actions", "entry_id", [("at", "int"), ("actor_id", "text"), ("actor", "text"), ("kind", "text"), ("detail", "text"),
                                                 ("server_id", "text"), ("target", "text")], index=["server_id"]),
+    "dmlog": Spec("bot_dmlog", "entry_id", [("at", "int"), ("dir", "text"), ("user_id", "text"), ("name", "text"), ("text", "text"), ("source", "text")]),
     "dms": Spec("bot_dms", "user_id", [("channel_id", "text"), ("name", "text"), ("last", "int"), ("preview", "text")]),
     "partners": Spec("bot_partners", "server_id", [("name", "text"), ("description", "text"), ("invite", "text"), ("invite_auto", "bool"),
                                                    ("added_by", "text"), ("added_at", "int"), ("icon", "text")]),
