@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import secrets
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -352,7 +353,7 @@ def register(m):
             if not member:
                 return None
             return {"id": sid, "name": s.get("name") or sid, "icon": m._icon_of(s),
-                    "members": m._first(s, "member_count", "members_count", "memberCount"),
+                    "members": m.human_count(sid, m._first(s, "member_count", "members_count", "memberCount")),
                     "manage": manage, "staff_access": manage and m.is_staff_user(uid), "counting": counting_brief(sid)}
         with ThreadPoolExecutor(max_workers=8) as pool:
             rows = [r for r in pool.map(one, servers) if r]
@@ -384,7 +385,7 @@ def register(m):
         counting["emojis"] = m.counting_emojis(counting)
         counting["last_name"] = (m.fetch_user(counting["lastcounter"]).get("username") if counting.get("lastcounter") else None)
         return {"server": {"id": sid, "name": server.get("name") or sid, "icon": m._icon_of(server),
-                           "members": m._first(server, "member_count", "members_count", "memberCount")},
+                           "members": m.human_count(sid, m._first(server, "member_count", "members_count", "memberCount"))},
                 "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
                 "owner": m.is_server_owner(sid, current_user()["id"]) or m.is_bot_owner(current_user()["id"]),
                 "staff": m.is_staff_user(current_user()["id"]), "bot_owner": m.is_bot_owner(current_user()["id"])}
@@ -630,19 +631,29 @@ def register(m):
 
     # ---- Roblox accounts (the API keeps them; this is the page for linking, auto-verify and removing) ----
 
-    @app.route("/roblox")
+    @app.route("/dashboard/roblox")
     def roblox_page():
         if not current_user():
             return redirect("/dashboard/login")
         return Response(m._web_file("roblox.html"), mimetype="text/html")
+
+    @app.route("/roblox")
+    def roblox_page_old():
+        return redirect("/dashboard/roblox", 301)
+
+    @app.route("/dashboard/roblox/manage")
+    def roblox_manage_page():
+        if not current_user():
+            return redirect("/dashboard/login")
+        return Response(m._web_file("roblox_manage.html"), mimetype="text/html")
 
     @app.route("/me/roblox")
     @login_required
     def me_roblox():
         d = m.shapes_api("GET", f"/internal/person/yapin/{current_user()['id']}")
         if not d or not d.get("success"):
-            return jsonify({"accounts": [], "max": 50, "error": "The linking service isn't answering right now."})
-        return jsonify({"accounts": d.get("accounts", []), "max": d.get("max", 50), "discord_id": d.get("discord_id") or None})
+            return jsonify({"accounts": [], "max": 100, "error": "The linking service isn't answering right now."})
+        return jsonify({"accounts": d.get("accounts", []), "max": d.get("max", 100), "discord_id": d.get("discord_id") or None})
 
     @app.route("/me/roblox/discord/link", methods=["POST"])
     @login_required
@@ -688,6 +699,107 @@ def register(m):
             return jsonify({"success": False}), 400
         rid = str((request.get_json(silent=True) or {}).get("roblox_id") or "")
         return jsonify(m.shapes_api("DELETE", f"/internal/person/yapin/{current_user()['id']}/roblox/{urllib.parse.quote(rid, safe='')}") or {"success": False})
+
+    @app.route("/me/roblox/hide", methods=["POST"])
+    @login_required
+    def me_roblox_hide():
+        """Hide (or show again) one, several or all of your accounts from lookups, the API and /robloxinfo."""
+        b = request.get_json(silent=True) or {}
+        body = {"hidden": b.get("hidden", True) is not False}
+        if b.get("all"):
+            body["all"] = True
+        else:
+            body["roblox_ids"] = [str(x) for x in (b.get("roblox_ids") or [])][:100]
+        return jsonify(m.shapes_api("POST", f"/internal/person/yapin/{current_user()['id']}/hide", body) or {"success": False})
+
+    # ---- managing a server's Roblox verification (owner, administrators and Manage Server). Only counts are shown, never who. ----
+
+    CONFIG_TEXT = ("group_id", "nickname_template", "prompt_text", "panel_title", "panel_text")
+
+    def verify_config(sid):
+        d = m.shapes_api("GET", f"/internal/guild/yapin/{sid}/config")
+        return (d or {}).get("config") or {}
+
+    @app.route("/me/roblox/manage")
+    @login_required
+    def me_roblox_manage_list():
+        if not m.bot_ready:
+            return jsonify({"error": "The bot is still starting."}), 503
+        uid = current_user()["id"]
+        rows = m.cached(f"mine:{uid}", 60, lambda: servers_for(uid))
+        return jsonify({"servers": [{"id": r["id"], "name": r["name"], "icon": r["icon"]} for r in rows if r["manage"]]})
+
+    @app.route("/me/roblox/manage/<sid>")
+    @login_required
+    def me_roblox_manage(sid):
+        require_manage(sid)
+        view = server_view(sid)
+        cfg = verify_config(sid)
+        stats = m.shapes_api("GET", f"/internal/guild/yapin/{sid}/stats") if cfg.get("group_id") else None
+        keep = ("group_id", "nickname_template", "verified_role_id", "unverified_role_id", "mirror_roles", "prompt_dm", "prompt_text",
+                "panel_title", "panel_text", "panel_channel_id", "panel_message_id", "last_sync_at")
+        return jsonify({"server": view["server"], "channels": view["channels"], "roles": view["roles"],
+                        "config": {k: cfg.get(k) for k in keep},
+                        "stats": {k: v for k, v in (stats or {}).items() if k != "success"} or None,
+                        "last_sync": (m.rverifyDB.get(sid) or {}).get("last")})
+
+    @app.route("/me/roblox/manage/<sid>/config", methods=["POST"])
+    @login_required
+    def me_roblox_manage_config(sid):
+        require_manage(sid)
+        b = request.get_json(silent=True) or {}
+        body = {}
+        for k in CONFIG_TEXT:
+            if k in b:
+                v = "" if b[k] is None else str(b[k]).strip()
+                if k == "group_id" and v and not v.isdigit():
+                    return jsonify({"error": "The group ID is the number in the group's URL."}), 400
+                body[k] = v
+        for k in ("mirror_roles", "prompt_dm"):
+            if k in b:
+                body[k] = bool(b[k])
+        roles = {str(r.get("id")) for r in bot.roles(sid)}
+        for k in ("verified_role_id", "unverified_role_id"):
+            if k in b:
+                v = str(b[k] or "")
+                if v and v != "create" and v not in roles:
+                    return jsonify({"error": "That role doesn't exist."}), 400
+                body[k] = v
+        before = verify_config(sid)
+        d = m.shapes_api("PUT", f"/internal/guild/yapin/{sid}/config", body)
+        if not d or not d.get("success"):
+            return jsonify({"error": "The linking service isn't answering right now."}), 502
+        cfg = d.get("config") or {}
+        if body.get("verified_role_id") == "create":
+            m.rverify_ensure_role(sid, cfg)
+        audit(sid, "roblox", before, cfg)
+        return jsonify({"success": True})
+
+    @app.route("/me/roblox/manage/<sid>/panel", methods=["POST"])
+    @login_required
+    def me_roblox_manage_panel(sid):
+        require_manage(sid)
+        cfg = verify_config(sid)
+        if not cfg.get("group_id"):
+            return jsonify({"error": "Set the Roblox group first."}), 400
+        ch = str((request.get_json(silent=True) or {}).get("channel_id") or "")
+        if ch not in {str(c.get("id")) for c in bot.channels(sid)}:
+            return jsonify({"error": "Pick a channel in this server."}), 400
+        try:
+            m.rverify_send_panel(sid, ch, cfg)
+        except Exception as e:
+            return jsonify({"error": f"I couldn't post the panel there: {e}"}), 502
+        audit(sid, "roblox-panel", {}, {"channel": ch})
+        return jsonify({"success": True})
+
+    @app.route("/me/roblox/manage/<sid>/sync", methods=["POST"])
+    @login_required
+    def me_roblox_manage_sync(sid):
+        require_manage(sid)
+        if not verify_config(sid).get("group_id"):
+            return jsonify({"error": "Set the Roblox group first."}), 400
+        threading.Thread(target=m.rverify_sync, args=(sid,), daemon=True).start()
+        return jsonify({"success": True, "started": True})
 
     @app.route("/me/settings", methods=["GET", "POST"])
     @login_required

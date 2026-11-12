@@ -243,7 +243,7 @@ function homeView() {
   return [h('h1', {}, 'Welcome' + (BOOT.user ? ', ' + (BOOT.user.display || BOOT.user.name) : '')),
     h('p', { class: 'sub' }, 'Pick a server on the left. Servers you manage open their settings; the dimmed ones are servers you’re in, where you can see the server and how counting is going.'),
     adminBox(),
-    h('div', { class: 'adminbox' }, h('div', { class: 'grow' }, h('b', {}, 'Roblox accounts'), h('div', { class: 'sub', style: 'margin:0' }, 'Link up to 50 Roblox accounts and turn on auto-verify.')), h('a', { class: 'btn', href: '/roblox' }, 'Open')),
+    h('div', { class: 'adminbox' }, h('div', { class: 'grow' }, h('b', {}, 'Roblox accounts'), h('div', { class: 'sub', style: 'margin:0' }, 'Link up to 100 Roblox accounts, hide them, and turn on auto-verify.')), h('a', { class: 'btn', href: '/dashboard/roblox' }, 'Open'), h('a', { class: 'btn', href: '/dashboard/roblox/manage', style: 'margin-left:8px' }, 'Manage servers')),
     h('div', { class: 'tiles' }, t('You manage', m.length, m.length === 1 ? 'server' : 'servers', 'accent'), t('You’re a member of', o.length, o.length === 1 ? 'more server' : 'more servers')),
     !m.length && !o.length ? h('div', { class: 'empty' }, 'None of your servers have Shapes yet.') : null,
     mySettings()];
