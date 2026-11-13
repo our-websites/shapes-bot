@@ -232,7 +232,7 @@ def register(m):
         return {"user": user, "staff": m.is_staff_user(user["id"]) if user else False, "owner": m.is_bot_owner(user["id"]) if user else False,
                 "login": bool(local_ready() or api_up()), "bot_ready": bool(m.bot_ready), "colors": m.color_choices(),
                 "color": (m.embedDB.get(user["id"]) if user else None),
-                "commit": {"sha": m.COMMIT[0], "title": m.COMMIT[1]}}
+                "commit": m.commit_info(), "api_commit": m.api_commit_info()}
 
     def _fail(message, status=400):
         return Response("<!doctype html><meta charset=utf-8><body style='font-family:system-ui;max-width:28rem;margin:4rem auto;background:#0b0b0f;color:#eee'>"
