@@ -503,9 +503,10 @@ async function partner() {
     panel('How it looks', 'This is your card on the partners page.', prev, h('p', { class: 'sub' }, h('a', { href: d.page, target: '_blank', rel: 'noopener' }, 'Open the partners page')))];
 }
 
-if (BOOT.commit && BOOT.commit.sha) {
-  const c = $('#commit');
-  c.append('Running commit ', h('a', { href: 'https://github.com/our-websites/shapes-bot/commit/' + BOOT.commit.sha, target: '_blank', rel: 'noopener' }, BOOT.commit.sha), BOOT.commit.title ? ' · ' + BOOT.commit.title : '');
+{
+  const c = $('#commit'), k = BOOT.commit || {}, ak = BOOT.api_commit || {};
+  if (k.sha) c.append('Bot ', k.url ? h('a', { href: k.url, target: '_blank', rel: 'noopener' }, k.sha) : k.sha, k.title ? ' · ' + k.title : '');
+  if (ak.sha) c.append(k.sha ? ' · ' : '', 'API ', ak.sha, ak.title ? ' · ' + ak.title : '');       // the API's repo is private, so no link
 }
 renderHeader();
 if (!BOOT.user) loginPage(); else draw();
