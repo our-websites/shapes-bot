@@ -10,6 +10,9 @@ Layout of this file:
   4. events (counting, autorole, ready)
   5. web server + startup
 """
+
+import sys
+sys.dont_write_bytecode = True      # don't litter __pycache__ folders
 import asyncio
 import base64
 import hashlib
