@@ -523,6 +523,86 @@ def _too_many_logins(ip):
     return len(tries) >= 8
 
 
+def _read_git(here):
+    """{sha, branch, repo, title} of the checkout the code runs from, read straight out of the .git folder. Hosts often have no git program,
+    so nothing here runs one. The title comes from the commit object when it's stored loose, else from GitHub (public repos) in the background."""
+    import zlib
+    gd = os.path.join(here, ".git")
+    out = {"sha": "", "branch": "", "repo": "", "title": ""}
+    try:
+        head = open(os.path.join(gd, "HEAD")).read().strip()
+        if head.startswith("ref:"):
+            ref = head[4:].strip()
+            out["branch"] = ref.split("/", 2)[-1]
+            path = os.path.join(gd, *ref.split("/"))
+            if os.path.exists(path):
+                out["sha"] = open(path).read().strip()
+            elif os.path.exists(os.path.join(gd, "packed-refs")):
+                for line in open(os.path.join(gd, "packed-refs")):
+                    if line.strip().endswith(" " + ref):
+                        out["sha"] = line.split()[0]
+        else:
+            out["sha"] = head
+        try:                                                           # which branch was pulled last tells more than the local name does
+            fetched = open(os.path.join(gd, "FETCH_HEAD")).read()
+            found = re.search(r"branch '([^']+)' of (\S+)", fetched)
+            if found:
+                out["branch"], out["repo"] = found.group(1), found.group(2)
+        except OSError:
+            pass
+        if not out["repo"]:
+            found = re.search(r"url\s*=\s*(\S+)", open(os.path.join(gd, "config")).read())
+            out["repo"] = found.group(1) if found else ""
+        out["repo"] = re.sub(r"^git@github\.com:", "https://github.com/", re.sub(r"\.git$", "", out["repo"])).rstrip("/")
+        out["repo"] = re.sub(r"^https://[^@/]+@", "https://", out["repo"])      # never keep a token that was part of the remote
+        if out["sha"]:
+            try:
+                raw = zlib.decompress(open(os.path.join(gd, "objects", out["sha"][:2], out["sha"][2:]), "rb").read())
+                out["title"] = raw.split(b"\n\n", 1)[1].split(b"\n", 1)[0].decode("utf-8", "replace")[:120]
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if not out["sha"]:
+        out["sha"] = os.environ.get("COMMIT_SHA", "").strip()
+    out["short"] = out["sha"][:7]
+    return out
+
+
+GIT = _read_git(os.path.dirname(os.path.abspath(__file__)))
+
+
+def commit_info():
+    """The running commit: {sha, title, url, branch}. Linked on the dashboard because this repo is public."""
+    sha = GIT["sha"]
+    url = f"{GIT['repo']}/commit/{sha}" if sha and GIT["repo"].startswith("https://github.com/") else ""
+    return {"sha": GIT["short"], "title": GIT["title"], "url": url, "branch": GIT["branch"]}
+
+
+def _fill_commit_title():
+    """A shallow clone keeps its commit in a pack, so ask GitHub once in the background for the title."""
+    if not GIT["sha"] or GIT["title"] or not GIT["repo"].startswith("https://github.com/"):
+        return
+    try:
+        r = requests.get(f"https://api.github.com/repos/{GIT['repo'][len('https://github.com/'):]}/commits/{GIT['sha']}", timeout=8)
+        if r.ok:
+            GIT["title"] = str((r.json().get("commit") or {}).get("message") or "").split("\n", 1)[0][:120]
+    except Exception:
+        pass
+
+
+threading.Thread(target=_fill_commit_title, daemon=True).start()
+_api_commit = {"at": 0, "value": {}}
+
+
+def api_commit_info():
+    """The Shapes API's own commit ({sha, title}), asked of it every 5 minutes. Its repo is private, so it is shown without a link."""
+    if time.time() - _api_commit["at"] > 300:
+        data = _shapes_call("GET", "/internal/version") or {}
+        _api_commit.update(at=time.time(), value={"sha": data.get("sha") or "", "title": data.get("title") or ""})
+    return _api_commit["value"]
+
+
 def admin_required(f):
     def wrapped(*args, **kwargs):
         if session.get("admin") is not True:
@@ -665,7 +745,7 @@ def api_overview():
         "uptime_seconds": int(time.time() - dash_started), "servers": servers,
         "commands": sorted(c.qualified_name for c in bot.tree.walk_commands() if not isinstance(c, discord.app_commands.Group)),
         "storage": {"backend": "Cloudflare D1" if _mode == "d1" else "local files"},
-        "is_owner": True, "colors": [{"name": n, "hex": "#%06x" % v} for n, v in DASH_COLORS.items()],
+        "commit": commit_info(), "api_commit": api_commit_info(), "is_owner": True, "colors": [{"name": n, "hex": "#%06x" % v} for n, v in DASH_COLORS.items()],
     })
 
 
