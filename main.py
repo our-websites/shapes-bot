@@ -90,6 +90,7 @@ SPECS = {
     "rverify": Spec("bot_rverify", "server_id", [("roles", "json"), ("made", "json"), ("last", "json")]),
     "cmdlog": Spec("bot_cmdlog", "log_id", [("channel", "text"), ("enabled", "bool"), ("events", "bool"), ("commands", "bool"),
                                             ("refused", "bool"), ("retry_at", "int")]),
+    "dmlog": Spec("bot_dmlog", "entry_id", [("at", "int"), ("dir", "text"), ("user_id", "text"), ("name", "text"), ("text", "text"), ("source", "text")]),
     "lastonline": Spec("bot_lastonline", "roblox_id", [("at", "int")], scalar="at"),
 }
 # A store with no spec still works: it lives in bot_misc.
@@ -459,6 +460,7 @@ embedDB = Table('embed')
 usersDB = Table('users')
 autoroleDB = Table('autorole')
 AI_DB = Table('ai')
+dmlogDB = Table('dmlog')                   # every DM the bot sends or receives
 rverifyDB = Table('rverify')                 # server id -> Roblox role mapping and the last sync's result
 cmdlogDB = Table('cmdlog')                   # server id (or 'botlog') -> where its command log posts
 lastOnlineDB = Table('lastonline')       # roblox user id -> unix time they were last seen online
@@ -3583,7 +3585,8 @@ class HelpDropdown(discord.ui.Select):
                 "• /roblox link - Link a Roblox account (up to 100)\n"
                 "• /roblox accounts, /roblox auto, /roblox remove, /roblox hide, /roblox show - Manage your accounts\n"
                 "• /roblox panel ..., /roblox sync - Server setup (admins)\n"
-                "• /vortex game, /vortex user, /vortex cookie - PlayVortex lookups", inline=False)
+                "• /vortex game, /vortex user, /vortex cookie - PlayVortex lookups\n"
+                "• /lastfm link, /lastfm unlink, /lastfm user - Last.fm", inline=False)
                 
         elif category == "Utility Commands":
             embed = discord.Embed(title="Utility Commands", color=embed_color)
@@ -4511,8 +4514,9 @@ async def discorduser(interaction: discord.Interaction, user: discord.User = Non
                                 """
                                 
                                 server_stats = f"""
-                                > **Members:** {server['member_count']}
-                                > **Bots:** {server['bot_count']}
+                                > **Members:** {server['member_count'] + server['bot_count']:,} total
+                                > **People:** {server['member_count']:,}
+                                > **Bots:** {server['bot_count']:,}
                                 > **Channels:** {server['channel_count']}
                                 > **Roles:** {server['roles']}
                                 """
@@ -6247,7 +6251,7 @@ def roblox_init(m):
                     issues.blocked.add(rid)
         if acct:
             nick = template(cfg, acct, role_name)
-            if nick and member.nick != nick and not (issues.nick_denied >= 5 and not issues.nick_ok):
+            if nick and member.nick != nick and member.id != member.guild.owner_id and not (issues.nick_denied >= 5 and not issues.nick_ok):
                 try:
                     await member.edit(nick=nick, reason="Roblox verification")
                     issues.nick_ok += 1
@@ -6822,10 +6826,11 @@ def cmdlog_init(m):
         if not g or not g.get("events", True):
             return
         humans = sum(1 for mem in guild.members if not mem.bot) if guild.chunked else None
+        total = guild.member_count or 0
         embed = discord.Embed(title=("➕ Shapes was added to " if kind == "add" else "➖ Shapes was removed from ") + guild.name,
                               color=discord.Color.green() if kind == "add" else discord.Color.red(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Server", value=f"{guild.name}\n`{guild.id}`", inline=True)
-        embed.add_field(name="Members", value=f"{humans:,}" if humans is not None else f"{guild.member_count:,} (with bots)", inline=True)
+        embed.add_field(name="Members", value=(f"**{total:,}** total\n{humans:,} people · {total - humans:,} bots" if humans is not None else f"**{total:,}** total (people and bots)"), inline=True)
         embed.add_field(name="Servers now", value=str(len(bot.guilds)), inline=True)
         embed.set_footer(text="Shapes server log")
         await post(BOTLOG_KEY, embed)
@@ -6876,12 +6881,13 @@ def cmdlog_init(m):
 
     @bot.tree.command(name="botlog", description="Bot owners only: log every command and every server added or removed")
     @app_commands.describe(channel="Where to post the global log", state="Turn the whole log on or off",
-                           commands="Log commands from every server", events="Log servers added and removed")
+                           commands="Log commands from every server", events="Log servers added and removed",
+                           dms="Post every DM the bot sends or receives")
     @app_commands.choices(state=STATE)
     @app_commands.allowed_installs(guilds=True, users=False)
     @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
     async def botlog(interaction: discord.Interaction, channel: discord.TextChannel = None, state: app_commands.Choice[str] = None,
-                     commands: bool = None, events: bool = None):
+                     commands: bool = None, events: bool = None, dms: bool = None):
         if not m.is_bot_owner(interaction.user):
             return await interaction.response.send_message("Only the bot owners can use the bot log.", ephemeral=True)
         cfg = cfgDB.get(BOTLOG_KEY) or {"enabled": False, "channel": None, "commands": True, "events": True}
@@ -6899,10 +6905,13 @@ def cmdlog_init(m):
             cfg["commands"] = commands
         if events is not None:
             cfg["events"] = events
+        if dms is not None:
+            cfg["dms"] = dms
         cfgDB.set(BOTLOG_KEY, cfg)
         await interaction.response.send_message(
             f"The bot log is **{'on' if cfg.get('enabled') else 'off'}** (" + (f"<#{cfg['channel']}>" if cfg.get("channel") else "no channel yet") +
-            f"). Commands: {'on' if cfg.get('commands', True) else 'off'} · Server events: {'on' if cfg.get('events', True) else 'off'}.", ephemeral=True)
+            f"). Commands: {'on' if cfg.get('commands', True) else 'off'} · Server events: {'on' if cfg.get('events', True) else 'off'} · "
+            f"DMs: {'on' if cfg.get('dms', True) else 'off'}.", ephemeral=True)
 
     m.cmdlog_post = post
 
@@ -7227,6 +7236,213 @@ def roblox_verified_notice():
     return handler() if handler else (jsonify({"success": False}), 503)
 
 
+
+# --- DM log: every DM the bot sends or receives -------------------------------------------------------------
+# Written to the dmlog table (who, which way, what was said, what caused it), shown with /dmlog (bot owners) and posted to the
+# bot log channel when /botlog dms is on. Sending is caught once, on discord.py's Messageable.send and on interaction
+# responses in a DM; receiving is caught as a DM to the bot or a command run in a DM.
+import contextvars
+_dm_user = contextvars.ContextVar("dm_user", default=None)         # set while a command that was run in a DM is being answered
+_dm_cmd = contextvars.ContextVar("dm_cmd", default=None)
+_DM_KEEP = 5000
+_last_dm_trim = 0.0
+
+
+def _dm_text(content=None, embeds=None, embed=None):
+    parts = [str(content)] if content else []
+    for e in list(embeds or []) + ([embed] if embed else []):
+        d = e.to_dict() if hasattr(e, "to_dict") else (e or {})
+        for key in ("title", "description"):
+            if d.get(key):
+                parts.append(str(d[key]))
+        for f in d.get("fields") or []:
+            parts.append(f"{f.get('name', '')}: {f.get('value', '')}")
+    return " | ".join(parts)[:1000]
+
+
+def _dm_source():
+    cmd = _dm_cmd.get()
+    if cmd:
+        return f"/{cmd}"
+    frame = sys._getframe(2)
+    here = os.path.dirname(os.path.abspath(__file__))
+    while frame:
+        code = frame.f_code
+        if os.path.abspath(code.co_filename).startswith(here) and code.co_name not in ("<module>", "_dm_source", "log_dm", "send", "send_message", "_send_logged"):
+            return code.co_name
+        frame = frame.f_back
+    return "bot"
+
+
+def log_dm(direction, user, text, source=None):
+    """Write one DM down (user is a discord user/member or an id). Never raises."""
+    global _last_dm_trim
+    try:
+        stamp = time.time()
+        uid = str(getattr(user, "id", user) or "")
+        name = getattr(user, "name", None) or uid
+        dmlogDB.set(f"{int(stamp * 1000)}-{os.urandom(2).hex()}", {"at": int(stamp), "dir": direction, "user_id": uid, "name": name,
+                                                                   "text": str(text or "")[:1000], "source": str(source or "")[:80]})
+        print(f"[dm {'->' if direction == 'out' else '<-'}] {name}: {str(text or '')[:100]!r} ({source})")
+        if stamp - _last_dm_trim > 3600:
+            _last_dm_trim = stamp
+            rows = sorted(dmlogDB.items().items())
+            for key, _row in rows[:max(0, len(rows) - _DM_KEEP)]:
+                dmlogDB.remove(key)
+        cfg = cmdlogDB.get(BOTLOG_KEY) or {}
+        post_fn = getattr(sys.modules[__name__], "cmdlog_post", None)
+        if post_fn and cfg.get("enabled") and cfg.get("dms", True):
+            embed = discord.Embed(title=("📤 DM sent to " if direction == "out" else "📥 DM from ") + str(name), description=str(text or "")[:1500] or "(no text)",
+                                  color=discord.Color.green() if direction == "out" else discord.Color.orange(), timestamp=discord.utils.utcnow())
+            embed.set_footer(text=f"{source or ''} · {uid}")
+            asyncio.get_running_loop().create_task(post_fn(BOTLOG_KEY, embed))
+    except Exception as e:
+        print(f"[dm log] {type(e).__name__}: {e}")
+
+
+def _install_dm_logging():
+    orig_send = discord.abc.Messageable.send
+
+    async def send(self, content=None, **kw):
+        message = await orig_send(self, content, **kw)
+        try:
+            channel = getattr(message, "channel", None)
+            if isinstance(channel, discord.DMChannel) and getattr(channel, "recipient", None) and (bot.user is None or channel.recipient.id != bot.user.id):
+                log_dm("out", channel.recipient, _dm_text(content, kw.get("embeds"), kw.get("embed")), _dm_source())
+        except Exception as e:
+            print(f"[dm log] {type(e).__name__}: {e}")
+        return message
+    discord.abc.Messageable.send = send
+
+    def wrap(cls, name, text_of):
+        orig = getattr(cls, name)
+
+        async def wrapped(self, *args, **kw):
+            result = await orig(self, *args, **kw)
+            who = _dm_user.get()
+            if who is not None:
+                log_dm("out", who, text_of(args, kw), _dm_source())
+            return result
+        setattr(cls, name, wrapped)
+    first = lambda args, kw: _dm_text(kw.get("content") if "content" in kw else (args[0] if args else None), kw.get("embeds"), kw.get("embed"))
+    wrap(discord.InteractionResponse, "send_message", first)
+    wrap(discord.InteractionResponse, "edit_message", first)
+    wrap(discord.Interaction, "edit_original_response", first)
+    wrap(discord.Webhook, "send", first)         # followups; only logged while a DM command is being answered (see _dm_user)
+
+    async def check(interaction):
+        if interaction.guild_id is None and interaction.user and not interaction.user.bot:
+            _dm_user.set(interaction.user)
+            name = interaction.command.qualified_name if interaction.command else "command"
+            _dm_cmd.set(name)
+            args = " ".join(f"{k}:{v}" for k, v in (interaction.namespace.__dict__.items() if interaction.namespace else []))[:300]
+            log_dm("in", interaction.user, f"/{name} {args}".strip(), "command in a DM")
+        return True
+    bot.tree.interaction_check = check
+
+    async def on_dm(message):
+        if message.guild is None and not message.author.bot and (bot.user is None or message.author.id != bot.user.id):
+            log_dm("in", message.author, message.content or "(attachment)", "DM to the bot")
+    bot.add_listener(on_dm, "on_message")
+
+
+class DMLogCog(commands.Cog, name="DM log"):
+    """Tracks every DM the bot sends or receives. /dmlog shows them (bot owners)."""
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    async def cog_load(self):
+        _install_dm_logging()
+
+    @app_commands.command(name="dmlog", description="Bot owners only: show the latest DMs the bot sent or received")
+    @app_commands.describe(user="Only this person", count="How many to show (default 15, max 40)")
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def dmlog(self, interaction: discord.Interaction, user: discord.User = None, count: app_commands.Range[int, 1, 40] = 15):
+        if not is_bot_owner(interaction.user):
+            return await interaction.response.send_message("Only the bot owners can read the DM log.", ephemeral=True)
+        rows = [v for v in dmlogDB.items().values() if isinstance(v, dict) and (user is None or v.get("user_id") == str(user.id))]
+        rows.sort(key=lambda r: -int(r.get("at") or 0))
+        if not rows:
+            return await interaction.response.send_message("No DMs logged yet.", ephemeral=True)
+        lines = [f"{'📤' if r['dir'] == 'out' else '📥'} <t:{r['at']}:R> **{r.get('name')}** ({r.get('source') or ''})\n> {str(r.get('text') or '')[:150]}" for r in rows[:count]]
+        await interaction.response.send_message(f"**DM log** ({len(rows)} total)\n" + "\n".join(lines)[:1900], ephemeral=True)
+
+
+# --- Last.fm (/lastfm link, /lastfm unlink, /lastfm user): links are kept by the Shapes API per platform ("discord" here) ---
+LASTFM_LINK_TTL = 600
+
+
+def _shapes_call(method, path, body=None):
+    """The Shapes API's JSON (a dict), or None when it can't be reached."""
+    try:
+        r = requests.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=15)
+        data = r.json()
+        return data if isinstance(data, dict) else None
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def lastfm_name_of(user_id):
+    data = _shapes_call("GET", f"/internal/links/{user_id}?platform=discord") or {}
+    return (data.get("lastfm") or {}).get("name")
+
+
+def lastfm_line(p):
+    scrobbles = f"{int(p['scrobbles']):,}" if str(p.get("scrobbles") or "").isdigit() else "?"
+    text = f"[{p['name']}]({p['url']}) · {scrobbles} scrobbles"
+    if p.get("track"):
+        text += f"\n{'🎶 Now playing' if p.get('now') else '⏮️ Last played'}: {p['track']}"
+    return text
+
+
+class LastfmCog(commands.Cog, name="Last.fm"):
+    """/lastfm link, /lastfm unlink, /lastfm user."""
+    lastfm = app_commands.Group(name="lastfm", description="Link Last.fm and see what people are listening to",
+                                allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
+                                allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True))
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    @lastfm.command(name="link", description="Link your Last.fm account")
+    async def link(self, interaction: discord.Interaction):
+        started = await asyncio.to_thread(_shapes_call, "POST", "/internal/link/start",
+                                          {"provider": "lastfm", "platform": "discord", "yapin_id": str(interaction.user.id), "yapin_name": interaction.user.name})
+        url = (started or {}).get("url")
+        if not url:
+            return await interaction.response.send_message(str((started or {}).get("data") or "Couldn't reach the linking service. Try again in a moment."), ephemeral=True)
+        view = discord.ui.View(timeout=LASTFM_LINK_TTL)
+        view.add_item(discord.ui.Button(label="Authorize on Last.fm", style=discord.ButtonStyle.link, url=url))
+        await interaction.response.send_message("Tap the button, approve access on Last.fm and you're linked. The link works for 10 minutes and only for you.", view=view, ephemeral=True)
+
+    @lastfm.command(name="unlink", description="Unlink your Last.fm account")
+    async def unlink(self, interaction: discord.Interaction):
+        had = await asyncio.to_thread(lastfm_name_of, interaction.user.id)
+        await asyncio.to_thread(_shapes_call, "DELETE", f"/internal/links/{interaction.user.id}/lastfm?platform=discord")
+        await interaction.response.send_message("Unlinked your Last.fm account." if had else "You had no Last.fm account linked.", ephemeral=True)
+
+    @lastfm.command(name="user", description="See what you or someone else is listening to")
+    @app_commands.describe(user="Who to show (default: you)")
+    async def user(self, interaction: discord.Interaction, user: discord.User = None):
+        target = user or interaction.user
+        name = await asyncio.to_thread(lastfm_name_of, target.id)
+        if not name:
+            who = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"
+            return await interaction.response.send_message(f"{who} linked a Last.fm account. Use `/lastfm link`.", ephemeral=True)
+        await interaction.response.defer()
+        data = await asyncio.to_thread(_shapes_call, "GET", f"/internal/lastfm/{urllib.parse.quote(str(name), safe='')}")
+        p = (data or {}).get("profile") if data and data.get("success") else None
+        if not p:
+            return await interaction.followup.send(f"Couldn't reach Last.fm for `{name}` right now.")
+        embed = discord.Embed(title=f"{target.display_name} on Last.fm", description=lastfm_line(p), color=_embed_color(interaction.user.id))
+        if p.get("image"):
+            embed.set_thumbnail(url=p["image"])
+        embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
+        await interaction.followup.send(embed=embed)
+
+
 class RobloxCog(commands.Cog, name="Roblox"):
     """Roblox verification, linked accounts and group info: the /roblox group."""
 
@@ -7306,7 +7522,7 @@ class ServerCog(commands.Cog, name="Server"):
         await interaction.response.send_message(embed=embed)
 
 
-COGS = (RobloxCog, CommandLogCog, VortexCog, ServerCog)
+COGS = (RobloxCog, CommandLogCog, VortexCog, ServerCog, LastfmCog, DMLogCog)
 
 
 # === Bot Runner in Thread ===
