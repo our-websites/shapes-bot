@@ -1,3 +1,5 @@
+import sys
+sys.dont_write_bytecode = True      # don't litter __pycache__ folders
 import os
 import sys
 import threading
