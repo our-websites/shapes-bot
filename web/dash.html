@@ -441,7 +441,7 @@ function dm() {
     try { const r = await api('/me/servers/' + sid() + '/members?q=' + encodeURIComponent(q.value.trim()));
       results.replaceChildren(...(r.members.length ? r.members.map(m => h('button', { onclick: () => { picked.set(m.id, m.display || m.name); redraw(); q.value = ''; results.hidden = true; } }, avatar(m.avatar, m.display || m.name), (m.display || m.name) + ' (@' + m.name + ')')) : [h('div', { class: 'empty' }, 'No one found.')]));
       results.hidden = false; } catch (e) { st.className = 'status err'; st.textContent = e.message; } }, 250); });
-  const [allL, all] = detail.owner ? check('Everyone in this server (' + (detail.server.members || 'all') + ' people, no limit)', false) : [null, null];
+  const [allL, all] = detail.owner ? check('Everyone in this server (' + (detail.server.humans || 'all') + ' people, no limit)', false) : [null, null];
   save(sv, st, async () => {
     const r = await api('/me/servers/' + sid() + '/dm', { user_ids: [...picked.keys()], everyone: all ? all.checked : false, message: msg.value, hidden: hide ? hide.checked : false, ...cv() });
     msg.value = '';
