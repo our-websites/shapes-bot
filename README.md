@@ -16,6 +16,10 @@ The bot keeps its data in its own Cloudflare D1 database (separate from the Yapi
 - `/lastfm`: `link`, `unlink`, `user` (links are stored by the Shapes API, kept separate from Yapin' links).
 - `/server info`
 
+## Web dashboard
+
+Open the bot's web address and sign in with `ADMIN_KEY`. Servers (channels, members, roles, with total/people/bot counts), reading and posting in channels as the bot (with a hide-sender option), DMs, DM people (a list or everyone) and a log of what was done from the dashboard. It's the same page as the Yapin' bot's admin dashboard, so it works on KaiOS 3 too.
+
 ## Roblox verification
 - People sign in with Roblox (OAuth2 through the Shapes API, nothing goes in their bio). **No Yapin' account is needed.** Accounts (up to 100) live in the Shapes API; a person who also has a Yapin' account can press Link Discord on the Yapin' dashboard to merge them. `/linkroblox` stays for people who only want to link.
 - With mirroring on, `/roblox sync` creates, renames and deletes roles to match the Roblox group (it only deletes roles the bot made) and explains in plain words when Discord refuses (missing Manage Roles / Manage Nicknames, or the bot's role sitting below the roles it hands out).

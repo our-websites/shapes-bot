@@ -26,6 +26,8 @@ import base64
 import urllib
 import urllib.parse
 import hmac
+import random
+import secrets
 import hashlib
 import re
 import io
@@ -92,6 +94,8 @@ SPECS = {
     "rverify": Spec("bot_rverify", "server_id", [("roles", "json"), ("made", "json"), ("last", "json")]),
     "cmdlog": Spec("bot_cmdlog", "log_id", [("channel", "text"), ("enabled", "bool"), ("events", "bool"), ("commands", "bool"),
                                             ("refused", "bool"), ("retry_at", "int")]),
+    "actions": Spec("bot_actions", "entry_id", [("at", "int"), ("actor_id", "text"), ("actor", "text"), ("kind", "text"), ("detail", "text"),
+                                                ("server_id", "text"), ("target", "text")]),
     "dmlog": Spec("bot_dmlog", "entry_id", [("at", "int"), ("dir", "text"), ("user_id", "text"), ("name", "text"), ("text", "text"), ("source", "text")]),
     "lastonline": Spec("bot_lastonline", "roblox_id", [("at", "int")], scalar="at"),
 }
@@ -462,6 +466,7 @@ embedDB = Table('embed')
 usersDB = Table('users')
 autoroleDB = Table('autorole')
 AI_DB = Table('ai')
+actionsDB = Table('actions')                # what was done from the web dashboard
 dmlogDB = Table('dmlog')                   # every DM the bot sends or receives
 rverifyDB = Table('rverify')                 # server id -> Roblox role mapping and the last sync's result
 cmdlogDB = Table('cmdlog')                   # server id (or 'botlog') -> where its command log posts
@@ -497,217 +502,399 @@ def update_cached_timestamp(user_id, timestamp):
 # === Flask App Setup ===
 app = Flask(__name__)
 CORS(app)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "keepthisasecret")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)       # signs the dashboard login; set FLASK_SECRET_KEY to stay signed in across restarts
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Bot Dashboard</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #1e1e2f; color: #fff; padding: 20px; }
-        h1 { color: #50fa7b; }
-        select, input[type=text] { padding: 6px; border-radius: 5px; border: none; margin: 5px 0; }
-        input[type=submit] { background: #50fa7b; border: none; padding: 8px 12px; border-radius: 5px; color: #000; cursor: pointer; }
-        .server { background: #282a36; padding: 10px; margin-bottom: 15px; border-radius: 10px; }
-        .logout { margin-top: 20px; }
-        .presence-button {
-            display: inline-block;
-            margin-top: 10px;
-            background-color: #7289da;
-            color: white;
-            padding: 10px 18px;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: bold;
-            transition: background-color 0.3s ease;
-        }
-        .presence-button:hover {
-            background-color: #5b6eae;
-        }
-    </style>
-</head>
-<body>
-    <h1>🤖 Bot Dashboard</h1>
-    <p>Status: <b style="color:lime;">Online</b></p>
-    <p>Connected to {{ guilds|length }} {{ 'server' if guilds|length == 1 else 'servers' }}</p>
-    
-    <!-- Presence Button -->
-    <a href="https://shapes.lol/discord" target="_blank" rel="noopener" class="presence-button">
-        Join Our Server
-    </a>
-    
-    {% for g in guilds %}
-        <div class="server">
-            <h3>{{ g.name }}</h3>
-            <form action="/send" method="post">
-                <input type="hidden" name="guild_id" value="{{ g.id }}">
-                <label for="channel">Channel:</label>
-                <select name="channel_id">
-                    {% for c in g.text_channels %}
-                        <option value="{{ c.id }}">{{ c.name }}</option>
-                    {% endfor %}
-                </select>
-                <br>
-                <label for="message">Message:</label>
-                <input type="text" name="message" placeholder="Enter your message" required>
-                <br>
-                <input type="submit" value="Send">
-            </form>
-        </div>
-    {% endfor %}
-    <div class="logout">
-        <a href="/logout" style="color: #ff5555;">Logout</a>
-    </div>
-</body>
-</html>
-"""
+# === Admin dashboard (the web pages in web/: the same ones the Yapin' bot uses) ===
+# Sign in with ADMIN_KEY at /login. Everything the pages need is under /api: servers, members, channels, DMs, logs.
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+dash_started = time.time()
+_login_attempts = {}
 
-# === Admin Auth Decorator ===
+
+def _web_file(name):
+    with open(os.path.join(WEB_DIR, name), "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _too_many_logins(ip):
+    now = time.time()
+    tries = [t for t in _login_attempts.get(ip, []) if now - t < 600]
+    _login_attempts[ip] = tries
+    return len(tries) >= 8
+
+
 def admin_required(f):
     def wrapped(*args, **kwargs):
-        if session.get("admin") != True:
+        if session.get("admin") is not True:
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "login required"}), 401
             return redirect(url_for("admin_login"))
         return f(*args, **kwargs)
     wrapped.__name__ = f.__name__
     return wrapped
 
-# === Flask Routes ===
+
+def dash_run(coro, timeout=30):
+    """Run a coroutine on the bot's event loop from a Flask thread and wait for its result."""
+    return asyncio.run_coroutine_threadsafe(coro, bot.loop).result(timeout)
+
+
+def log_action(kind, detail, server_id="", target=""):
+    """Everything done from the dashboard is written down (shown under Logs)."""
+    try:
+        now = time.time()
+        actionsDB.set(f"{int(now * 1000)}-{os.urandom(2).hex()}", {"at": int(now), "actor_id": "admin", "actor": "Admin key", "kind": kind,
+                                                                    "detail": str(detail)[:400], "server_id": str(server_id or ""), "target": str(target or "")})
+        keys = sorted(actionsDB.items())
+        for old in keys[:max(0, len(keys) - 2000)]:
+            actionsDB.remove(old)
+    except Exception as e:
+        print(f"[dash] couldn't log the action: {e}")
+
+
 @app.route("/status")
 def status():
     return "OK", 200
+
 
 @app.route("/activity")
 def activity():
     return redirect(url_for("admin_login"))
 
+
 @app.route("/login", methods=["GET", "POST"])
 def admin_login():
-    if session.get("admin") == True:
+    if session.get("admin") is True:
         return redirect(url_for("dashboard"))
-
+    error = None
     if request.method == "POST":
-        key = request.form.get("pass")
-        if ADMIN_KEY and key == ADMIN_KEY:
+        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "?").split(",")[0].strip()
+        if _too_many_logins(ip):
+            error = "Too many attempts. Wait a few minutes and try again."
+        elif not ADMIN_KEY:
+            error = "No admin key is configured (set ADMIN_KEY)."
+        elif hmac.compare_digest(request.form.get("pass", ""), ADMIN_KEY):
             session["admin"] = True
             return redirect(url_for("dashboard"))
         else:
-            return '''
-                <h3 style="color: red; font-family: Arial, sans-serif;">Incorrect key.</h3>
-                <a href="/login" style="font-family: Arial, sans-serif; color: #50fa7b;">Try again</a>
-            '''
+            _login_attempts.setdefault(ip, []).append(time.time())
+            error = "That key isn't right."
+    return render_template_string(_web_file("login.html"), error=error)
 
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Admin Login</title>
-        <style>
-            body {
-                background: #121212;
-                color: #eee;
-                font-family: Arial, sans-serif;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                margin: 0;
-            }
-            .login-container {
-                background: #282a36;
-                padding: 40px 50px;
-                border-radius: 12px;
-                box-shadow: 0 0 15px #50fa7b;
-                text-align: center;
-                width: 320px;
-            }
-            h2 {
-                margin-bottom: 25px;
-                color: #50fa7b;
-            }
-            input[type=password] {
-                width: 100%;
-                padding: 12px;
-                margin-bottom: 20px;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-                background: #44475a;
-                color: #f8f8f2;
-            }
-            input[type=password]::placeholder {
-                color: #bd93f9;
-            }
-            button {
-                background: #50fa7b;
-                border: none;
-                color: #000;
-                padding: 12px 0;
-                width: 100%;
-                font-size: 16px;
-                font-weight: bold;
-                border-radius: 6px;
-                cursor: pointer;
-                transition: background 0.3s ease;
-            }
-            button:hover {
-                background: #44d366;
-            }
-            a {
-                display: inline-block;
-                margin-top: 15px;
-                color: #50fa7b;
-                text-decoration: none;
-                font-size: 14px;
-            }
-            a:hover {
-                text-decoration: underline;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="login-container">
-            <h2>Admin Login</h2>
-            <form method="POST">
-                <input type="password" name="pass" placeholder="Enter admin key" required>
-                <button type="submit">Login</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    '''
 
 @app.route("/logout")
 def admin_logout():
     session.clear()
     return redirect(url_for("admin_login"))
 
-# Dashboard at root /
+
 @app.route("/", methods=["GET"])
+@app.route("/admin", methods=["GET"])
 @admin_required
 def dashboard():
     if not bot_ready:
-        return "<h3>Bot is not ready yet, please try again in a moment.</h3>"
-    return render_template_string(HTML_TEMPLATE, guilds=cached_guilds)
+        return Response("<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=3><body style='font-family:system-ui;padding:3rem'>The bot is still starting. This page reloads on its own.", mimetype="text/html")
+    return Response(_web_file("app.html").replace("<!--SIGNOUT-->", '<a href="/logout" id="signout">Sign out</a>'), mimetype="text/html")
 
-@app.route("/send", methods=["POST"])
+
+DASH_COLORS = {"Blue": 0x5865F2, "Green": 0x57F287, "Yellow": 0xFEE75C, "Red": 0xED4245, "Pink": 0xEB459E, "Purple": 0x9B59B6, "Orange": 0xE67E22, "White": 0xFFFFFF}
+
+
+def _dash_color(choice):
+    choice = str(choice or "Blue")
+    if choice == "random":
+        return random.choice(list(DASH_COLORS.values()))
+    if choice == "mine":
+        choice = "Blue"
+    if choice not in DASH_COLORS:
+        raise ValueError("That isn't one of the colours.")
+    return DASH_COLORS[choice]
+
+
+def _dash_valid_image(url):
+    url = str(url or "").strip()
+    if not url:
+        return None
+    if not re.match(r"^https://[^\s]+$", url) or len(url) > 800:
+        raise ValueError("The image link must start with https:// and have no spaces.")
+    return url
+
+
+def _dash_avatar(u):
+    try:
+        return str(u.display_avatar.replace(size=64).url)
+    except Exception:
+        return None
+
+
+def _dash_person(m):
+    u = m._user if isinstance(m, discord.Member) and hasattr(m, "_user") else m
+    return {"id": str(m.id), "name": m.name, "display": m.display_name, "avatar": _dash_avatar(m), "bot": bool(m.bot),
+            "roles": [str(r.id) for r in getattr(m, "roles", []) if r.name != "@everyone"],
+            "joined": m.joined_at.isoformat() if getattr(m, "joined_at", None) else None}
+
+
+def _dash_guild(server_id):
+    g = bot.get_guild(int(server_id)) if str(server_id).isdigit() else None
+    if g is None:
+        raise LookupError("The bot isn't in that server.")
+    return g
+
+
+def _dash_error(e):
+    code = 404 if isinstance(e, (LookupError, discord.NotFound)) else 403 if isinstance(e, discord.Forbidden) else 502
+    return jsonify({"error": str(e) or e.__class__.__name__}), code
+
+
+@app.route("/api/overview")
 @admin_required
-def send_message():
-    guild_id = int(request.form["guild_id"])
-    channel_id = int(request.form["channel_id"])
-    message = request.form["message"]
+def api_overview():
+    if not bot_ready:
+        return jsonify({"ready": False}), 503
+    servers = []
+    for g in sorted(bot.guilds, key=lambda g: g.name.lower()):
+        bots = people = None
+        if g.chunked:
+            bots = sum(1 for m in g.members if m.bot)
+            people = len(g.members) - bots
+        total = max(g.member_count or 0, len(g.members)) if g.chunked else (g.member_count or 0)
+        servers.append({"id": str(g.id), "name": g.name, "member_count": total, "people": people, "bots": bots, "icon": g.icon.url if g.icon else None})
+    me = bot.user
+    return jsonify({
+        "ready": True, "me": {"username": "Shapes", "avatar": str(me.display_avatar.replace(size=128).url) if me else None},
+        "uptime_seconds": int(time.time() - dash_started), "servers": servers,
+        "commands": sorted(c.qualified_name for c in bot.tree.walk_commands() if not isinstance(c, discord.app_commands.Group)),
+        "storage": {"backend": "Cloudflare D1" if _mode == "d1" else "local files"},
+        "is_owner": True, "colors": [{"name": n, "hex": "#%06x" % v} for n, v in DASH_COLORS.items()],
+    })
 
-    guild = discord.utils.get(bot.guilds, id=guild_id)
-    if guild:
-        channel = discord.utils.get(guild.text_channels, id=channel_id)
-        if channel:
+
+@app.route("/api/servers/<server_id>")
+@admin_required
+def api_server(server_id):
+    try:
+        g = _dash_guild(server_id)
+        cats = []
+        loose = [c for c in g.channels if c.category is None and not isinstance(c, discord.CategoryChannel)]
+        groups = [(None, sorted(loose, key=lambda c: c.position))] + [(cat, cat.channels) for cat in g.categories]
+        for cat, chans in groups:
+            rows = [{"id": str(c.id), "name": c.name, "type": c.type.name, "topic": getattr(c, "topic", None) or "",
+                     "private": False, "position": c.position} for c in chans]
+            if rows:
+                cats.append({"id": str(cat.id) if cat else None, "name": cat.name if cat else "", "channels": rows})
+        roles = [{"id": str(r.id), "name": r.name, "color": ("#%06x" % r.color.value) if r.color.value else None, "position": r.position,
+                  "admin": r.permissions.administrator} for r in sorted(g.roles, key=lambda r: -r.position) if not r.is_default()]
+        return jsonify({"server": {"id": str(g.id), "name": g.name, "owner_id": str(g.owner_id)}, "categories": cats, "roles": roles})
+    except Exception as e:
+        return _dash_error(e)
+
+
+@app.route("/api/servers/<server_id>/members")
+@admin_required
+def api_members(server_id):
+    try:
+        g = _dash_guild(server_id)
+        if not g.chunked:
+            dash_run(g.chunk())
+        after = int(request.args.get("after") or 0)
+        rows = [m for m in sorted(g.members, key=lambda m: m.id) if m.id > after][:200]
+        return jsonify({"members": [_dash_person(m) for m in rows], "next": str(rows[-1].id) if len(rows) >= 200 else None})
+    except Exception as e:
+        return _dash_error(e)
+
+
+def _dash_message(m):
+    images = [a.url for a in m.attachments if (a.content_type or "").startswith("image")]
+    for e in m.embeds:
+        for part in (e.image, e.thumbnail):
+            if part and part.url:
+                images.append(part.url)
+    return {"id": str(m.id), "author": m.author.display_name, "author_id": str(m.author.id), "avatar": _dash_avatar(m.author), "bot": bool(m.author.bot),
+            "content": m.content or "", "created_at": m.created_at.isoformat(),
+            "embeds": [{"title": e.title, "description": e.description, "url": e.url} for e in m.embeds], "images": images[:6]}
+
+
+@app.route("/api/channels/<channel_id>/messages")
+@admin_required
+def api_messages(channel_id):
+    limit = max(1, min(100, request.args.get("limit", 50, type=int)))
+
+    async def load():
+        ch = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        return [_dash_message(m) async for m in ch.history(limit=limit)]
+    try:
+        return jsonify({"messages": dash_run(load())})
+    except Exception as e:
+        return _dash_error(e)
+
+
+@app.route("/api/channels/<channel_id>/send", methods=["POST"])
+@admin_required
+def api_send(channel_id):
+    body = request.get_json(silent=True) or {}
+    text = str(body.get("message", "")).strip()
+    try:
+        image = _dash_valid_image(body.get("image_url"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not text and not image:
+        return jsonify({"error": "Write a message or add an image link."}), 400
+    hidden = body.get("hidden") is True
+    if not hidden:
+        text = (text + "\n" if text else "") + "-# Sent from the Shapes dashboard"
+
+    async def go():
+        ch = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        await ch.send(text[:2000], embed=discord.Embed(color=0x2b2d31).set_image(url=image) if image else None)
+    try:
+        dash_run(go())
+        log_action("send", ("(hidden sender) " if hidden else "") + text[:200], target=f"channel {channel_id}")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return _dash_error(e)
+
+
+# --- direct messages: everything the bot sends or receives is in dmlogDB; conversations are built from it ---
+@app.route("/api/dms/log")
+@admin_required
+def api_dm_log():
+    who = request.args.get("user_id", "").strip()
+    rows = [v for v in dmlogDB.items().values() if isinstance(v, dict) and (not who or v.get("user_id") == who)]
+    rows.sort(key=lambda r: -int(r.get("at") or 0))
+    return jsonify({"log": rows[:300], "total": len(rows)})
+
+
+@app.route("/api/dms")
+@admin_required
+def api_dms():
+    convo = {}
+    for r in dmlogDB.items().values():
+        if isinstance(r, dict) and r.get("user_id"):
+            c = convo.setdefault(r["user_id"], {"user_id": r["user_id"], "channel_id": "", "name": r.get("name") or r["user_id"], "last": 0})
+            c["last"] = max(c["last"], int(r.get("at") or 0))
+            c["name"] = r.get("name") or c["name"]
+    return jsonify({"dms": sorted(convo.values(), key=lambda c: -c["last"])[:200]})
+
+
+@app.route("/api/users/search")
+@admin_required
+def api_user_search():
+    q = request.args.get("q", "").strip().lower().lstrip("@")
+    if len(q) < 2:
+        return jsonify({"users": []})
+    seen = {}
+    for g in bot.guilds:
+        for m in g.members:
+            if q in m.name.lower() or q in m.display_name.lower() or q == str(m.id):
+                seen.setdefault(m.id, _dash_person(m))
+        if len(seen) >= 15:
+            break
+    if not seen and q.isdigit():
+        try:
+            u = dash_run(bot.fetch_user(int(q)))
+            seen[u.id] = {"id": str(u.id), "name": u.name, "display": u.display_name, "avatar": _dash_avatar(u), "bot": u.bot, "roles": [], "joined": None}
+        except Exception:
+            pass
+    return jsonify({"users": list(seen.values())[:15]})
+
+
+@app.route("/api/dms", methods=["POST"])
+@admin_required
+def api_dm_open():
+    body = request.get_json(silent=True) or {}
+    user_id = str(body.get("user_id", "")).strip().strip("<@!>")
+    if not user_id.isdigit():
+        return jsonify({"error": "Pick a person first."}), 400
+
+    async def go():
+        u = await bot.fetch_user(int(user_id))
+        return u, (await u.create_dm()).id
+    try:
+        u, channel_id = dash_run(go())
+        return jsonify({"dm": {"user_id": user_id, "channel_id": str(channel_id), "name": u.display_name, "last": int(time.time())}})
+    except Exception as e:
+        return _dash_error(e)
+
+
+_dm_jobs = {}
+
+
+def _dash_dm_one(uid, text, title, image, footer, color):
+    async def go():
+        u = await bot.fetch_user(int(uid))
+        e = discord.Embed(title=title or None, description=text[:4000], color=color)
+        if image:
+            e.set_image(url=image)
+        if footer:
+            e.set_footer(text=footer)
+        await u.send(embed=e)
+    dash_run(go(), timeout=40)
+
+
+def _dash_dm_job(job, ids, text, title, image, hidden, color):
+    j = _dm_jobs[job]
+    footer = None if hidden else "Sent by the Shapes team"
+    try:
+        for uid in ids:
             try:
-                bot.loop.create_task(channel.send(message))
-            except Exception as e:
-                print(f"Failed to send message: {e}")
+                _dash_dm_one(uid, text, title, image, footer, color)
+                j["sent"] += 1
+            except Exception:
+                j["failed"] += 1
+            j["done"] += 1
+            time.sleep(0.6)
+    except Exception as e:
+        j["error"] = str(e)[:150]
+    j["finished"] = True
 
-    return redirect(url_for("dashboard"))
-    
+
+@app.route("/api/dm/send", methods=["POST"])
+@admin_required
+def api_dm_send():
+    body = request.get_json(silent=True) or {}
+    text, title = str(body.get("message", "")).strip(), str(body.get("title", "")).strip()
+    raw = body.get("user_ids")
+    ids = re.findall(r"\d{15,22}", raw) if isinstance(raw, str) else [str(i).strip().strip("<@!>") for i in (raw or []) if str(i).strip().strip("<@!>").isdigit()]
+    ids = list(dict.fromkeys(ids))
+    if not text:
+        return jsonify({"error": "Write the message first."}), 400
+    everyone = body.get("everyone") is True
+    if everyone:
+        ids = list(dict.fromkeys(str(m.id) for g in bot.guilds for m in g.members if not m.bot))
+    if not ids:
+        return jsonify({"error": "Pick at least one person."}), 400
+    try:
+        image = _dash_valid_image(body.get("image_url"))
+        color = _dash_color(body.get("color"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    hidden = body.get("hidden") is True
+    job = os.urandom(6).hex()
+    _dm_jobs[job] = {"total": len(ids), "done": 0, "sent": 0, "failed": 0, "finished": False}
+    threading.Thread(target=_dash_dm_job, args=(job, ids, text, title, image, hidden, color), daemon=True).start()
+    log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], target=("everyone: " if everyone else "") + f"{len(ids)} people: " + ", ".join(ids[:8]) + ("…" if len(ids) > 8 else ""))
+    return jsonify({"job": job, "total": len(ids)})
+
+
+@app.route("/api/dm/job/<job>")
+@admin_required
+def api_dm_job(job):
+    j = _dm_jobs.get(job)
+    return (jsonify(j), 200) if j else (jsonify({"error": "No such job."}), 404)
+
+
+@app.route("/api/actions")
+@admin_required
+def api_actions():
+    rows = [v for v in actionsDB.items().values() if isinstance(v, dict)]
+    return jsonify({"actions": sorted(rows, key=lambda r: -int(r.get("at") or 0))[:200]})
+
+
+@app.route("/avatar/<uid>.svg")
+def default_avatar(uid):
+    return Response('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#6366f1"/></svg>', mimetype="image/svg+xml")
+
+
 @app.route('/shutdown', methods=['POST'])
 def shutdown():
     if request.remote_addr not in ['127.0.0.1', '::1']:
