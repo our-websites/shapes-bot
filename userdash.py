@@ -315,9 +315,8 @@ def register(m):
     def perm(sid, uid):
         """(is_member, can_manage) for one person in one server: the owner, an administrator, or a manage-server role.
         Strict on purpose: unlike the in-chat check, a role that is merely named 'Moderator' doesn't count here.
-        Bot owners and bot admins can open every server the bot is in."""
-        if m.is_staff_user(uid):
-            return True, True
+        Being a bot owner or admin changes nothing here: the dashboard shows what any member would see, and the bot-wide tools
+        live on the admin dashboard."""
         try:
             member = dict(bot.member(sid, uid))
         except Exception:
@@ -354,7 +353,7 @@ def register(m):
                 return None
             return {"id": sid, "name": s.get("name") or sid, "icon": m._icon_of(s),
                     "members": m.human_count(sid, m._first(s, "member_count", "members_count", "memberCount")),
-                    "manage": manage, "staff_access": manage and m.is_staff_user(uid), "counting": counting_brief(sid)}
+                    "manage": manage, "partner": bool(m.is_server_owner(sid, uid) and m.partnersDB.get(sid)), "counting": counting_brief(sid)}
         with ThreadPoolExecutor(max_workers=8) as pool:
             rows = [r for r in pool.map(one, servers) if r]
         rows.sort(key=lambda r: r["name"].lower())
@@ -387,8 +386,8 @@ def register(m):
         return {"server": {"id": sid, "name": server.get("name") or sid, "icon": m._icon_of(server),
                            "members": m.human_count(sid, m._first(server, "member_count", "members_count", "memberCount"))},
                 "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
-                "owner": m.is_server_owner(sid, current_user()["id"]) or m.is_bot_owner(current_user()["id"]),
-                "staff": m.is_staff_user(current_user()["id"]), "bot_owner": m.is_bot_owner(current_user()["id"])}
+                "owner": m.is_server_owner(sid, current_user()["id"]), "partner": bool(m.is_server_owner(sid, current_user()["id"]) and m.partnersDB.get(sid)),
+                "staff": False, "bot_owner": False}
 
     @app.route("/me/servers/<sid>/info")
     @login_required
@@ -552,7 +551,7 @@ def register(m):
         ids = list(dict.fromkeys(str(i).strip() for i in (body.get("user_ids") or []) if str(i).strip()))
         if not text or len(text) > 1500:
             return jsonify({"error": "Write a message (1500 characters at most)."}), 400
-        unlimited = m.is_server_owner(sid, current_user()["id"]) or m.is_bot_owner(current_user()["id"])
+        unlimited = m.is_server_owner(sid, current_user()["id"])
         people = {p["id"]: p for p in m.cached(f"people:{sid}", 60, lambda: m._all_members(sid, limit=10 ** 9)) if not p["bot"]}
         if body.get("everyone") is True:                  # the whole server, however big
             if not unlimited:
@@ -610,7 +609,7 @@ def register(m):
         if not role:
             return jsonify({"error": "That role isn't in this server."}), 400
         me = current_user()["id"]
-        powerful = m.is_server_owner(sid, me) or m.is_staff_user(me)
+        powerful = m.is_server_owner(sid, me)
         if not powerful and m._has_admin(role):
             return jsonify({"error": "Only the server owner can hand out roles that manage the server."}), 403
         if str(role.get("name", "")).lower() == "@everyone" or role.get("is_default") is True:
@@ -827,6 +826,62 @@ def register(m):
         cfg = m.get_cmdlog(sid)
         return {"config": cfg, "channel_public": bool(cfg["channel"]) and m.channel_is_public(sid, cfg["channel"]),
                 "owner": m.is_server_owner(sid, current_user()["id"]), "rows": m.cmdlog_rows(sid, 100)}
+
+    # ------------------------------------------------------------------ partner info (only the owner of a partner server)
+
+    def partner_row(sid):
+        """The partner record, or abort: only the server owner sees this, and only for a server that is a partner (404 otherwise)."""
+        if not m.is_server_owner(sid, current_user()["id"]):
+            abort(404)
+        row = m.partnersDB.get(sid)
+        if not row:
+            abort(404)
+        return dict(row)
+
+    def partner_view(sid, row):
+        card = next((c for c in m.partner_cards() if c["id"] == sid), None)
+        try:
+            about = str((m.cached(f"summary:{sid}", 60, lambda: m.server_summary(sid)) or {}).get("description") or "")[:400]
+        except Exception:
+            about = ""
+        return {"description": row.get("description") or "", "server_description": about, "invite": row.get("invite") or "",
+                "invite_auto": bool(row.get("invite_auto")), "added_at": row.get("added_at") or 0, "card": card,
+                "page": f"{(m.PUBLIC_URL or request.host_url).rstrip('/')}/partners"}
+
+    @app.route("/me/servers/<sid>/partner", methods=["GET", "POST"])
+    @login_required
+    def me_partner(sid):
+        """What the /partners page says about this server. The owner can change the description and the invite link."""
+        require_manage(sid)
+        row = partner_row(sid)
+        if request.method == "GET":
+            return jsonify(partner_view(sid, row))
+        body = request.get_json(silent=True) or {}
+        before = dict(row)
+        if "description" in body:
+            text = str(body.get("description") or "").strip()
+            if len(text) > 400:
+                return jsonify({"error": "The description can be 400 characters at most."}), 400
+            row["description"] = text
+        if "invite" in body:
+            raw = str(body.get("invite") or "").strip()
+            if raw.lower() in ("auto", "new"):
+                url = m.make_partner_invite(sid)
+                if not url:
+                    return jsonify({"error": "Yapin' has no permanent invite for this server that I can use. Paste an invite link instead."}), 400
+                row.update(invite=url, invite_auto=True)
+            elif raw:
+                url = m.valid_invite_url(raw)
+                if not url:
+                    return jsonify({"error": "That isn't a Yapin' invite. It must start with https://www.yapin.gg/ (or https://yapin.gg/)."}), 400
+                row.update(invite=url, invite_auto=False)
+            else:
+                row.update(invite=None, invite_auto=False)
+        m.partnersDB.set(sid, row)
+        m._cache.pop(f"summary:{sid}", None)
+        audit(sid, "partner", before, row)
+        m.log_action("partner", "partner info changed", server_id=sid)
+        return jsonify(partner_view(sid, row))
 
     @app.route("/me/servers/<sid>/cmdlog", methods=["GET", "POST"])
     @login_required

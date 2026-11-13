@@ -183,7 +183,7 @@ function loginPage() {
 
 // ---------------------------------------------------------------- state: which server (if any) and which section
 let listing = null, current = null, section = 'overview', detail = null;
-const SECTIONS = [['overview', '🏠  Overview'], ['counting', '🔢  Counting'], ['autorole', '🎭  Autorole'], ['roles', '🏷️  Give roles'], ['automod', '🛡️  Automod'], ['say', '📣  Send as Shapes'], ['dm', '✉️  Message members'], ['cmdlog', '📜  Command log'], ['activity', '🕘  Activity log']];
+const SECTIONS = [['overview', '🏠  Overview'], ['counting', '🔢  Counting'], ['autorole', '🎭  Autorole'], ['roles', '🏷️  Give roles'], ['automod', '🛡️  Automod'], ['say', '📣  Send as Shapes'], ['dm', '✉️  Message members'], ['cmdlog', '📜  Command log'], ['activity', '🕘  Activity log'], ['partner', '🤝  Partner info']];
 const PUBLIC_SECTIONS = [['overview', '🏠  Overview'], ['leaderboard', '🔢  Counting']];
 
 function pip(label, child, onclick, current, extra = '') {
@@ -205,7 +205,7 @@ function frame(menu, content) {
 
 function menuFor(s) {
   const mine = s.manage;
-  const items = mine ? SECTIONS : PUBLIC_SECTIONS;
+  const items = mine ? SECTIONS.filter(([id]) => id !== 'partner' || s.partner) : PUBLIC_SECTIONS;      // the partner tab is for a partner server's owner only
   return h('aside', { class: 'menu' }, h('div', { class: 'srv' }, icon(s), h('span', {}, s.name)),
     items.flatMap(([id, label]) => [id === 'say' ? h('div', { class: 'grp' }, 'Speak as Shapes') : id === 'cmdlog' ? h('div', { class: 'grp' }, 'Logs') : null,
       h('button', { 'aria-current': section === id ? 'true' : 'false', onclick: () => { section = id; draw(); } }, label)]));
@@ -290,7 +290,7 @@ const head = (title, about) => [h('h1', {}, title), about ? h('p', { class: 'sub
 
 async function buildSection() {
   if (section === 'overview') return overview();
-  return ({ counting, autorole, roles, automod, say, dm, cmdlog, activity, leaderboard })[section]();
+  return ({ counting, autorole, roles, automod, say, dm, cmdlog, activity, partner, leaderboard })[section]();
 }
 
 async function overview() {
@@ -311,7 +311,6 @@ async function overview() {
         owner ? h('div', { class: 'ownerchip' }, 'Owned by', avatar(owner.avatar, owner.display || owner.name), owner.display || owner.name) : null)));
   const go = (id, label) => h('button', { class: 'ghost', onclick: () => { section = id; draw(); } }, label);
   return [hero, s.manage ? h('div', { class: 'actions' }, go('counting', 'Counting'), go('roles', 'Give roles'), go('say', 'Send a message'), go('dm', 'Message members'), go('automod', 'Automod')) : null,
-    s.staff_access ? h('div', { class: 'status', style: 'margin-bottom:10px' }, 'You can open this server because you’re part of the Shapes team.') : null,
     tiles.length ? h('div', { class: 'tiles' }, tiles) : h('div', { class: 'empty' }, 'Nothing to show yet.'), adminBox()];
 }
 
@@ -327,7 +326,7 @@ async function leaderboard() {
 // ---------------------------------------------------------------- giving and taking roles
 function roles() {
   const results = h('div', { class: 'results', hidden: true }), q = h('input', { type: 'text', placeholder: 'Search members by name' }), box = h('div'), st = h('div', { class: 'status' });
-  const canAdmin = detail.owner || detail.staff;
+  const canAdmin = detail.owner;
   async function show(m) {
     let mine;
     try { mine = new Set((await api('/me/servers/' + sid() + '/member/' + encodeURIComponent(m.id))).roles); } catch (e) { st.className = 'status err'; st.textContent = e.message; return; }
@@ -364,7 +363,7 @@ function counting() {
   save(sv, st, async () => { await api('/me/servers/' + sid() + '/counting', { enabled: en.checked, channel: ch.value, emojis: { correct: em.correct.value, warning: em.warning.value, wrong: em.wrong.value } }); detail = null; });
   save(reset, st, async () => { await api('/me/servers/' + sid() + '/counting', { reset: true }); detail = null; return 'Count reset to 0.'; });
   let owner = null;
-  if (BOOT.owner) {            // only the bot owner may edit the numbers themselves
+  if (false) {            // editing the numbers is a bot-owner tool on the admin dashboard, not here
     const cur = num(c.number, 0, 1e12), hi = num(c.highestnumber, 0, 1e12), go = h('button', { class: 'ghost' }, 'Set numbers'), st2 = h('div', { class: 'status' });
     save(go, st2, async () => { await api('/me/servers/' + sid() + '/counting', { number: parseInt(cur.value, 10), highestnumber: parseInt(hi.value, 10) }); detail = null; return 'Numbers updated.'; });
     owner = panel('Change the numbers (bot owner)', 'The next person to count continues from the current number.', h('div', { class: 'row' }, field('Current number', cur), field('Highest number', hi)), h('div', { class: 'row' }, go, st2));
@@ -416,7 +415,7 @@ function automod() {
 
 // ---------------------------------------------------------------- speak as Shapes
 function hiddenBox() {
-  if (!detail.staff) return [null, null];
+  return [null, null];          // hiding the sender is a bot-admin tool on the admin dashboard
   return check('Hide who sent this (bot admins only)', false);
 }
 
@@ -485,6 +484,23 @@ async function activity() {
   return [...head('Activity log', 'What people did from this dashboard (sends, DMs, settings), with who and when.'),
     panel('Recent', null, d.actions.length ? h('table', { class: 'log' }, h('thead', {}, h('tr', {}, ['When', 'Who', 'What'].map(t => h('th', {}, t)))),
       h('tbody', {}, d.actions.map(a => h('tr', {}, h('td', {}, when(a.at)), h('td', {}, '@' + a.actor), h('td', {}, a.kind + (a.target ? ' → ' + a.target : '') + (a.detail ? ': ' + a.detail : '')))))) : h('div', { class: 'empty' }, 'Nothing yet.'))];
+}
+
+async function partner() {
+  const d = await api('/me/servers/' + sid() + '/partner');
+  const desc = h('textarea', { rows: 5, maxlength: 400, placeholder: d.server_description || 'Tell people what your server is about.' }), invite = h('input', { type: 'text', placeholder: 'https://www.yapin.gg/invite/yourserver' });
+  desc.value = d.description; invite.value = d.invite;
+  const sv = h('button', { class: 'primary' }, 'Save'), auto = h('button', { class: 'ghost' }, 'Use the server’s own invite'), st = h('div', { class: 'status' }), prev = h('div');
+  const showPreview = c => prev.replaceChildren(c ? h('div', { class: 'card panel' }, h('div', { class: 'row' }, c.icon ? h('img', { class: 'icon', src: c.icon, alt: '' }) : null, h('b', {}, c.name)),
+    h('p', {}, c.description || 'No description yet.'), c.invite ? h('a', { href: c.invite, target: '_blank', rel: 'noopener' }, 'Join') : h('span', { class: 'sub' }, 'No invite link yet.')) : null);
+  showPreview(d.card);
+  const apply = r => { desc.value = r.description; invite.value = r.invite; showPreview(r.card); };
+  save(sv, st, async () => { apply(await api('/me/servers/' + sid() + '/partner', { description: desc.value, invite: invite.value })); return 'Saved. The partners page shows it now.'; });
+  save(auto, st, async () => { apply(await api('/me/servers/' + sid() + '/partner', { invite: 'auto' })); return 'Using the server’s own permanent invite. It stays up to date.'; });
+  return [...head('Partner info', 'This is what the partners page says about your server. Only the server owner can see and change it.'),
+    panel('Listing', 'The description is up to 400 characters. Leave it empty to use the server’s own description.', field('Description', desc), field('Invite link (Yapin’ only)', invite),
+      h('div', { class: 'row' }, sv, auto), st),
+    panel('How it looks', 'This is your card on the partners page.', prev, h('p', { class: 'sub' }, h('a', { href: d.page, target: '_blank', rel: 'noopener' }, 'Open the partners page')))];
 }
 
 if (BOOT.commit && BOOT.commit.sha) {
