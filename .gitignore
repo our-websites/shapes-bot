@@ -1,7 +1,8 @@
-TOKEN.txt
-GoogleToken.txt
-requirements.txt
-akey.txt
-README.md
-roblosecurity.txt
-APIBaseURL.txt
+.env
+*.db
+*.db.tmp
+__pycache__/
+*.pyc
+lastonline.json
+rverify.json
+cmdlog.json

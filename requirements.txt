@@ -1,14 +1,13 @@
-discord.py
+discord.py>=2.7.1
 Flask
 requests
 pytz
 aiohttp
 bs4
-pickledb
 pandas
 slpp
 flask-cors
 openai
 PyNaCl
-topggpy
-dotenv
+python-dotenv
+cloudflare

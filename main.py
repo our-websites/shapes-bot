@@ -1,6 +1,9 @@
+import sys
+sys.dont_write_bytecode = True      # don't litter __pycache__ folders
 import os
 import sys
 import threading
+import atexit
 import time
 import json
 import signal
@@ -11,24 +14,30 @@ import pytz
 import numbers
 #import pandas as pd # Last resort if i keep getting json errors
 from slpp import slpp as lua
-from pickledb import PickleDB
 from datetime import datetime, timezone
 from discord import app_commands
 import requests
 from discord.ext import commands
-from discord.gateway import DiscordWebSocket, _log
+from discord.gateway import DiscordWebSocket
 from discord.ext.commands import Bot
 from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, Response
 from flask_cors import CORS
 import base64
-from topgg import DBLClient
 import urllib
+import urllib.parse
+import hmac
+import random
+import secrets
+import hashlib
 import re
 import io
 import socket
 import typing
 from typing import Dict, Any, Optional
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()      # every secret and setting comes from the environment: a .env file next to main.py (see .env.example) or the host's variables
 import nacl.signing
 import nacl.exceptions
 
@@ -57,12 +66,411 @@ Emojis = {
 chatgpt = OpenAI(api_key=os.getenv("OPENAI_KEY"), base_url="https://openrouter.ai/api/v1") # MapleAI is a scam.
 AIModel = "openai/gpt-oss-20b:free"
 
+# =============================================================================================================
+# Database: Cloudflare D1 (the Discord bot's own database, separate from the Yapin' bot's and never read by it).
+# Every store (counting, embed, users, ...) is a table with real columns, one row per key. Reads come from memory,
+# save() hands changes to a background writer, so nothing waits on the network. First start: rows from the old pickleDB
+# files (counting.db, embed.db, ...) are copied in once, read back and compared; the old files are left alone.
+# Without CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_D1_DATABASE_ID it keeps using local files.
+# =============================================================================================================
+FLUSH_INTERVAL = 3         # seconds between background passes (a set()/save() triggers one sooner)
+BATCH_SIZE = 50            # statements per request
+
+
+class Spec:
+    def __init__(self, table, pk, cols=(), scalar=None):
+        self.table, self.pk, self.cols, self.scalar = table, pk, tuple(cols), scalar
+        self.types = dict(self.cols)
+
+
+# column types: text, int, bool, json (any JSON value, kept as text)
+SPECS = {
+    "counting": Spec("bot_counting", "server_id", [("channel", "text"), ("number", "int"), ("enabled", "bool"), ("warnings", "int"),
+                                                   ("lastcounter", "text"), ("highestnumber", "int"), ("banned", "bool"), ("emojis", "json")]),
+    "embed": Spec("bot_embed", "user_id", [("color", "int")], scalar="color"),
+    "users": Spec("bot_users", "user_id"),
+    "autorole": Spec("bot_autorole", "server_id", [("role_id", "text"), ("enabled", "bool"), ("exempt_users", "json"), ("include_bots", "bool")]),
+    "ai": Spec("bot_ai", "user_id", [("username", "text"), ("user_messages", "json"), ("ai_responses", "json")]),
+    "rverify": Spec("bot_rverify", "server_id", [("roles", "json"), ("made", "json"), ("last", "json")]),
+    "cmdlog": Spec("bot_cmdlog", "log_id", [("channel", "text"), ("enabled", "bool"), ("events", "bool"), ("commands", "bool"),
+                                            ("refused", "bool"), ("retry_at", "int")]),
+    "actions": Spec("bot_actions", "entry_id", [("at", "int"), ("actor_id", "text"), ("actor", "text"), ("kind", "text"), ("detail", "text"),
+                                                ("server_id", "text"), ("target", "text")]),
+    "dmlog": Spec("bot_dmlog", "entry_id", [("at", "int"), ("dir", "text"), ("user_id", "text"), ("name", "text"), ("text", "text"), ("source", "text")]),
+    "lastonline": Spec("bot_lastonline", "roblox_id", [("at", "int")], scalar="at"),
+}
+# A store with no spec still works: it lives in bot_misc.
+
+META_SQL = "CREATE TABLE IF NOT EXISTS bot_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)"
+MISC_SQL = "CREATE TABLE IF NOT EXISTS bot_misc (db TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY (db, k))"
+
+_client = None
+_client_lock = threading.Lock()
+_stores = []
+_mode = None               # "d1" | "local"
+_mode_lock = threading.Lock()
+
+
+def _q(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
+def d1_configured():
+    return bool(os.environ.get("CLOUDFLARE_API_TOKEN") and os.environ.get("CLOUDFLARE_ACCOUNT_ID") and os.environ.get("CLOUDFLARE_D1_DATABASE_ID"))
+
+
+def _cf():
+    global _client
+    if not d1_configured():
+        return None
+    with _client_lock:
+        if _client is None:
+            from cloudflare import Cloudflare
+            _client = Cloudflare(api_token=os.environ["CLOUDFLARE_API_TOKEN"])
+    return _client
+
+
+def _query(sql, params=None):
+    page = _cf().d1.database.query(os.environ["CLOUDFLARE_D1_DATABASE_ID"], account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"], sql=sql,
+                                   **({"params": [str(p) for p in params]} if params else {}))
+    rows = []
+    for result in page:
+        rows.extend(getattr(result, "results", None) or [])
+    return rows
+
+
+def _batch(statements):
+    _cf().d1.database.query(os.environ["CLOUDFLARE_D1_DATABASE_ID"], account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"],
+                            batch=[{"sql": sql, "params": [str(p) for p in params]} for sql, params in statements])
+
+
+# ------------------------------------------------------------------------------------------------ rows <-> values
+
+def _fits(kind, v):
+    if kind == "text":
+        return isinstance(v, str)
+    if kind == "int":
+        return isinstance(v, int) and not isinstance(v, bool)
+    if kind == "bool":
+        return isinstance(v, bool)
+    return True
+
+
+def to_row(spec, value):
+    cols, extra = {n: None for n, _ in spec.cols}, {}
+    if not isinstance(value, dict):
+        if spec.scalar and _fits(spec.types[spec.scalar], value):
+            cols[spec.scalar] = value
+        else:
+            extra["__value__"] = value
+        return cols, extra
+    for k, v in value.items():
+        if v is None:
+            continue
+        kind = spec.types.get(k) if isinstance(k, str) else None
+        if kind and _fits(kind, v):
+            cols[k] = v
+        else:
+            extra[k] = v
+    return cols, extra
+
+
+def _py(kind, v):
+    if kind == "json":
+        return json.loads(v)
+    if kind == "bool":
+        return bool(int(v))
+    if kind == "int":
+        return int(v)
+    return str(v)
+
+
+def from_row(spec, row):
+    extra = json.loads(row["extra_json"]) if row.get("extra_json") else {}
+    if "__value__" in extra and len(extra) == 1:
+        return extra["__value__"]
+    if spec.scalar and row.get(spec.scalar) is not None and not extra:
+        return _py(spec.types[spec.scalar], row[spec.scalar])
+    rec = {n: _py(kind, row[n]) for n, kind in spec.cols if row.get(n) is not None}
+    rec.update(extra)
+    return rec
+
+
+def upsert_statement(spec, key, value):
+    cols, extra = to_row(spec, value)
+    names = [spec.pk] + [n for n, _ in spec.cols] + ["extra_json"]
+    frags, params = ["?"], [str(key)]
+    for name, kind in spec.cols:
+        v = cols[name]
+        if v is None:
+            frags.append("NULL")        # every bound value travels as text, so NULL goes in as a literal
+        elif kind == "json":
+            frags.append("?")
+            params.append(json.dumps(v, sort_keys=True))
+        elif kind == "bool":
+            frags.append("?")
+            params.append(1 if v else 0)
+        else:
+            frags.append("?")
+            params.append(v)
+    frags.append("?" if extra else "NULL")
+    if extra:
+        params.append(json.dumps(extra, sort_keys=True))
+    sets = ", ".join(f"{_q(n)} = excluded.{_q(n)}" for n in names[1:])
+    return (f"INSERT INTO {spec.table} ({', '.join(_q(n) for n in names)}) VALUES ({', '.join(frags)}) "
+            f"ON CONFLICT({_q(spec.pk)}) DO UPDATE SET {sets}"), params
+
+
+def create_statement(spec):
+    cols = ", ".join(f"{_q(n)} {'INTEGER' if k in ('int', 'bool') else 'TEXT'}" for n, k in spec.cols)
+    return f"CREATE TABLE IF NOT EXISTS {spec.table} ({_q(spec.pk)} TEXT PRIMARY KEY, {cols}{', ' if cols else ''}extra_json TEXT)"
+
+
+def _norm(v):
+    return {k: x for k, x in v.items() if x is not None} if isinstance(v, dict) else v
+
+
+def _fingerprint(value):
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+# ------------------------------------------------------------------------------------------------ setup
+
+def _ensure_mode():
+    global _mode
+    with _mode_lock:
+        if _mode:
+            return _mode
+        if not _cf():
+            _mode = "local"
+            print("[db] Cloudflare D1 isn't configured (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_D1_DATABASE_ID): using local files")
+            return _mode
+        _batch([(META_SQL, []), (MISC_SQL, [])] + [(create_statement(s), []) for s in SPECS.values()])
+        _mode = "d1"
+        return _mode
+
+
+def _meta_get(key):
+    rows = _query("SELECT v FROM bot_meta WHERE k = ?", [key])
+    return rows[0]["v"] if rows else None
+
+
+def _meta_set(key, value):
+    _query("INSERT INTO bot_meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", [key, value])
+
+
+def _flush_all_at_exit():
+    for s in list(_stores):
+        try:
+            s.flush()
+        except Exception as e:
+            print(f"[db] final save failed for {s.name}: {e}")
+
+
+atexit.register(_flush_all_at_exit)
+
+
+def flush_all():
+    """Write every store now (blocks). Returns True when everything was written."""
+    ok = True
+    for s in list(_stores):
+        ok = s.flush() and ok
+    return ok
+
+
+class Table:
+    """One store. Same methods the PickleDB objects had that the bot uses."""
+
+    def __init__(self, name, legacy_file=None):
+        self.name = name
+        self.spec = SPECS.get(name)
+        self._data = {}
+        self._written = {}               # key -> fingerprint of what D1 (or the file) holds
+        self._lock = threading.RLock()
+        self._io = threading.Lock()      # one write pass at a time
+        self._wake = threading.Event()
+        self._path = legacy_file or f"{name}.db"
+        self.mode = _ensure_mode()
+        self._load()
+        _stores.append(self)
+        threading.Thread(target=self._writer, name=f"db-{name}", daemon=True).start()
+
+    # ---- loading ----
+
+    def _read_legacy(self):
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            print(f"[db] could not read {self._path}: {e}")
+            return {}
+
+    def _load(self):
+        if self.mode == "local":
+            self._data = self._read_legacy()
+            self._written = {k: _fingerprint(v) for k, v in self._data.items()}
+            return
+        if self.spec:
+            for row in _query(f"SELECT * FROM {self.spec.table}"):
+                self._data[str(row[self.spec.pk])] = from_row(self.spec, row)
+        else:
+            for row in _query("SELECT k, v FROM bot_misc WHERE db = ?", [self.name]):
+                self._data[row["k"]] = json.loads(row["v"])
+        self._written = {k: _fingerprint(v) for k, v in self._data.items()}
+        self._import_legacy()
+
+    def _import_legacy(self):
+        """Copy the old pickleDB file in once, verified."""
+        mark = f"imported:{self.name}"
+        if _meta_get(mark) is not None:
+            return
+        old = self._read_legacy()
+        if not old:
+            _meta_set(mark, f"nothing to import {int(time.time())}")
+            return
+        todo = {k: v for k, v in old.items() if str(k) not in self._data}
+        statements = [self._statement(str(k), v) for k, v in todo.items()]
+        for i in range(0, len(statements), BATCH_SIZE):
+            _batch(statements[i:i + BATCH_SIZE])
+        back = {}
+        if self.spec:
+            back = {str(r[self.spec.pk]): from_row(self.spec, r) for r in _query(f"SELECT * FROM {self.spec.table}")}
+        else:
+            back = {r["k"]: json.loads(r["v"]) for r in _query("SELECT k, v FROM bot_misc WHERE db = ?", [self.name])}
+        bad = [str(k) for k, v in todo.items() if str(k) not in back or _norm(back[str(k)]) != _norm(json.loads(json.dumps(v)))]
+        if bad:
+            print(f"[db] import of {self._path} FAILED the read-back check for {len(bad)} of {len(todo)} rows (first: {', '.join(bad[:5])}); it will retry next start")
+            return
+        for k, v in todo.items():
+            self._data[str(k)] = back[str(k)]
+            self._written[str(k)] = _fingerprint(back[str(k)])
+        _meta_set(mark, f"{len(todo)} rows {int(time.time())}")
+        print(f"[db] imported {len(todo)} rows from {self._path} into D1 and verified every one ({self._path} is left as it was)")
+
+    # ---- dict-like API ----
+
+    def get(self, key, default=None):
+        with self._lock:
+            return self._data.get(str(key), default)
+
+    def set(self, key, value):
+        with self._lock:
+            self._data[str(key)] = value
+        self._wake.set()
+        return True
+
+    def exists(self, key):
+        with self._lock:
+            return str(key) in self._data
+
+    def remove(self, key):
+        with self._lock:
+            existed = self._data.pop(str(key), None) is not None
+        self._wake.set()
+        return existed
+
+    rem = remove
+
+    def all(self):
+        with self._lock:
+            return list(self._data.keys())
+
+    getall = all
+
+    def items(self):
+        with self._lock:
+            return dict(self._data)
+
+    def save(self):
+        """Ask the background writer to send what changed. Returns at once."""
+        self._wake.set()
+        return True
+
+    # ---- writing ----
+
+    def _statement(self, key, value):
+        if self.spec:
+            return upsert_statement(self.spec, key, value)
+        return ("INSERT INTO bot_misc (db, k, v) VALUES (?, ?, ?) ON CONFLICT(db, k) DO UPDATE SET v = excluded.v", [self.name, key, json.dumps(value)])
+
+    def _delete_statement(self, key):
+        if self.spec:
+            return (f"DELETE FROM {self.spec.table} WHERE {_q(self.spec.pk)} = ?", [key])
+        return ("DELETE FROM bot_misc WHERE db = ? AND k = ?", [self.name, key])
+
+    def flush(self):
+        """Write what changed, now. True if everything was written (a failure is kept and retried on the next pass)."""
+        with self._io:
+            with self._lock:
+                current = {k: (v, _fingerprint(v)) for k, v in self._data.items()}
+                written = dict(self._written)
+            dirty = {k: v for k, (v, fp) in current.items() if written.get(k) != fp}
+            deleted = [k for k in written if k not in current]
+            if not dirty and not deleted:
+                return True
+            if self.mode == "local":
+                try:
+                    with self._lock:
+                        snapshot = dict(self._data)
+                    tmp = self._path + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(snapshot, f)
+                    os.replace(tmp, self._path)
+                except Exception as e:
+                    print(f"[db] could not write {self._path}: {e}")
+                    return False
+                with self._lock:
+                    self._written = {k: _fingerprint(v) for k, v in snapshot.items()}
+                return True
+            work = [(("U", k), self._statement(k, v)) for k, v in dirty.items()] + [(("D", k), self._delete_statement(k)) for k in deleted]
+            ok = True
+            for i in range(0, len(work), BATCH_SIZE):
+                chunk = work[i:i + BATCH_SIZE]
+                try:
+                    _batch([s for _, s in chunk])
+                except Exception as e:
+                    ok = False
+                    print(f"[db] write failed for {self.name} ({len(chunk)} rows), will retry: {e}")
+                    continue
+                with self._lock:
+                    for (kind, k), _ in chunk:
+                        if kind == "U":
+                            self._written[k] = current[k][1]
+                        else:
+                            self._written.pop(k, None)
+            return ok
+
+    def _writer(self):
+        while True:
+            self._wake.wait(FLUSH_INTERVAL)
+            self._wake.clear()
+            time.sleep(0.2)              # let a burst of set() calls land in one pass
+            try:
+                self.flush()
+            except Exception as e:
+                print(f"[db] background save error in {self.name}: {e}")
+
+
+def summary():
+    return ", ".join(f"{s.name}={s.mode}" for s in _stores) or "no stores"
+
 #=== Database Setup ===
-countingDB = PickleDB('counting.db')
-embedDB = PickleDB('embed.db')
-usersDB = PickleDB('users.db')
-autoroleDB = PickleDB('autorole.db')
-AI_DB = PickleDB('ai.db')
+countingDB = Table('counting')
+embedDB = Table('embed')
+usersDB = Table('users')
+autoroleDB = Table('autorole')
+AI_DB = Table('ai')
+actionsDB = Table('actions')                # what was done from the web dashboard
+dmlogDB = Table('dmlog')                   # every DM the bot sends or receives
+rverifyDB = Table('rverify')                 # server id -> Roblox role mapping and the last sync's result
+cmdlogDB = Table('cmdlog')                   # server id (or 'botlog') -> where its command log posts
+lastOnlineDB = Table('lastonline')       # roblox user id -> unix time they were last seen online
 
 # === Discord Bot Setup ===
 intents = discord.Intents.default()
@@ -73,273 +481,500 @@ co_owner = "<@481295611417853982>"
 MainURL = "https://shapes.lol"
 searchengine = "621a38269031b4e89" # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
-# get the public key and api key for our api from .env
+# Secrets and settings, all from the environment (.env). See .env.example for the full list.
 PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY")
-APIBaseURL_Key = os.environ.get("Shapes_API_Key")
+APIBaseURL_Key = (os.environ.get("SHAPES_API_TOKEN") or os.environ.get("Shapes_API_Key") or "").strip()    # bearer token for the Shapes API's /internal routes
 APIBaseURL_Headers = {"Authorization": f"Bearer {APIBaseURL_Key}"}
-
-# get the bot token from TOKEN.txt
-try:
-    with open('TOKEN.txt', 'r') as f:
-        token = f.read()
-except FileNotFoundError:
-    print("Error: The file 'TOKEN.txt' was not found.")
-except Exception as e:
-    print(f"An error occurred: {e}")
-
-# get the admin key from akey.txt
-try:
-    with open('akey.txt', 'r') as f:
-        ADMIN_KEY = f.read()
-except FileNotFoundError:
-    print("Error: The file 'akey.txt' was not found.")
-except Exception as e:
-    print(f"An error occurred: {e}")
-
-# get the google API key from GoogleToken.txt
-try:
-    with open('GoogleToken.txt', 'r') as f:
-        GoogleAPIKey = f.read()
-except FileNotFoundError:
-    print("Error: The file 'GoogleToken.txt' was not found.")
-except Exception as e:
-    print(f"An error occurred: {e}")
-
-# get the API url
-APIBaseURL = "http://localhost:1337"
+token = (os.environ.get("DISCORD_TOKEN") or "").strip()                    # the bot token
+ADMIN_KEY = (os.environ.get("ADMIN_KEY") or "").strip()                    # password for the /login admin page (empty = the page can't be unlocked)
+GoogleAPIKey = (os.environ.get("GOOGLE_API_KEY") or "").strip()            # Google Custom Search key for /google
+ROBLOSECURITY = (os.environ.get("ROBLOSECURITY") or "").strip()            # a Roblox account's .ROBLOSECURITY cookie (presence, avatar renders, profile data)
+APIBaseURL = (os.environ.get("SHAPES_API_URL") or "http://localhost:1337").rstrip("/")     # the Shapes API
 
 
 # last online cache
 def load_cached_timestamps():
-    try:
-        with open('lastonline.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+    return lastOnlineDB.items()
 
 def update_cached_timestamp(user_id, timestamp):
-    try:
-        cached_timestamps = load_cached_timestamps()
-        cached_timestamps[str(user_id)] = timestamp
-        with open('lastonline.json', 'w') as f:
-            json.dump(cached_timestamps, f, indent=2)
-    except Exception as e:
-        print(f"Error updating cached timestamp: {e}")
+    lastOnlineDB.set(user_id, timestamp)
 
 # === Flask App Setup ===
 app = Flask(__name__)
 CORS(app)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "keepthisasecret")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)       # signs the dashboard login; set FLASK_SECRET_KEY to stay signed in across restarts
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Bot Dashboard</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #1e1e2f; color: #fff; padding: 20px; }
-        h1 { color: #50fa7b; }
-        select, input[type=text] { padding: 6px; border-radius: 5px; border: none; margin: 5px 0; }
-        input[type=submit] { background: #50fa7b; border: none; padding: 8px 12px; border-radius: 5px; color: #000; cursor: pointer; }
-        .server { background: #282a36; padding: 10px; margin-bottom: 15px; border-radius: 10px; }
-        .logout { margin-top: 20px; }
-        .presence-button {
-            display: inline-block;
-            margin-top: 10px;
-            background-color: #7289da;
-            color: white;
-            padding: 10px 18px;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: bold;
-            transition: background-color 0.3s ease;
-        }
-        .presence-button:hover {
-            background-color: #5b6eae;
-        }
-    </style>
-</head>
-<body>
-    <h1>🤖 Bot Dashboard</h1>
-    <p>Status: <b style="color:lime;">Online</b></p>
-    <p>Connected to {{ guilds|length }} {{ 'server' if guilds|length == 1 else 'servers' }}</p>
-    
-    <!-- Presence Button -->
-    <a href="https://shapes.lol/discord" target="_blank" rel="noopener" class="presence-button">
-        Join Our Server
-    </a>
-    
-    {% for g in guilds %}
-        <div class="server">
-            <h3>{{ g.name }}</h3>
-            <form action="/send" method="post">
-                <input type="hidden" name="guild_id" value="{{ g.id }}">
-                <label for="channel">Channel:</label>
-                <select name="channel_id">
-                    {% for c in g.text_channels %}
-                        <option value="{{ c.id }}">{{ c.name }}</option>
-                    {% endfor %}
-                </select>
-                <br>
-                <label for="message">Message:</label>
-                <input type="text" name="message" placeholder="Enter your message" required>
-                <br>
-                <input type="submit" value="Send">
-            </form>
-        </div>
-    {% endfor %}
-    <div class="logout">
-        <a href="/logout" style="color: #ff5555;">Logout</a>
-    </div>
-</body>
-</html>
-"""
+# === Admin dashboard (the web pages in web/: the same ones the Yapin' bot uses) ===
+# Sign in with ADMIN_KEY at /login. Everything the pages need is under /api: servers, members, channels, DMs, logs.
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+dash_started = time.time()
+_login_attempts = {}
 
-# === Admin Auth Decorator ===
+
+def _web_file(name):
+    with open(os.path.join(WEB_DIR, name), "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _too_many_logins(ip):
+    now = time.time()
+    tries = [t for t in _login_attempts.get(ip, []) if now - t < 600]
+    _login_attempts[ip] = tries
+    return len(tries) >= 8
+
+
+def _read_git(here):
+    """{sha, branch, repo, title} of the checkout the code runs from, read straight out of the .git folder. Hosts often have no git program,
+    so nothing here runs one. The title comes from the commit object when it's stored loose, else from GitHub (public repos) in the background."""
+    import zlib
+    gd = os.path.join(here, ".git")
+    out = {"sha": "", "branch": "", "repo": "", "title": ""}
+    try:
+        head = open(os.path.join(gd, "HEAD")).read().strip()
+        if head.startswith("ref:"):
+            ref = head[4:].strip()
+            out["branch"] = ref.split("/", 2)[-1]
+            path = os.path.join(gd, *ref.split("/"))
+            if os.path.exists(path):
+                out["sha"] = open(path).read().strip()
+            elif os.path.exists(os.path.join(gd, "packed-refs")):
+                for line in open(os.path.join(gd, "packed-refs")):
+                    if line.strip().endswith(" " + ref):
+                        out["sha"] = line.split()[0]
+        else:
+            out["sha"] = head
+        try:                                                           # which branch was pulled last tells more than the local name does
+            fetched = open(os.path.join(gd, "FETCH_HEAD")).read()
+            found = re.search(r"branch '([^']+)' of (\S+)", fetched)
+            if found:
+                out["branch"], out["repo"] = found.group(1), found.group(2)
+        except OSError:
+            pass
+        if not out["repo"]:
+            found = re.search(r"url\s*=\s*(\S+)", open(os.path.join(gd, "config")).read())
+            out["repo"] = found.group(1) if found else ""
+        out["repo"] = re.sub(r"^git@github\.com:", "https://github.com/", re.sub(r"\.git$", "", out["repo"])).rstrip("/")
+        out["repo"] = re.sub(r"^https://[^@/]+@", "https://", out["repo"])      # never keep a token that was part of the remote
+        if out["sha"]:
+            try:
+                raw = zlib.decompress(open(os.path.join(gd, "objects", out["sha"][:2], out["sha"][2:]), "rb").read())
+                out["title"] = raw.split(b"\n\n", 1)[1].split(b"\n", 1)[0].decode("utf-8", "replace")[:120]
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if not out["sha"]:
+        out["sha"] = os.environ.get("COMMIT_SHA", "").strip()
+    out["short"] = out["sha"][:7]
+    return out
+
+
+GIT = _read_git(os.path.dirname(os.path.abspath(__file__)))
+
+
+def commit_info():
+    """The running commit: {sha, title, url, branch}. Linked on the dashboard because this repo is public."""
+    sha = GIT["sha"]
+    url = f"{GIT['repo']}/commit/{sha}" if sha and GIT["repo"].startswith("https://github.com/") else ""
+    return {"sha": GIT["short"], "title": GIT["title"], "url": url, "branch": GIT["branch"]}
+
+
+def _fill_commit_title():
+    """A shallow clone keeps its commit in a pack, so ask GitHub once in the background for the title."""
+    if not GIT["sha"] or GIT["title"] or not GIT["repo"].startswith("https://github.com/"):
+        return
+    try:
+        r = requests.get(f"https://api.github.com/repos/{GIT['repo'][len('https://github.com/'):]}/commits/{GIT['sha']}", timeout=8)
+        if r.ok:
+            GIT["title"] = str((r.json().get("commit") or {}).get("message") or "").split("\n", 1)[0][:120]
+    except Exception:
+        pass
+
+
+threading.Thread(target=_fill_commit_title, daemon=True).start()
+_api_commit = {"at": 0, "value": {}}
+
+
+def api_commit_info():
+    """The Shapes API's own commit ({sha, title}), asked of it every 5 minutes. Its repo is private, so it is shown without a link."""
+    if time.time() - _api_commit["at"] > 300:
+        data = _shapes_call("GET", "/internal/version") or {}
+        _api_commit.update(at=time.time(), value={"sha": data.get("sha") or "", "title": data.get("title") or ""})
+    return _api_commit["value"]
+
+
 def admin_required(f):
     def wrapped(*args, **kwargs):
-        if session.get("admin") != True:
+        if session.get("admin") is not True:
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "login required"}), 401
             return redirect(url_for("admin_login"))
         return f(*args, **kwargs)
     wrapped.__name__ = f.__name__
     return wrapped
 
-# === Flask Routes ===
+
+def dash_run(coro, timeout=30):
+    """Run a coroutine on the bot's event loop from a Flask thread and wait for its result."""
+    return asyncio.run_coroutine_threadsafe(coro, bot.loop).result(timeout)
+
+
+def log_action(kind, detail, server_id="", target=""):
+    """Everything done from the dashboard is written down (shown under Logs)."""
+    try:
+        now = time.time()
+        actionsDB.set(f"{int(now * 1000)}-{os.urandom(2).hex()}", {"at": int(now), "actor_id": "admin", "actor": "Admin key", "kind": kind,
+                                                                    "detail": str(detail)[:400], "server_id": str(server_id or ""), "target": str(target or "")})
+        keys = sorted(actionsDB.items())
+        for old in keys[:max(0, len(keys) - 2000)]:
+            actionsDB.remove(old)
+    except Exception as e:
+        print(f"[dash] couldn't log the action: {e}")
+
+
 @app.route("/status")
 def status():
     return "OK", 200
+
 
 @app.route("/activity")
 def activity():
     return redirect(url_for("admin_login"))
 
+
 @app.route("/login", methods=["GET", "POST"])
 def admin_login():
-    if session.get("admin") == True:
+    if session.get("admin") is True:
         return redirect(url_for("dashboard"))
-
+    error = None
     if request.method == "POST":
-        key = request.form.get("pass")
-        if key == ADMIN_KEY:
+        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "?").split(",")[0].strip()
+        if _too_many_logins(ip):
+            error = "Too many attempts. Wait a few minutes and try again."
+        elif not ADMIN_KEY:
+            error = "No admin key is configured (set ADMIN_KEY)."
+        elif hmac.compare_digest(request.form.get("pass", ""), ADMIN_KEY):
             session["admin"] = True
             return redirect(url_for("dashboard"))
         else:
-            return '''
-                <h3 style="color: red; font-family: Arial, sans-serif;">Incorrect key.</h3>
-                <a href="/login" style="font-family: Arial, sans-serif; color: #50fa7b;">Try again</a>
-            '''
+            _login_attempts.setdefault(ip, []).append(time.time())
+            error = "That key isn't right."
+    return render_template_string(_web_file("login.html"), error=error)
 
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Admin Login</title>
-        <style>
-            body {
-                background: #121212;
-                color: #eee;
-                font-family: Arial, sans-serif;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                margin: 0;
-            }
-            .login-container {
-                background: #282a36;
-                padding: 40px 50px;
-                border-radius: 12px;
-                box-shadow: 0 0 15px #50fa7b;
-                text-align: center;
-                width: 320px;
-            }
-            h2 {
-                margin-bottom: 25px;
-                color: #50fa7b;
-            }
-            input[type=password] {
-                width: 100%;
-                padding: 12px;
-                margin-bottom: 20px;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-                background: #44475a;
-                color: #f8f8f2;
-            }
-            input[type=password]::placeholder {
-                color: #bd93f9;
-            }
-            button {
-                background: #50fa7b;
-                border: none;
-                color: #000;
-                padding: 12px 0;
-                width: 100%;
-                font-size: 16px;
-                font-weight: bold;
-                border-radius: 6px;
-                cursor: pointer;
-                transition: background 0.3s ease;
-            }
-            button:hover {
-                background: #44d366;
-            }
-            a {
-                display: inline-block;
-                margin-top: 15px;
-                color: #50fa7b;
-                text-decoration: none;
-                font-size: 14px;
-            }
-            a:hover {
-                text-decoration: underline;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="login-container">
-            <h2>Admin Login</h2>
-            <form method="POST">
-                <input type="password" name="pass" placeholder="Enter admin key" required>
-                <button type="submit">Login</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    '''
 
 @app.route("/logout")
 def admin_logout():
     session.clear()
     return redirect(url_for("admin_login"))
 
-# Dashboard at root /
+
 @app.route("/", methods=["GET"])
+@app.route("/admin", methods=["GET"])
 @admin_required
 def dashboard():
     if not bot_ready:
-        return "<h3>Bot is not ready yet, please try again in a moment.</h3>"
-    return render_template_string(HTML_TEMPLATE, guilds=cached_guilds)
+        return Response("<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=3><body style='font-family:system-ui;padding:3rem'>The bot is still starting. This page reloads on its own.", mimetype="text/html")
+    return Response(_web_file("app.html").replace("<!--SIGNOUT-->", '<a href="/logout" id="signout">Sign out</a>'), mimetype="text/html")
 
-@app.route("/send", methods=["POST"])
+
+DASH_COLORS = {"Blue": 0x5865F2, "Green": 0x57F287, "Yellow": 0xFEE75C, "Red": 0xED4245, "Pink": 0xEB459E, "Purple": 0x9B59B6, "Orange": 0xE67E22, "White": 0xFFFFFF}
+
+
+def _dash_color(choice):
+    choice = str(choice or "Blue")
+    if choice == "random":
+        return random.choice(list(DASH_COLORS.values()))
+    if choice == "mine":
+        choice = "Blue"
+    if choice not in DASH_COLORS:
+        raise ValueError("That isn't one of the colours.")
+    return DASH_COLORS[choice]
+
+
+def _dash_valid_image(url):
+    url = str(url or "").strip()
+    if not url:
+        return None
+    if not re.match(r"^https://[^\s]+$", url) or len(url) > 800:
+        raise ValueError("The image link must start with https:// and have no spaces.")
+    return url
+
+
+def _dash_avatar(u):
+    try:
+        return str(u.display_avatar.replace(size=64).url)
+    except Exception:
+        return None
+
+
+def _dash_person(m):
+    u = m._user if isinstance(m, discord.Member) and hasattr(m, "_user") else m
+    return {"id": str(m.id), "name": m.name, "display": m.display_name, "avatar": _dash_avatar(m), "bot": bool(m.bot),
+            "roles": [str(r.id) for r in getattr(m, "roles", []) if r.name != "@everyone"],
+            "joined": m.joined_at.isoformat() if getattr(m, "joined_at", None) else None}
+
+
+def _dash_guild(server_id):
+    g = bot.get_guild(int(server_id)) if str(server_id).isdigit() else None
+    if g is None:
+        raise LookupError("The bot isn't in that server.")
+    return g
+
+
+def _dash_error(e):
+    code = 404 if isinstance(e, (LookupError, discord.NotFound)) else 403 if isinstance(e, discord.Forbidden) else 502
+    return jsonify({"error": str(e) or e.__class__.__name__}), code
+
+
+@app.route("/api/overview")
 @admin_required
-def send_message():
-    guild_id = int(request.form["guild_id"])
-    channel_id = int(request.form["channel_id"])
-    message = request.form["message"]
+def api_overview():
+    if not bot_ready:
+        return jsonify({"ready": False}), 503
+    servers = []
+    for g in sorted(bot.guilds, key=lambda g: g.name.lower()):
+        bots = people = None
+        if g.chunked:
+            bots = sum(1 for m in g.members if m.bot)
+            people = len(g.members) - bots
+        total = max(g.member_count or 0, len(g.members)) if g.chunked else (g.member_count or 0)
+        servers.append({"id": str(g.id), "name": g.name, "member_count": total, "people": people, "bots": bots, "icon": g.icon.url if g.icon else None})
+    me = bot.user
+    return jsonify({
+        "ready": True, "me": {"username": "Shapes", "avatar": str(me.display_avatar.replace(size=128).url) if me else None},
+        "uptime_seconds": int(time.time() - dash_started), "servers": servers,
+        "commands": sorted(c.qualified_name for c in bot.tree.walk_commands() if not isinstance(c, discord.app_commands.Group)),
+        "storage": {"backend": "Cloudflare D1" if _mode == "d1" else "local files"},
+        "commit": commit_info(), "api_commit": api_commit_info(), "is_owner": True, "colors": [{"name": n, "hex": "#%06x" % v} for n, v in DASH_COLORS.items()],
+    })
 
-    guild = discord.utils.get(bot.guilds, id=guild_id)
-    if guild:
-        channel = discord.utils.get(guild.text_channels, id=channel_id)
-        if channel:
+
+@app.route("/api/servers/<server_id>")
+@admin_required
+def api_server(server_id):
+    try:
+        g = _dash_guild(server_id)
+        cats = []
+        loose = [c for c in g.channels if c.category is None and not isinstance(c, discord.CategoryChannel)]
+        groups = [(None, sorted(loose, key=lambda c: c.position))] + [(cat, cat.channels) for cat in g.categories]
+        for cat, chans in groups:
+            rows = [{"id": str(c.id), "name": c.name, "type": c.type.name, "topic": getattr(c, "topic", None) or "",
+                     "private": False, "position": c.position} for c in chans]
+            if rows:
+                cats.append({"id": str(cat.id) if cat else None, "name": cat.name if cat else "", "channels": rows})
+        roles = [{"id": str(r.id), "name": r.name, "color": ("#%06x" % r.color.value) if r.color.value else None, "position": r.position,
+                  "admin": r.permissions.administrator} for r in sorted(g.roles, key=lambda r: -r.position) if not r.is_default()]
+        return jsonify({"server": {"id": str(g.id), "name": g.name, "owner_id": str(g.owner_id)}, "categories": cats, "roles": roles})
+    except Exception as e:
+        return _dash_error(e)
+
+
+@app.route("/api/servers/<server_id>/members")
+@admin_required
+def api_members(server_id):
+    try:
+        g = _dash_guild(server_id)
+        if not g.chunked:
+            dash_run(g.chunk())
+        after = int(request.args.get("after") or 0)
+        rows = [m for m in sorted(g.members, key=lambda m: m.id) if m.id > after][:200]
+        return jsonify({"members": [_dash_person(m) for m in rows], "next": str(rows[-1].id) if len(rows) >= 200 else None})
+    except Exception as e:
+        return _dash_error(e)
+
+
+def _dash_message(m):
+    images = [a.url for a in m.attachments if (a.content_type or "").startswith("image")]
+    for e in m.embeds:
+        for part in (e.image, e.thumbnail):
+            if part and part.url:
+                images.append(part.url)
+    return {"id": str(m.id), "author": m.author.display_name, "author_id": str(m.author.id), "avatar": _dash_avatar(m.author), "bot": bool(m.author.bot),
+            "content": m.content or "", "created_at": m.created_at.isoformat(),
+            "embeds": [{"title": e.title, "description": e.description, "url": e.url} for e in m.embeds], "images": images[:6]}
+
+
+@app.route("/api/channels/<channel_id>/messages")
+@admin_required
+def api_messages(channel_id):
+    limit = max(1, min(100, request.args.get("limit", 50, type=int)))
+
+    async def load():
+        ch = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        return [_dash_message(m) async for m in ch.history(limit=limit)]
+    try:
+        return jsonify({"messages": dash_run(load())})
+    except Exception as e:
+        return _dash_error(e)
+
+
+@app.route("/api/channels/<channel_id>/send", methods=["POST"])
+@admin_required
+def api_send(channel_id):
+    body = request.get_json(silent=True) or {}
+    text = str(body.get("message", "")).strip()
+    try:
+        image = _dash_valid_image(body.get("image_url"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not text and not image:
+        return jsonify({"error": "Write a message or add an image link."}), 400
+    hidden = body.get("hidden") is True
+    if not hidden:
+        text = (text + "\n" if text else "") + "-# Sent from the Shapes dashboard"
+
+    async def go():
+        ch = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        await ch.send(text[:2000], embed=discord.Embed(color=0x2b2d31).set_image(url=image) if image else None)
+    try:
+        dash_run(go())
+        log_action("send", ("(hidden sender) " if hidden else "") + text[:200], target=f"channel {channel_id}")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return _dash_error(e)
+
+
+# --- direct messages: everything the bot sends or receives is in dmlogDB; conversations are built from it ---
+@app.route("/api/dms/log")
+@admin_required
+def api_dm_log():
+    who = request.args.get("user_id", "").strip()
+    rows = [v for v in dmlogDB.items().values() if isinstance(v, dict) and (not who or v.get("user_id") == who)]
+    rows.sort(key=lambda r: -int(r.get("at") or 0))
+    return jsonify({"log": rows[:300], "total": len(rows)})
+
+
+@app.route("/api/dms")
+@admin_required
+def api_dms():
+    convo = {}
+    for r in dmlogDB.items().values():
+        if isinstance(r, dict) and r.get("user_id"):
+            c = convo.setdefault(r["user_id"], {"user_id": r["user_id"], "channel_id": "", "name": r.get("name") or r["user_id"], "last": 0})
+            c["last"] = max(c["last"], int(r.get("at") or 0))
+            c["name"] = r.get("name") or c["name"]
+    return jsonify({"dms": sorted(convo.values(), key=lambda c: -c["last"])[:200]})
+
+
+@app.route("/api/users/search")
+@admin_required
+def api_user_search():
+    q = request.args.get("q", "").strip().lower().lstrip("@")
+    if len(q) < 2:
+        return jsonify({"users": []})
+    seen = {}
+    for g in bot.guilds:
+        for m in g.members:
+            if q in m.name.lower() or q in m.display_name.lower() or q == str(m.id):
+                seen.setdefault(m.id, _dash_person(m))
+        if len(seen) >= 15:
+            break
+    if not seen and q.isdigit():
+        try:
+            u = dash_run(bot.fetch_user(int(q)))
+            seen[u.id] = {"id": str(u.id), "name": u.name, "display": u.display_name, "avatar": _dash_avatar(u), "bot": u.bot, "roles": [], "joined": None}
+        except Exception:
+            pass
+    return jsonify({"users": list(seen.values())[:15]})
+
+
+@app.route("/api/dms", methods=["POST"])
+@admin_required
+def api_dm_open():
+    body = request.get_json(silent=True) or {}
+    user_id = str(body.get("user_id", "")).strip().strip("<@!>")
+    if not user_id.isdigit():
+        return jsonify({"error": "Pick a person first."}), 400
+
+    async def go():
+        u = await bot.fetch_user(int(user_id))
+        return u, (await u.create_dm()).id
+    try:
+        u, channel_id = dash_run(go())
+        return jsonify({"dm": {"user_id": user_id, "channel_id": str(channel_id), "name": u.display_name, "last": int(time.time())}})
+    except Exception as e:
+        return _dash_error(e)
+
+
+_dm_jobs = {}
+
+
+def _dash_dm_one(uid, text, title, image, footer, color):
+    async def go():
+        u = await bot.fetch_user(int(uid))
+        e = discord.Embed(title=title or None, description=text[:4000], color=color)
+        if image:
+            e.set_image(url=image)
+        if footer:
+            e.set_footer(text=footer)
+        await u.send(embed=e)
+    dash_run(go(), timeout=40)
+
+
+def _dash_dm_job(job, ids, text, title, image, hidden, color):
+    j = _dm_jobs[job]
+    footer = None if hidden else "Sent by the Shapes team"
+    try:
+        for uid in ids:
             try:
-                bot.loop.create_task(channel.send(message))
-            except Exception as e:
-                print(f"Failed to send message: {e}")
+                _dash_dm_one(uid, text, title, image, footer, color)
+                j["sent"] += 1
+            except Exception:
+                j["failed"] += 1
+            j["done"] += 1
+            time.sleep(0.6)
+    except Exception as e:
+        j["error"] = str(e)[:150]
+    j["finished"] = True
 
-    return redirect(url_for("dashboard"))
-    
+
+@app.route("/api/dm/send", methods=["POST"])
+@admin_required
+def api_dm_send():
+    body = request.get_json(silent=True) or {}
+    text, title = str(body.get("message", "")).strip(), str(body.get("title", "")).strip()
+    raw = body.get("user_ids")
+    ids = re.findall(r"\d{15,22}", raw) if isinstance(raw, str) else [str(i).strip().strip("<@!>") for i in (raw or []) if str(i).strip().strip("<@!>").isdigit()]
+    ids = list(dict.fromkeys(ids))
+    if not text:
+        return jsonify({"error": "Write the message first."}), 400
+    everyone = body.get("everyone") is True
+    if everyone:
+        ids = list(dict.fromkeys(str(m.id) for g in bot.guilds for m in g.members if not m.bot))
+    if not ids:
+        return jsonify({"error": "Pick at least one person."}), 400
+    try:
+        image = _dash_valid_image(body.get("image_url"))
+        color = _dash_color(body.get("color"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    hidden = body.get("hidden") is True
+    job = os.urandom(6).hex()
+    _dm_jobs[job] = {"total": len(ids), "done": 0, "sent": 0, "failed": 0, "finished": False}
+    threading.Thread(target=_dash_dm_job, args=(job, ids, text, title, image, hidden, color), daemon=True).start()
+    log_action("dm", ("(hidden sender) " if hidden else "") + text[:200], target=("everyone: " if everyone else "") + f"{len(ids)} people: " + ", ".join(ids[:8]) + ("…" if len(ids) > 8 else ""))
+    return jsonify({"job": job, "total": len(ids)})
+
+
+@app.route("/api/dm/job/<job>")
+@admin_required
+def api_dm_job(job):
+    j = _dm_jobs.get(job)
+    return (jsonify(j), 200) if j else (jsonify({"error": "No such job."}), 404)
+
+
+@app.route("/api/actions")
+@admin_required
+def api_actions():
+    rows = [v for v in actionsDB.items().values() if isinstance(v, dict)]
+    return jsonify({"actions": sorted(rows, key=lambda r: -int(r.get("at") or 0))[:200]})
+
+
+@app.route("/avatar/<uid>.svg")
+def default_avatar(uid):
+    return Response('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#6366f1"/></svg>', mimetype="image/svg+xml")
+
+
 @app.route('/shutdown', methods=['POST'])
 def shutdown():
     if request.remote_addr not in ['127.0.0.1', '::1']:
@@ -356,7 +991,9 @@ def shutdown():
 def send_commands():
     commands = {}
     commands['Commands'] = {}
-    for cmd in bot.tree.get_commands():
+    for cmd in list(bot.tree.walk_commands()) + list(bot.tree.get_commands(type=discord.AppCommandType.user)) + list(bot.tree.get_commands(type=discord.AppCommandType.message)):
+        if isinstance(cmd, discord.app_commands.Group):
+            continue                                  # a group is only a folder; its subcommands are listed
         if isinstance(cmd, discord.app_commands.ContextMenu):
             # Context menu commands don't have description/options
             cmd_data = {
@@ -378,7 +1015,7 @@ def send_commands():
     
 @app.route('/count/commands', methods=['GET'])
 def get_command_count():
-    return {'Commands': str(len(bot.tree.get_commands()))}, 200
+    return {'Commands': str(sum(1 for c in bot.tree.walk_commands() if not isinstance(c, discord.app_commands.Group)))}, 200
 
 @app.route('/discord/webhook', methods=['POST'])
 def send_webhook():
@@ -507,131 +1144,25 @@ def send_webhook():
 cached_guilds = []
 bot_ready = False
 
-class MyGateway(DiscordWebSocket):
+# Show the bot as "Discord Android" (the phone icon). This used to be a copy of discord.py's identify() and connect(), which
+# broke on every discord.py update. Now only the IDENTIFY payload's properties are changed, on top of whatever discord.py sends.
+_original_send_as_json = DiscordWebSocket.send_as_json
 
-    async def identify(self):
-        payload = {
-            'op': self.IDENTIFY,
-            'd': {
-                'token': token,
-                'properties': {
-                    '$os': sys.platform,
-                    '$browser': 'Discord Android',
-                    '$device': 'Discord Android',
-                    '$referrer': '',
-                    '$referring_domain': ''
-                },
-                'compress': True,
-                'large_threshold': 250,
-                'v': 3
-            }
-        }
 
-        if self.shard_id is not None and self.shard_count is not None:
-            payload['d']['shard'] = [self.shard_id, self.shard_count]
+async def _send_as_json_android(self, data):
+    if isinstance(data, dict) and data.get("op") == DiscordWebSocket.IDENTIFY:
+        props = data.setdefault("d", {}).setdefault("properties", {})
+        props.update({"os": sys.platform, "browser": "Discord Android", "device": "Discord Android"})
+    return await _original_send_as_json(self, data)
 
-        state = self._connection
-        if state._activity is not None or state._status is not None:
-            payload['d']['presence'] = {
-                'status': state._status,
-                'game': state._activity,
-                'since': 0,
-                'afk': False
-            }
 
-        if state._intents is not None:
-            payload['d']['intents'] = state._intents.value
-
-        await self.call_hooks('before_identify', self.shard_id, initial=self._initial_identify)
-        await self.send_as_json(payload)
-        _log.info('Shard ID %s has sent the IDENTIFY payload.', self.shard_id)
+DiscordWebSocket.send_as_json = _send_as_json_android
 
 
 class Shapes(Bot):
-
-    async def connect(self, *, reconnect: bool = True) -> None:
-        """|coro|
-
-        Creates a websocket connection and lets the websocket listen
-        to messages from Discord. This is a loop that runs the entire
-        event system and miscellaneous aspects of the library. Control
-        is not resumed until the WebSocket connection is terminated.
-
-        Parameters
-        -----------
-        reconnect: :class:`bool`
-            If we should attempt reconnecting, either due to internet
-            failure or a specific failure on Discord's part. Certain
-            disconnects that lead to bad state will not be handled (such as
-            invalid sharding payloads or bad tokens).
-
-        Raises
-        -------
-        :exc:`.GatewayNotFound`
-            If the gateway to connect to Discord is not found. Usually if this
-            is thrown then there is a Discord API outage.
-        :exc:`.ConnectionClosed`
-            The websocket connection has been terminated.
-        """
-
-        backoff = discord.client.ExponentialBackoff()
-        ws_params = {
-            'initial': True,
-            'shard_id': 0,
-        }
-        while not self.is_closed():
-            try:
-                coro = MyGateway.from_client(self, **ws_params)
-                self.ws = await asyncio.wait_for(coro, timeout=60.0)
-                ws_params['initial'] = False
-                while True:
-                    await self.ws.poll_event()
-            except discord.client.ReconnectWebSocket as e:
-                _log.info('Got a request to %s the websocket.', e.op)
-                self.dispatch('disconnect')
-                ws_params.update(sequence=self.ws.sequence, resume=e.resume, session=self.ws.session_id)
-                continue
-            except (OSError,
-                    discord.HTTPException,
-                    discord.GatewayNotFound,
-                    discord.ConnectionClosed,
-                    aiohttp.ClientError,
-                    asyncio.TimeoutError) as exc:
-
-                self.dispatch('disconnect')
-                if not reconnect:
-                    await self.close()
-                    if isinstance(exc, discord.ConnectionClosed) and exc.code == 1000:
-                        # clean close, don't re-raise this
-                        return
-                    raise
-
-                if self.is_closed():
-                    return
-
-                # If we get connection reset by peer then try to RESUME
-                if isinstance(exc, OSError) and exc.errno in (54, 10054):
-                    ws_params.update(sequence=self.ws.sequence, initial=False, resume=True, session=self.ws.session_id)
-                    continue
-
-                # We should only get this when an unhandled close code happens,
-                # such as a clean disconnect (1000) or a bad state (bad token, no sharding, etc)
-                # sometimes, discord sends us 1000 for unknown reasons so we should reconnect
-                # regardless and rely on is_closed instead
-                if isinstance(exc, discord.ConnectionClosed):
-                    if exc.code == 4014:
-                        raise discord.PrivilegedIntentsRequired(exc.shard_id) from None
-                    if exc.code != 1000:
-                        await self.close()
-                        raise
-
-                retry = backoff.delay()
-                _log.exception("Attempting a reconnect in %.2fs", retry)
-                await asyncio.sleep(retry)
-                # Always try to RESUME the connection
-                # If the connection is not RESUME-able then the gateway will invalidate the session.
-                # This is apparently what the official Discord client does.
-                ws_params.update(sequence=self.ws.sequence, resume=True, session=self.ws.session_id)
+    async def setup_hook(self):
+        for cog in COGS:                      # the cogs are defined further down this file (Roblox, command logs, Vortex, server)
+            await self.add_cog(cog(self))
 
 colors_lua = """{[3447003] = "Blue", [15158332] = "Red", [3066993] = "Green", [10181046] = "Purple", [15105570] = "Orange", [15844367] = "Gold", [1752220] = "Teal", [2123412] = "Dark Blue", [10038562] = "Dark Red", [2067276] = "Dark Green", [7419530] = "Dark Purple", [11027200] = "Dark Orange", [12745742] = "Dark Gold", [1146986] = "Dark Teal"}"""
 colors = lua.decode(colors_lua)
@@ -639,241 +1170,131 @@ colors = lua.decode(colors_lua)
 
 #bot = commands.Bot(command_prefix="/", intents=intents)
 bot = Shapes(command_prefix="/", intents=discord.Intents.all())
+
+# /roblox ... lives in one command group; the Roblox cog (below) adds the verification commands to it and the tree gets it when the cog loads.
+roblox_group = app_commands.Group(
+    name="roblox", description="Roblox lookups, verification, your linked accounts and group info",
+    allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
+    allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True))
+roblox_panel = app_commands.Group(name="panel", description="Set up Roblox verification for this server (server admins)", parent=roblox_group)
 #tree = app_commands.CommandTree(bot)
 
 class TopGGIntegration:
-    """Handles Top.gg API integration for command posting"""
-    
+    """Posts the bot's stats and slash commands to top.gg (API v1, https://docs.top.gg/api/v1/projects).
+
+    Set `Commands-TK` (or TOPGG_PROJECT_TOKEN) to the bot's top.gg project token. If only the old TOPGG_TOKEN is set, the
+    server count still goes to the old endpoint with it, as before."""
+
+    BASE = "https://top.gg/api/v1/projects/@me"
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.commands_token = os.environ.get("Commands-TK")
+        self.token = os.environ.get("Commands-TK") or os.environ.get("TOPGG_PROJECT_TOKEN")
+        self.legacy_token = os.environ.get("TOPGG_TOKEN")
+        self._tasks = []
+
+    async def _request(self, method, url, headers, body):
+        """(ok, status, text). Never raises; a 429 says how long to wait."""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                async with session.request(method, url, headers=headers, json=body) as response:
+                    text = await response.text()
+                    if response.status == 429:
+                        text = f"rate limited, retry after {response.headers.get('Retry-After', '?')}s {text[:120]}"
+                    return 200 <= response.status < 300, response.status, text
+        except Exception as e:
+            return False, 0, str(e)
 
     async def post_server_count(self) -> bool:
-        url = f"https://top.gg/api/bots/{self.bot.user.id}/stats"
-        headers = {
-            "Authorization": os.environ.get("TOPGG_TOKEN"),
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "server_count": len(self.bot.guilds)
-        }
-    
-        # POST request to Top.gg API
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                return response.status == 200
+        if self.token:
+            body = {"server_count": len(self.bot.guilds)}
+            if self.bot.shard_count:
+                body["shard_count"] = self.bot.shard_count
+            ok, status, text = await self._request("PATCH", f"{self.BASE}/metrics",
+                                                   {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}, body)
+            if ok:
+                return True
+            print(f"❌ top.gg refused the server count: {status} {text[:200]}")
+        if self.legacy_token and self.bot.user:
+            ok, status, text = await self._request("POST", f"https://top.gg/api/bots/{self.bot.user.id}/stats",
+                                                   {"Authorization": self.legacy_token, "Content-Type": "application/json"},
+                                                   {"server_count": len(self.bot.guilds)})
+            if not ok:
+                print(f"❌ top.gg (old endpoint) refused the server count: {status} {text[:200]}")
+            return ok
+        if not self.token:
+            print("top.gg server count skipped: set Commands-TK (top.gg project token) in the environment.")
+        return False
 
     async def post_commands_to_topgg(self) -> bool:
-        """Post bot commands to Top.gg"""
-        if not self.commands_token:
+        """Replace the command list on top.gg with the bot's current slash and context-menu commands."""
+        if not self.token:
             print("Commands token not found. Set Commands-TK in environment.")
             return False
-
-        url = f"https://top.gg/api/v1/projects/@me/commands"
-        headers = {
-            "Authorization": f"Bearer {self.commands_token}",
-            "Content-Type": "application/json"
-        }
-
-        try:
-            commands_data = await self._get_bot_commands_for_topgg()
-            
-            if not commands_data:
-                print("⚠️ No commands found to post to Top.gg")
-                return False
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=commands_data) as response:
-                    if response.status in [200, 204]:
-                        print(f"✅ Successfully posted {len(commands_data)} commands to Top.gg")
-                        return True
-                    else:
-                        text = await response.text()
-                        print(f"❌ Failed to post commands to Top.gg: {response.status} - {text}")
-                        return False
-        except Exception as e:
-            print(f"❌ Error posting commands to Top.gg: {e}")
+        commands_data = self.get_commands_payload()
+        if not commands_data:
+            print("⚠️ No commands found to post to Top.gg")
             return False
+        ok, status, text = await self._request("PUT", f"{self.BASE}/commands",
+                                               {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}, commands_data)
+        if ok:
+            print(f"✅ Successfully posted {len(commands_data)} commands to Top.gg")
+        else:
+            print(f"❌ Failed to post commands to Top.gg: {status} {text[:200]}")
+        return ok
 
-    async def _get_bot_commands_for_topgg(self) -> list[Dict]:
-        """Convert bot's commands to Top.gg API format with decorator exclusions"""
-        commands_list = []
-        excluded_count = 0
-        
-        # Get all slash commands and context menus
-        for command in self.bot.tree.get_commands():
+    def get_commands_payload(self) -> list:
+        """The commands as Discord application command objects (what top.gg wants), built by discord.py itself."""
+        tree, found, excluded = self.bot.tree, [], 0
+        every = list(tree.get_commands()) + list(tree.get_commands(type=discord.AppCommandType.user)) + list(tree.get_commands(type=discord.AppCommandType.message))
+        for command in every:
+            if self._is_command_excluded(command):
+                excluded += 1
+                continue
             try:
-                # Check if command is excluded via decorator
-                if self._is_command_excluded(command):
-                    print(f"🚫 Skipping command '{command.name}' (excluded from Top.gg)")
-                    excluded_count += 1
-                    continue
-                    
-                command_data = await self._convert_command_to_topgg_format(command)
-                if command_data:
-                    commands_list.append(command_data)
+                found.append(command.to_dict(tree))
             except Exception as e:
                 print(f"❌ Error converting command {getattr(command, 'name', 'unknown')}: {e}")
-        
-        # Log summary
-        total_commands = len(self.bot.tree.get_commands())
-        print(f"📊 Top.gg command summary: {len(commands_list)} posted, {excluded_count} excluded, {total_commands} total")
-        
-        return commands_list
+        print(f"📊 Top.gg command summary: {len(found)} posted, {excluded} excluded, {len(every)} total")
+        return found
 
     def _is_command_excluded(self, command) -> bool:
         """Check if a command should be excluded from Top.gg"""
         # Check for decorator exclusion on callback
         if hasattr(command, 'callback') and hasattr(command.callback, '_exclude_from_topgg'):
             return True
-        
+
         # For command groups, check the group itself
         if hasattr(command, '_callback') and hasattr(command._callback, '_exclude_from_topgg'):
             return True
-            
+
         # Check if the command object itself has the exclusion flag
         if hasattr(command, '_exclude_from_topgg'):
             return True
-            
+
         return False
-
-    async def _convert_command_to_topgg_format(self, command) -> Optional[Dict]:
-        """Convert a Discord command to Top.gg API format"""
-        try:
-            # Base command structure
-            command_data = {
-                "id": str(command.id) if hasattr(command, 'id') and command.id else "0",
-                "application_id": str(self.bot.application_id),
-                "name": command.name,
-                "version": "1"
-            }
-            
-            # Handle different command types
-            if isinstance(command, discord.app_commands.ContextMenu):
-                # Context menu commands
-                command_data.update({
-                    "type": 2 if command.type == discord.AppCommandType.user else 3,
-                    "description": ""
-                })
-            elif isinstance(command, discord.app_commands.Group):
-                # Command groups
-                command_data.update({
-                    "type": 1,  # CHAT_INPUT
-                    "description": command.description or "Command group",
-                    "options": []
-                })
-                
-                # Add subcommands
-                for subcommand in command.commands:
-                    option_data = {
-                        "type": 1,  # SUB_COMMAND
-                        "name": subcommand.name,
-                        "description": subcommand.description or "Subcommand"
-                    }
-                    
-                    # Add parameters if any
-                    if hasattr(subcommand, 'parameters') and subcommand.parameters:
-                        option_data["options"] = []
-                        for param in subcommand.parameters:
-                            param_data = self._convert_parameter_to_option(param)
-                            if param_data:
-                                option_data["options"].append(param_data)
-                    
-                    command_data["options"].append(option_data)
-            else:
-                # Regular slash commands
-                command_data.update({
-                    "type": 1,  # CHAT_INPUT
-                    "description": command.description or "No description"
-                })
-                
-                # Add parameters/options
-                if hasattr(command, 'parameters') and command.parameters:
-                    command_data["options"] = []
-                    for param in command.parameters:
-                        param_data = self._convert_parameter_to_option(param)
-                        if param_data:
-                            command_data["options"].append(param_data)
-            
-            # Add permissions if specified
-            if hasattr(command, 'default_permissions') and command.default_permissions:
-                command_data["default_member_permissions"] = str(command.default_permissions.value)
-            
-            return command_data
-            
-        except Exception as e:
-            print(f"❌ Error converting command {command.name} to Top.gg format: {e}")
-            return None
-
-    def _convert_parameter_to_option(self, param) -> Optional[Dict]:
-        """Convert a command parameter to Discord option format"""
-        try:
-            option_data = {
-                "name": param.name,
-                "description": getattr(param, 'description', 'Parameter'),
-                "required": param.required if hasattr(param, 'required') else param.default == param.empty
-            }
-            
-            # Get the actual type, handling Union types and Optional
-            param_type = param.type
-            if hasattr(param_type, '__origin__') and param_type.__origin__ is Union:
-                param_type = next((arg for arg in param_type.__args__ if arg != type(None)), str)
-            
-            # Map Python types to Discord option types
-            if param_type == str or param_type is str:
-                option_data["type"] = 3  # STRING
-            elif param_type == int or param_type is int:
-                option_data["type"] = 4  # INTEGER
-            elif param_type == bool or param_type is bool:
-                option_data["type"] = 5  # BOOLEAN
-            elif param_type == float or param_type is float:
-                option_data["type"] = 10  # NUMBER
-            elif hasattr(param_type, '__name__'):
-                type_name = param_type.__name__.lower()
-                if 'user' in type_name or 'member' in type_name:
-                    option_data["type"] = 6  # USER
-                elif 'channel' in type_name:
-                    option_data["type"] = 7  # CHANNEL
-                elif 'role' in type_name:
-                    option_data["type"] = 8  # ROLE
-                elif 'attachment' in type_name:
-                    option_data["type"] = 11  # ATTACHMENT
-                else:
-                    option_data["type"] = 3  # Default to STRING
-            else:
-                option_data["type"] = 3  # Default to STRING
-            
-            return option_data
-            
-        except Exception as e:
-            print(f"❌ Error converting parameter {getattr(param, 'name', 'unknown')}: {e}")
-            return None
 
     async def start_periodic_updates(self):
         """Start periodic updates for server count and commands"""
-        # Start updates
-        asyncio.create_task(self._periodic_commands())
-        asyncio.create_task(self._periodic_server_count())
+        self._tasks = [asyncio.create_task(self._periodic_commands()), asyncio.create_task(self._periodic_server_count())]
 
     async def _periodic_server_count(self):
         """Periodically update server count"""
         while True:
+            await asyncio.sleep(900)  # 15 minutes
             try:
                 await self.post_server_count()
-                await asyncio.sleep(900)  # 15 minutes
             except Exception as e:
                 print(f"❌ Error in periodic server count update: {e}")
-                await asyncio.sleep(900)  # Wait 15 minutes before retrying
 
     async def _periodic_commands(self):
         """Periodically update commands"""
         while True:
+            await asyncio.sleep(86400)  # 24 hours
             try:
                 await self.post_commands_to_topgg()
-                await asyncio.sleep(86400)  # 24 hours
             except Exception as e:
                 print(f"❌ Error in periodic command update: {e}")
-                await asyncio.sleep(3600)  # Wait 1 hour before retrying
 
 class CommandSyncer:
     """Handles command synchronization with Discord"""
@@ -920,10 +1341,6 @@ async def update_db():
     while True:
         await asyncio.sleep(0.5)
         if not bot.is_closed():
-            countingDB.save()
-            embedDB.save()
-            usersDB.save()
-            autoroleDB.save()
             #print(f"EmbedDB = {embedDB.all()}")
             #print(f"CountingDB = {countingDB.all()}")
             #print(f"UsersDB = {usersDB.all()}")
@@ -931,18 +1348,8 @@ async def update_db():
             for guild in bot.guilds:
                 if not countingDB.get(f"{guild.id}"):
                     countingDB.set(f"{guild.id}", {"channel":None,"number":0,"enabled":False,"warnings":0,"lastcounter":None,"highestnumber":0, "banned":False})
-                    countingDB.save()
         if bot.is_closed():
-            countingDB.save()
-            embedDB.save()
-            usersDB.save()
-            autoroleDB.save()
-            AI_DB.save()
-            print(f"Saved EmbedDB {embedDB.all()}")
-            print(f"Saved CountingDB {countingDB.all()}")
-            print(f"Saved UsersDB {usersDB.all()}")
-            print(f"Saved AutoRoleDB {autoroleDB.all()}")
-            print(f"Saved AI_DB {AI_DB.all()}")
+            flush_all()
             print("Bot Closed, Shutting Down Flask Server.")
             os._exit(0)
 
@@ -967,6 +1374,24 @@ async def update_guild_cache():
 
         await asyncio.sleep(30)
 
+COUNTING_DEFAULT_WARNINGS = 3
+COUNTING_MAX_WARNINGS = 50
+
+
+def counting_limit(data):
+    """How many warnings a server gets before the count is ruined (bot owners can change it per server)."""
+    try:
+        return max(0, min(COUNTING_MAX_WARNINGS, int(data.get("max_warnings", COUNTING_DEFAULT_WARNINGS))))
+    except (TypeError, ValueError):
+        return COUNTING_DEFAULT_WARNINGS
+
+
+def is_bot_owner(user):
+    """The people the restart/shutdown commands already trust, plus any ids in OWNER_IDS (comma separated)."""
+    ids = {x.strip() for x in os.environ.get("OWNER_IDS", "").split(",") if x.strip()}
+    return str(user.id) in ids or user.name in ("lcjunior1220", "sl.ip", "kiwixor")
+
+
 def IsInteger(s):
     try:
         int(s)
@@ -990,6 +1415,7 @@ async def on_message(message):
         number = counting_data['number']
         channel = counting_data['channel']
         warnings = counting_data['warnings']
+        warning_limit = counting_limit(counting_data)
         LastCounter = counting_data['lastcounter']
         HighestNumber = counting_data['highestnumber']
         next_number = number + 1
@@ -1059,7 +1485,7 @@ async def on_message(message):
             if channel != message.channel.id:
                 return
             
-            if message.author.id == LastCounter and warnings != 3:
+            if message.author.id == LastCounter and warnings < warning_limit:
                 await message.add_reaction('⚠️')
                 await message.reply(f":warning: You can't count by yourself!")
                 warnings = warnings + 1
@@ -1067,7 +1493,7 @@ async def on_message(message):
                 countingDB.set(server.id, counting_data)
                 countingDB.save()
                 return
-            if warnings < 3:
+            if warnings < warning_limit:
                 await message.add_reaction('⚠️')
                 if number == 0:
                     await message.reply(f":warning: The next number is 1")
@@ -1077,7 +1503,7 @@ async def on_message(message):
                 countingDB.set(server.id, counting_data)
                 countingDB.save()
                 return
-            if warnings >= 3:
+            if warnings >= warning_limit:
                 await message.add_reaction('❌')
                 if number > HighestNumber:
                     HighestNumber = number
@@ -1169,21 +1595,22 @@ async def on_ready():
         print(f"❌ Top.gg integration failed: {e}")
     
     try:
-        await TOP_GG.post_commands_to_topgg()
-        print("✅ Initial Top.gg commands posted")
+        if await TOP_GG.post_commands_to_topgg():
+            print("✅ Initial Top.gg commands posted")
     except Exception as e:
         print(f"❌ Failed to post initial Top.gg commands: {e}")
 
     try:
-        await TOP_GG.post_server_count()
-        print("✅ Server count updated successfully")
+        if await TOP_GG.post_server_count():
+            print("✅ Server count updated successfully")
     except Exception as e:
         print(f"❌ Failed to update server count: {e}")
 
 @app.route('/topgg/commands', methods=['GET'])
-def topgg_webhook():
-    top_gg_test = TopGGIntegration(bot)
-    return jsonify(top_gg_test._get_bot_commands_for_topgg())
+def topgg_commands():
+    if not bot.is_ready():
+        return jsonify({"success": False, "data": "The bot isn't ready yet."}), 503
+    return jsonify(TopGGIntegration(bot).get_commands_payload())
 
 @bot.event
 async def on_member_join(member):
@@ -1546,7 +1973,7 @@ async def google(interaction: discord.Interaction, message: discord.Message):
                 description=f"Please search on google yourself as there wasn't enough results to generate an embed | [Search on Google Yourself For More Results](https://google.com/search?q={properquery})",
                 color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
                 )
-                noresultembed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
+                notenoughresultsembed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
 
                 await interaction.edit_original_response(embed=notenoughresultsembed)
                 return
@@ -1703,11 +2130,7 @@ async def stop(interaction: discord.Interaction):
     if interaction.user.name == "lcjunior1220" or interaction.user.name == "sl.ip" or interaction.user.name == "kiwixor":
         await interaction.response.send_message(":white_check_mark: Shutdown Successfully!", ephemeral=False)
         
-        countingDB.save()
-        embedDB.save()
-        usersDB.save()
-        autoroleDB.save()
-        AI_DB.save()
+        flush_all()
         
         print("Bot shutdown initiated by command")
         
@@ -1738,8 +2161,16 @@ async def restart(interaction: discord.Interaction):
 @commands.bot_has_permissions(add_reactions=True, moderate_members=True, read_message_history=True, view_channel=True, send_messages=True)
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def counting(interaction: discord.Interaction):
+async def counting(interaction: discord.Interaction, warnings: typing.Optional[app_commands.Range[int, 0, 50]] = None):
     server = interaction.guild
+    if warnings is not None:      # bot owners only: how many warnings before the count is ruined (0 = ruined on the first mistake)
+        if not is_bot_owner(interaction.user):
+            return await interaction.response.send_message("Only the bot owners can change the warnings amount.", ephemeral=True)
+        data = countingDB.get(server.id) or {"channel": None, "number": 0, "enabled": False, "warnings": 0, "lastcounter": None, "highestnumber": 0}
+        data["max_warnings"] = int(warnings)
+        countingDB.set(server.id, data)
+        countingDB.save()
+        return await interaction.response.send_message(f"Counting here now allows **{warnings}** warning{'s' if warnings != 1 else ''} before the count is ruined.", ephemeral=True)
     print(server.id)
     counting_json = countingDB.get(server.id)
     countingData = counting_json
@@ -1790,7 +2221,7 @@ async def counting(interaction: discord.Interaction):
             await interaction.response.send_message(f"Counting channel set to <#{selected_channel_id}>.", ephemeral=True)
     embed = discord.Embed(
         title="Counting Settings",
-        description=f"**Current Settings:**\n- Counting Enabled: `{countingData['enabled']}`\n- Counting Channel: `<#{countingData['channel']}>`\n- Current Number: `{countingData['number']}`\n- Highest Number: `{countingData.get('highestnumber', 0)}`\n- Warnings: `{countingData['warnings']}`\n- Last Counter: `{countingData['lastcounter']}`",
+        description=f"**Current Settings:**\n- Counting Enabled: `{countingData['enabled']}`\n- Counting Channel: `<#{countingData['channel']}>`\n- Current Number: `{countingData['number']}`\n- Highest Number: `{countingData.get('highestnumber', 0)}`\n- Warnings: `{countingData['warnings']}/{counting_limit(countingData)}`\n- Last Counter: `{countingData['lastcounter']}`",
         color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
     )
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
@@ -1853,9 +2284,7 @@ async def ping(interaction: discord.Interaction):
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
     await interaction.edit_original_response(embed=embed, content=None)
 
-@bot.tree.command(name="roblox2discord", description="Get a roblox user's Discord from their username.")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="todiscord", description="Get a roblox user's Discord from their username.")
 async def roblox2discord(interaction: discord.Interaction, user: str):
     await interaction.response.defer()
     
@@ -1942,9 +2371,7 @@ async def roblox2discord(interaction: discord.Interaction, user: str):
         # await interaction.edit_original_response(f"Error retrieving Discord User from {url}")
         return
 
-@bot.tree.command(name="discord2roblox", description="Get a roblox profile from their Discord UserID.")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="fromdiscord", description="Get a roblox profile from their Discord UserID.")
 async def discord2roblox(interaction: discord.Interaction, user: discord.User):
     userid = user.id
     await interaction.response.defer(thinking=True)
@@ -2147,9 +2574,7 @@ async def invite(interaction: discord.Interaction):
     await interaction.response.send_message(embed=invite_embed, ephemeral=False)
     #await interaction.response.send_message(f"Invite me to your server or add me to your apps using this link: {invite_url}", ephemeral=False)
     
-@bot.tree.command(name="robloxinfo", description="Get a Roblox user's profile information.")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="info", description="Get a Roblox user's profile information.")
 async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
     await interaction.response.defer(thinking=True)
     
@@ -2208,11 +2633,9 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
 
     async def check_presence(session: aiohttp.ClientSession, user_id: str) -> tuple:
         try:
-            try:
-                with open('roblosecuritytoken.txt', 'r') as f:
-                    roblosecurity_token = f.read().strip()
-            except FileNotFoundError:
-                print("ROBLOSECURITY token file not found")
+            roblosecurity_token = ROBLOSECURITY
+            if not roblosecurity_token:
+                print("ROBLOSECURITY is not set in .env")
                 return (0, None)
             
             presence_url = 'https://presence.roblox.com/v1/presence/users'
@@ -2383,8 +2806,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
 
     async def get_profile_api_data(session: aiohttp.ClientSession, user_id: str) -> dict:
         try:
-            with open('roblosecuritytoken.txt', 'r') as f:
-                roblosecurity_token = f.read().strip()
+            roblosecurity_token = ROBLOSECURITY
             
             url = "https://apis.roblox.com/profile-platform-api/v1/profiles/get"
             payload = {
@@ -2469,22 +2891,6 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
             'join_date': '',
             'last_online': None
         }
-
-    def load_cached_timestamps():
-        try:
-            with open('lastonline.json', 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-
-    def update_cached_timestamp(user_id, timestamp):
-        try:
-            cached_timestamps = load_cached_timestamps()
-            cached_timestamps[str(user_id)] = timestamp
-            with open('lastonline.json', 'w') as f:
-                json.dump(cached_timestamps, f, indent=2)
-        except Exception as e:
-            print(f"Error updating cached timestamp: {e}")
 
     try:
         response = requests.post(url, json=request_payload)
@@ -2809,9 +3215,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
         await interaction.edit_original_response(embed=failedembed8)
         return
         
-@bot.tree.command(name="britishuser", description="Check if a user has their language set to British")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="british", description="Check if a user has their language set to British")
 async def british_check(interaction: discord.Interaction, user_input: str):
     await interaction.response.defer(thinking=True)
     
@@ -2890,9 +3294,7 @@ async def british_check(interaction: discord.Interaction, user_input: str):
         embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
         await interaction.edit_original_response(embed=embed)
 
-@bot.tree.command(name="iteminfo", description="Get detailed information about a Roblox item")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="item", description="Get detailed information about a Roblox item")
 async def item(interaction: discord.Interaction, item_query: str = "Dominus Empyreus"):
     await interaction.response.defer(thinking=True)
     
@@ -3043,7 +3445,7 @@ async def item(interaction: discord.Interaction, item_query: str = "Dominus Empy
 
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@bot.tree.command(name="placeinfo", description="Get detailed information about a Roblox place")
+@roblox_group.command(name="place", description="Get detailed information about a Roblox place")
 @app_commands.describe(game_input="Roblox place ID or game URL")
 async def placeinfo(interaction: discord.Interaction, game_input: str):
     await interaction.response.defer(thinking=True)
@@ -3312,7 +3714,7 @@ async def create_badge_embed(badge_data: dict, thumbnail_url: Optional[str], bad
 
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@bot.tree.command(name="badge", description="Get detailed information about a Roblox badge")
+@roblox_group.command(name="badge", description="Get detailed information about a Roblox badge")
 @app_commands.describe(badge_id="The ID of the Roblox badge")
 async def badge_info(interaction: discord.Interaction, badge_id: str):
     await interaction.response.defer(thinking=True)
@@ -3438,13 +3840,22 @@ class HelpDropdown(discord.ui.Select):
         elif category == "Roblox Commands":
             embed = discord.Embed(title="Roblox Commands", color=embed_color)
             embed.add_field(name="Commands", value=
-                "• /robloxinfo - Get detailed Roblox user information\n"
-                "• /roblox2discord - Find a Roblox user's Discord\n"
-                "• /britishuser - Check if user is british\n"
-                "• /iteminfo - Get Roblox item information\n"
-                "• /groupinfo - Get Roblox group information\n"
-                "• /placeinfo - Get Roblox place/game information\n"
-                "• /badge - Get Roblox badge information", inline=False)
+                "• /roblox info - Get detailed Roblox user information\n"
+                "• /roblox todiscord - Find a Roblox user's Discord\n"
+                "• /roblox fromdiscord - Find a Discord user's Roblox\n"
+                "• /roblox british - Check if user is british\n"
+                "• /roblox item, /roblox bundle, /roblox asset - Item information\n"
+                "• /roblox group - Roblox group information\n"
+                "• /roblox place - Roblox place/game information\n"
+                "• /roblox badge, /roblox badges, /roblox recentbadges - Badges\n"
+                "• /roblox avatar, /roblox outfits, /roblox limiteds - Avatars and inventory", inline=False)
+            embed.add_field(name="Verification", value=
+                "• /roblox verify - Verify in a server (no Yapin' account needed)\n"
+                "• /roblox link - Link a Roblox account (up to 100)\n"
+                "• /roblox accounts, /roblox auto, /roblox remove, /roblox hide, /roblox show - Manage your accounts\n"
+                "• /roblox panel ..., /roblox sync - Server setup (admins)\n"
+                "• /vortex game, /vortex user, /vortex cookie - PlayVortex lookups\n"
+                "• /lastfm link, /lastfm unlink, /lastfm user - Last.fm", inline=False)
                 
         elif category == "Utility Commands":
             embed = discord.Embed(title="Utility Commands", color=embed_color)
@@ -3455,6 +3866,7 @@ class HelpDropdown(discord.ui.Select):
                 "• /status - Check shapes.lol status\n"
                 "• /userinstalls - Get user installation count\n"
                 "• /servercount - Get server count\n"
+                "• /server info - Information about this server\n"
                 "• /spookpfp - Get profile picture from spook.bio", inline=False)
                 
         elif category == "Context Menu Commands":
@@ -3504,9 +3916,7 @@ async def countingleaderboard(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
             
-@bot.tree.command(name="outfits", description="Get all outfits for a Roblox user")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="outfits", description="Get all outfits for a Roblox user")
 async def outfits(interaction: discord.Interaction, user: str = "Roblox"):
     await interaction.response.defer(thinking=True)
     
@@ -3745,9 +4155,7 @@ async def outfits(interaction: discord.Interaction, user: str = "Roblox"):
         await interaction.edit_original_response(embed=failedembed)
         return
         
-@bot.tree.command(name="badges", description="Check if a user has a specific badge and get detailed information")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="badges", description="Check if a user has a specific badge and get detailed information")
 @app_commands.describe(
     username="Roblox username to check",
     badge_id="The badge ID to look for (optional)"
@@ -4375,8 +4783,9 @@ async def discorduser(interaction: discord.Interaction, user: discord.User = Non
                                 """
                                 
                                 server_stats = f"""
-                                > **Members:** {server['member_count']}
-                                > **Bots:** {server['bot_count']}
+                                > **Members:** {server['member_count'] + server['bot_count']:,} total
+                                > **People:** {server['member_count']:,}
+                                > **Bots:** {server['bot_count']:,}
                                 > **Channels:** {server['channel_count']}
                                 > **Roles:** {server['roles']}
                                 """
@@ -4489,9 +4898,7 @@ async def discorduser(interaction: discord.Interaction, user: discord.User = Non
     view = MutualServersView(user.id, user.name, interaction.user.id, embed)
     await interaction.followup.send(content="", embed=embed, view=view)
     
-@bot.tree.command(name="limiteds", description="Scan a roblox users inventory for limiteds")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="limiteds", description="Scan a roblox users inventory for limiteds")
 async def limiteds(interaction: discord.Interaction, username: str):
     await interaction.response.defer()
     
@@ -4748,9 +5155,7 @@ async def limiteds(interaction: discord.Interaction, username: str):
         errorembed.set_footer(text=f"Requested by {interaction.user.name} | {MainURL}")
         await interaction.edit_original_response(embed=errorembed)
         
-@bot.tree.command(name="bundle", description="Get information about a Roblox bundle")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="bundle", description="Get information about a Roblox bundle")
 @app_commands.describe(bundleid="The ID of the bundle")
 async def bundle(interaction: discord.Interaction, bundleid: str):
     await interaction.response.defer(thinking=True)
@@ -4976,9 +5381,7 @@ async def github(interaction: discord.Interaction, username: str):
         errorembed.set_footer(text=f"Requested by {interaction.user.name} | {MainURL}")
         await interaction.edit_original_response(embed=errorembed)
         
-@bot.tree.command(name="asset", description="Get information about a Roblox asset")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="asset", description="Get information about a Roblox asset")
 async def asset(interaction: discord.Interaction, id: str):
     await interaction.response.defer()
     
@@ -5254,8 +5657,7 @@ roblox_colors = {
 
 async def get_csrf_token(session):
     try:
-        with open('roblosecuritytoken.txt', 'r') as f:
-            roblosecurity_token = f.read().strip()
+        roblosecurity_token = ROBLOSECURITY
             
         async with session.post("https://auth.roblox.com/v2/logout", 
                               headers={'Cookie': f'.ROBLOSECURITY={roblosecurity_token}'}) as response:
@@ -5266,8 +5668,7 @@ async def get_csrf_token(session):
 
 async def render_custom_avatar(session, user_id):
     try:
-        with open('roblosecuritytoken.txt', 'r') as f:
-            roblosecurity_token = f.read().strip()
+        roblosecurity_token = ROBLOSECURITY
         
         headers = {'Cookie': f'.ROBLOSECURITY={roblosecurity_token}'}
         
@@ -5328,7 +5729,7 @@ async def render_custom_avatar(session, user_id):
 
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@bot.tree.command(name="avatar", description="Get a Roblox user's avatar")
+@roblox_group.command(name="avatar", description="Get a Roblox user's avatar")
 @app_commands.describe(user="Roblox username or user ID")
 async def avatar_command(interaction: discord.Interaction, user: str):
     await interaction.response.defer()
@@ -5663,9 +6064,7 @@ class BadgesView(discord.ui.View):
         except Exception:
             pass
 
-@bot.tree.command(name="recentbadges", description="Get a user's most recently earned Roblox badges")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@roblox_group.command(name="recentbadges", description="Get a user's most recently earned Roblox badges")
 async def recent_badges(interaction: discord.Interaction, user: str):
     await interaction.response.defer()
     
@@ -5880,8 +6279,1526 @@ def create_instagram_embed(username, profile_info, requester_name):
     
     return embed
         
+# =============================================================================================================
+# Roblox verification (/roblox ...), command logs (/cmdlog, /botlog), Vortex (/vortex ...), /server info.
+# OAuth2 through the Shapes API, never bio text. Same system as the Yapin' bot on the same API data: people link Roblox
+# accounts once (up to 100, no Yapin' account needed) and every server that uses verification sees them. A server admin
+# points the bot at a Roblox group with /roblox panel and the bot mirrors it: one Discord role per group role (created,
+# renamed and deleted as the group changes, when mirroring is on), a verified role and nicknames. Members verify with
+# /roblox verify or the Verify button of a panel. They are synced when they verify, on join, on /roblox sync and by a
+# backup sync every 24 hours (elapsed UTC seconds, so daylight saving can't move it). Roblox is only asked during a sync.
+# Command logs post through a webhook (shared by the logs in one channel), falling back to the bot posting directly.
+# =============================================================================================================
+PLATFORM = "discord"
+SYNC_EVERY = 24 * 60 * 60           # seconds of real elapsed time
+CHECK_EVERY = 300                   # how often the scheduler looks at the clock
+YAPIN_DASH = os.environ.get("YAPIN_DASH_URL", "https://shapes-yapper.oriaxen.com/dashboard/roblox")
+_locks = {}
+_prompted = {}
+_clicked = {}
+_tasks = set()
+BOTLOG_KEY = "botlog"
+RETRY_WEBHOOK_AFTER = 3600           # after Discord refuses a webhook in a channel, try again this often
+HOOK_NAME = "Shapes logs"
+
+
+class Issues:
+    """What went wrong during one sync, grouped so the person gets one clear explanation instead of 500 identical errors."""
+
+    def __init__(self, role_names=None):
+        self.role_names = role_names or {}
+        self.kinds = {}               # kind -> {"n": count, "names": set, "sample": text}
+        self.blocked = set()          # role ids that were refused: stop trying them for everyone else
+        self.nick_ok = self.nick_denied = 0
+
+    @staticmethod
+    def denied(e):
+        return isinstance(e, discord.Forbidden) or getattr(e, "status", None) in (401, 403)
+
+    def add(self, kind, e, name=None):
+        """kind: create-role | edit-role | delete-role | give-role | take-role | nickname. Returns True when it was a refusal."""
+        refused = self.denied(e)
+        key = kind if refused else "other"
+        d = self.kinds.setdefault(key, {"n": 0, "names": set(), "sample": ""})
+        d["n"] += 1
+        if name:
+            d["names"].add(str(name))
+        d["sample"] = d["sample"] or f"{kind}: {e}" + (f" (HTTP {e.status})" if getattr(e, "status", None) else "")
+        return refused
+
+    def name(self, rid):
+        return self.role_names.get(str(rid), str(rid))
+
+    def lines(self):
+        """Plain-language explanations, most important first."""
+        out = []
+
+        def names(k):
+            n = sorted(self.kinds[k]["names"])
+            return (" (" + ", ".join(n[:8]) + (", …" if len(n) > 8 else "") + ")") if n else ""
+        manage = [k for k in ("create-role", "edit-role", "delete-role") if k in self.kinds]
+        if manage:
+            what = {"create-role": "create", "edit-role": "rename", "delete-role": "delete"}
+            out.append("I'm not allowed to " + "/".join(what[k] for k in manage) + f" roles{names(manage[0])}. Give my role the **Manage Roles** permission "
+                       "(Server Settings → Roles → my role → Permissions), then run `/roblox sync` again. Without it I can only use roles that already exist.")
+        given = [k for k in ("give-role", "take-role") if k in self.kinds]
+        if given:
+            n = sum(self.kinds[k]["n"] for k in given)
+            nm = sorted(set().union(*(self.kinds[k]["names"] for k in given)))
+            out.append(f"I couldn't change {n} role assignment{'s' if n != 1 else ''}" + (f" for **{', '.join(nm[:8])}**" if nm else "") +
+                       ". A bot can only hand out roles that sit **below its own highest role**: drag my role above "
+                       + ("those roles" if nm else "them") + " in Server Settings → Roles, and make sure it has **Manage Roles**.")
+        if "nickname" in self.kinds:
+            n = self.kinds["nickname"]["n"]
+            out.append(f"I couldn't change {n} nickname{'s' if n != 1 else ''}. I need the **Manage Nicknames** permission and my role must be above "
+                       "the member's highest role. Discord never lets a bot rename the server owner.")
+        if "other" in self.kinds:
+            d = self.kinds["other"]
+            out.append(f"{d['n']} other error{'s' if d['n'] != 1 else ''} from Discord, for example: `{d['sample'][:200]}`")
+        return out
+
+
+
+def roblox_init(m):
+    """m is the bot's main module (bot, embedDB, APIBaseURL, app...)."""
+    bot = m.bot
+    stateDB = m.rverifyDB                          # guild id -> {"roles": {roblox role id: discord role id}, "made": [...], "last": {...}}
+
+    token = APIBaseURL_Key
+    headers = {"Authorization": f"Bearer {token}"}
+    http = requests.Session()
+
+    def api_sync(method, path, body=None):
+        """The Shapes API's JSON, or None when it can't be reached. Blocking: call through api()."""
+        if not token:
+            return None
+        try:
+            r = http.request(method, f"{m.APIBaseURL}{path}", json=body, headers=headers, timeout=30)
+            data = r.json()
+            return data if isinstance(data, dict) else None
+        except (requests.RequestException, ValueError):
+            return None
+
+    async def api(method, path, body=None):
+        return await asyncio.to_thread(api_sync, method, path, body)
+
+    def color_of(user_id):
+        saved = m.embedDB.get(f"{user_id}")
+        return saved if saved else discord.Color.blue()
+
+    # ------------------------------------------------------------------ helpers
+    async def cfg_of(gid):
+        d = await api("GET", f"/internal/guild/{PLATFORM}/{gid}/config")
+        c = (d or {}).get("config") or {}
+        return c if c.get("group_id") else None
+
+    def template(cfg, acct, role_name):
+        t = (cfg.get("nickname_template") or "").strip()
+        if not t:
+            return None
+        out = (t.replace("{name}", acct.get("name") or "").replace("{display}", acct.get("display_name") or acct.get("name") or "")
+                .replace("{id}", str(acct.get("id"))).replace("{rank}", role_name or ""))
+        return out.strip(" |-–—·/:")[:32] if not role_name else out.strip()[:32]
+
+    async def group_role(cfg, rid):
+        d = await api("GET", f"/internal/roblox/group/{cfg['group_id']}/member/{rid}")
+        return (d or {}).get("role") if d and d.get("success") else False       # False = Roblox didn't answer
+
+    async def mirror_roles(guild, cfg, report=None, issues=None):
+        """Make the Discord roles match the group's roles when mirroring is on: create missing ones, rename changed ones, delete
+        ones the group dropped (only roles this bot made, never one that was already there). Returns {roblox role id: discord
+        role id}; `report` (a dict) gets counts of what changed."""
+        gid = str(guild.id)
+        report = report if report is not None else {}
+        issues = issues if issues is not None else Issues()
+        for k in ("created", "renamed", "deleted"):
+            report.setdefault(k, 0)
+        st = dict(stateDB.get(gid) or {})
+        mapping = dict(st.get("roles") or {})
+        made = set(st.get("made") or [])
+        d = await api("GET", f"/internal/roblox/group/{cfg['group_id']}/roles")
+        if not d or not d.get("success"):
+            return mapping
+        group = {str(r["id"]): r for r in d["roles"] if int(r.get("rank") or 0) > 0}      # rank 0 is "Guest" = not in the group
+        have = {str(r.id): r for r in guild.roles}
+        by_name = {r.name.lower(): str(r.id) for r in guild.roles if not r.is_default() and not r.managed}
+        mirror = bool(cfg.get("mirror_roles"))
+        for rid, r in group.items():
+            current = mapping.get(rid)
+            if current and current in have:
+                if mirror and have[current].name != r["name"]:       # renamed in the group
+                    try:
+                        await have[current].edit(name=r["name"], reason="Roblox group role renamed")
+                        report["renamed"] += 1
+                    except discord.HTTPException as e:
+                        issues.add("edit-role", e, have[current].name)
+                        if Issues.denied(e):
+                            mirror = False                           # no point asking again for every other role
+                continue
+            if r["name"].lower() in by_name:                         # a role with that name already exists: use it
+                mapping[rid] = by_name[r["name"].lower()]
+            elif mirror:
+                try:
+                    new = await guild.create_role(name=r["name"], reason="Mirroring the Roblox group's roles")
+                    mapping[rid] = str(new.id)
+                    made.add(str(new.id))
+                    have[str(new.id)] = new
+                    report["created"] += 1
+                except discord.HTTPException as e:
+                    issues.add("create-role", e, r["name"])
+                    if Issues.denied(e):
+                        mirror = False                               # missing Manage Roles: stop here, the rest would fail the same way
+        for rid in [k for k in mapping if k not in group]:           # the group dropped this role
+            yid = mapping[rid]
+            if mirror and yid in made and yid in have:
+                try:
+                    await have[yid].delete(reason="The Roblox group no longer has this role")
+                    report["deleted"] += 1
+                except discord.HTTPException as e:
+                    issues.add("delete-role", e, issues.name(yid))
+                    continue                                         # keep it in the map so the next sync tries again
+            made.discard(yid)
+            mapping.pop(rid, None)
+        st["roles"], st["made"], st["at"] = mapping, sorted(made & {str(x) for x in mapping.values()}), time.time()
+        stateDB.set(gid, st)
+        stateDB.save()
+        return mapping
+
+    async def mapping_for(guild, cfg):
+        """The saved role map; a fresh mirror only when it is older than ten minutes (so a busy panel doesn't hammer Roblox)."""
+        st = stateDB.get(str(guild.id)) or {}
+        if st.get("roles") and time.time() - float(st.get("at") or 0) < 600:
+            return dict(st["roles"])
+        return await mirror_roles(guild, cfg)
+
+    async def ensure_verified_role(guild, cfg, issues=None):
+        if cfg.get("verified_role_id") == "create":
+            try:
+                role = await guild.create_role(name="Verified", reason="Roblox verification")
+                await api("PUT", f"/internal/guild/{PLATFORM}/{guild.id}/config", {"verified_role_id": str(role.id)})
+                cfg["verified_role_id"] = str(role.id)
+            except discord.HTTPException as e:
+                if issues is not None:
+                    issues.add("create-role", e, "Verified")
+                cfg["verified_role_id"] = ""
+        return cfg.get("verified_role_id") or None
+
+    async def sync_member(guild, member, acct, cfg, mapping, issues):
+        """Bring one member in line: roles from their group rank, the verified role, the nickname. acct=None unverifies."""
+        mine = {str(r.id) for r in member.roles}
+        want, drop = set(), set(mapping.values())
+        vr, ur = cfg.get("verified_role_id") or None, cfg.get("unverified_role_id") or None
+        role_name = None
+        if acct:
+            if vr and vr != "create":
+                want.add(vr)
+            role = await group_role(cfg, acct["id"])
+            if role is False:
+                return "roblox-unreachable"
+            if role and str(role.get("id")) in mapping and int(role.get("rank") or 0) > 0:
+                want.add(mapping[str(role["id"])])
+                role_name = role.get("name")
+        elif ur:
+            want.add(ur)
+        drop |= {x for x in (vr, ur) if x and x != "create"}
+        roles = {str(r.id): r for r in guild.roles}
+        for rid in (want - mine) - issues.blocked:
+            if rid not in roles:
+                continue
+            try:
+                await member.add_roles(roles[rid], reason="Roblox verification")
+            except discord.HTTPException as e:
+                if issues.add("give-role", e, issues.name(rid)):
+                    issues.blocked.add(rid)                          # refused once for this role: skip it for everyone else
+        for rid in ((drop - want) & mine) - issues.blocked:
+            if rid not in roles:
+                continue
+            try:
+                await member.remove_roles(roles[rid], reason="Roblox verification")
+            except discord.HTTPException as e:
+                if issues.add("take-role", e, issues.name(rid)):
+                    issues.blocked.add(rid)
+        if acct:
+            nick = template(cfg, acct, role_name)
+            if nick and member.nick != nick and member.id != member.guild.owner_id and not (issues.nick_denied >= 5 and not issues.nick_ok):
+                try:
+                    await member.edit(nick=nick, reason="Roblox verification")
+                    issues.nick_ok += 1
+                except discord.HTTPException as e:
+                    if issues.add("nickname", e):
+                        issues.nick_denied += 1
+        return "ok"
+
+    async def dm_verified(user_id, acct, how, guild_name=None):
+        """The message every verification gets: avatar, username, user ID and a profile link."""
+        embed = discord.Embed(title=f"✅ {'Auto-verified' if how == 'auto' else 'Verified'} as {acct['name']}", color=discord.Color.green(),
+                              description=f"[{acct['name']}]({acct['profile']})\nUser ID: `{acct['id']}`" + (f"\nServer: **{guild_name}**" if guild_name else ""))
+        if acct.get("avatar"):
+            embed.set_thumbnail(url=acct["avatar"])
+        embed.set_footer(text="Manage your accounts with /roblox accounts")
+        try:
+            user = bot.get_user(int(user_id)) or await bot.fetch_user(int(user_id))
+            await user.send(embed=embed)
+        except (discord.HTTPException, ValueError) as e:
+            print(f"[verify] couldn't DM {user_id}: {e}")
+
+    async def remember(gid, counts, issues):
+        """Keep the last sync's result and problems so the Yapin' dashboard (or /roblox panel status) can show them."""
+        st = dict(stateDB.get(gid) or {})
+        st["last"] = {"at": int(time.time()), "counts": counts, "problems": issues.lines()}
+        stateDB.set(gid, st)
+        stateDB.save()
+
+    async def apply_one(guild, member, quiet=False):
+        """Verify/auto-verify one member of a configured server, then sync them. Returns the account or None."""
+        gid = str(guild.id)
+        cfg = await cfg_of(gid)
+        if not cfg:
+            return None
+        res = ((await api("POST", f"/internal/guild/{PLATFORM}/{gid}/resolve", {"user_ids": [str(member.id)]})) or {}).get("members", {}).get(str(member.id))
+        if not res:
+            return None
+        issues = Issues({str(r.id): r.name for r in guild.roles})
+        await ensure_verified_role(guild, cfg, issues)
+        await sync_member(guild, member, res, cfg, await mapping_for(guild, cfg), issues)
+        if issues.kinds:
+            print(f"[verify] {member.id} in {gid}: " + " | ".join(issues.lines()))
+            await remember(gid, {"single": True}, issues)
+        if not quiet:
+            await dm_verified(member.id, res, res.get("how"), guild.name)
+        return res
+
+    # ------------------------------------------------------------------ full sync
+    async def sync_guild(guild):
+        """Sync every member of a server. One at a time per server. Returns counts."""
+        gid = str(guild.id)
+        lock = _locks.setdefault(gid, asyncio.Lock())
+        if lock.locked():
+            return {"busy": True}
+        async with lock:
+            counts = {"synced": 0, "unverified": 0, "skipped": 0, "errors": 0, "created": 0, "renamed": 0, "deleted": 0}
+            cfg = await cfg_of(gid)
+            if not cfg:
+                return {"error": "no group set"}
+            issues = Issues({str(r.id): r.name for r in guild.roles})
+            await ensure_verified_role(guild, cfg, issues)
+            mapping = await mirror_roles(guild, cfg, counts, issues)
+            members = [mem async for mem in guild.fetch_members(limit=None) if not mem.bot]
+            found = {}
+            ids = [str(mem.id) for mem in members]
+            for i in range(0, len(ids), 500):
+                found.update(((await api("POST", f"/internal/guild/{PLATFORM}/{gid}/resolve", {"user_ids": ids[i:i + 500]})) or {}).get("members", {}))
+            for mem in members:
+                try:
+                    r = await sync_member(guild, mem, found.get(str(mem.id)), cfg, mapping, issues)
+                    counts["synced" if found.get(str(mem.id)) and r == "ok" else "unverified" if r == "ok" else "skipped"] += 1
+                except Exception as e:
+                    counts["errors"] += 1
+                    print(f"[verify] sync {mem.id} in {gid}: {e}")
+                await asyncio.sleep(0.3)
+            await api("POST", f"/internal/guild/{PLATFORM}/{gid}/synced", {})
+            counts["problems"] = issues.lines()
+            await remember(gid, {k: v for k, v in counts.items() if k != "problems"}, issues)
+            return counts
+
+    def summary_text(counts):
+        if counts.get("busy"):
+            return "A sync is already running here."
+        if "synced" not in counts:
+            return f"Sync failed: {counts.get('error')}"
+        text = (f"Sync finished: {counts['synced']} verified members updated, {counts['unverified']} not verified, "
+                f"{counts['skipped']} skipped, {counts['errors']} errors.")
+        if counts["created"] or counts["renamed"] or counts["deleted"]:
+            text += f" Roles: {counts['created']} created, {counts['renamed']} renamed, {counts['deleted']} deleted."
+        if counts.get("problems"):
+            text += "\n\n**Things that need fixing:**\n" + "\n".join(f"• {l}" for l in counts["problems"])
+        return text
+
+    async def scheduler():
+        """Backup sync: a server is due when 24 hours of real time have passed since its last sync (UTC epoch seconds)."""
+        while True:
+            await asyncio.sleep(CHECK_EVERY)
+            try:
+                for cfg in ((await api("GET", f"/internal/guilds/{PLATFORM}")) or {}).get("guilds", []):
+                    if time.time() - int(cfg.get("last_sync_at") or 0) >= SYNC_EVERY:
+                        guild = bot.get_guild(int(cfg["guild_id"]))
+                        if guild:
+                            await sync_guild(guild)
+            except Exception as e:
+                print(f"[verify] scheduler: {e}")
+
+    started = {"scheduler": False}
+
+    async def on_ready_start():
+        if not started["scheduler"]:
+            started["scheduler"] = True
+            bot.loop.create_task(scheduler())
+    bot.add_listener(on_ready_start, "on_ready")
+
+    # ------------------------------------------------------------------ joins and the API's notice
+    async def start_link(uid, gid=""):
+        """(url, message): a one-time Roblox sign-in link, or why there isn't one."""
+        d = await api("POST", "/internal/roblox/start", {"platform": PLATFORM, "user_id": str(uid), "guild": f"{PLATFORM}:{gid}" if gid else ""})
+        if d and d.get("success") and d.get("url"):
+            return d["url"], None
+        if d and d.get("data"):
+            return None, d["data"]
+        return None, "I couldn't make a Roblox sign-in link right now."
+
+    def yapin_note():
+        return (f"You don't need a Yapin' account. If you have one, open {YAPIN_DASH} and press **Link Discord** to merge them, "
+                "and your accounts show up in both places.")
+
+    async def on_member_join(member):
+        """A member joined: auto-verify them if they chose that, else DM the server's prompt (once a day per server)."""
+        if member.bot:
+            return
+        gid, uid = str(member.guild.id), str(member.id)
+        cfg = await cfg_of(gid)
+        if not cfg:
+            return
+        if await apply_one(member.guild, member):
+            return
+        if cfg.get("prompt_dm") and time.time() - _prompted.get((gid, uid), 0) > 86400:
+            _prompted[(gid, uid)] = time.time()
+            link, why = await start_link(uid, gid)
+            text = cfg.get("prompt_text") or f"**{member.guild.name}** uses Roblox verification."
+            body = f"{text}\n\nSign in with Roblox here (no bio changes needed): {link}" if link else f"{text}\n\nRun `/roblox verify` in the server to get started."
+            try:
+                await member.send(embed=discord.Embed(title="Verify your Roblox account", description=body, color=discord.Color.blurple()))
+            except discord.HTTPException as e:
+                print(f"[verify] couldn't DM the prompt to {uid}: {e}")
+    bot.add_listener(on_member_join, "on_member_join")
+
+    def verified_notice():
+        if not token or not hmac.compare_digest(request.headers.get("Authorization", "").removeprefix("Bearer ").strip(), token):
+            return jsonify({"success": False}), 401
+        b = request.get_json(silent=True) or {}
+        uid = str(b.get("discord_id") or "")
+        if not uid:
+            return jsonify({"success": True, "ignored": True})
+        acct = {"id": b.get("roblox_id"), "name": b.get("roblox_name"), "avatar": b.get("avatar"), "profile": b.get("profile")}
+
+        async def work():
+            await dm_verified(uid, acct, "auto" if b.get("auto_verify") else "verified")
+            guild_hint = str(b.get("guild") or "")
+            if guild_hint.startswith(f"{PLATFORM}:"):               # they came from a server's prompt: verify them there too
+                await api("POST", f"/internal/guild/{PLATFORM}/{guild_hint.split(':', 1)[1]}/verify", {"user_id": uid, "roblox_id": acct["id"]})
+            for cfg in ((await api("GET", f"/internal/guilds/{PLATFORM}")) or {}).get("guilds", []):      # keep every server they're in current
+                guild = bot.get_guild(int(cfg["guild_id"]))
+                member = guild.get_member(int(uid)) if guild else None
+                if member:
+                    await apply_one(guild, member, quiet=True)
+        asyncio.run_coroutine_threadsafe(work(), bot.loop)
+        return jsonify({"success": True})
+
+    # ------------------------------------------------------------------ the panel (a message with a Verify button)
+    def panel_embed(cfg, guild):
+        title = (cfg.get("panel_title") or "").strip() or "Verify with Roblox"
+        text = (cfg.get("panel_text") or "").strip() or (
+            f"Press **Verify** to link your Roblox account to {guild.name}. You sign in with Roblox "
+            "(nothing goes in your bio) and I'll give you your roles and nickname.\n"
+            "Already linked? You're verified in one click. Pick another account with `/roblox verify`.")
+        return discord.Embed(title=title[:256], description=text[:3000], color=discord.Color.blurple())
+
+    async def send_panel(guild, channel, cfg):
+        """Post the panel (or update the one posted before when it is in the same channel)."""
+        embed = panel_embed(cfg, guild)
+        old_ch, old_msg = cfg.get("panel_channel_id"), cfg.get("panel_message_id")
+        if old_msg and str(old_ch) == str(channel.id):
+            try:
+                msg = await channel.fetch_message(int(old_msg))
+                await msg.edit(embed=embed, view=PanelView())
+                return msg
+            except discord.HTTPException:
+                pass                                                 # deleted in the meantime: post a new one
+        msg = await channel.send(embed=embed, view=PanelView())
+        await api("PUT", f"/internal/guild/{PLATFORM}/{guild.id}/config", {"panel_channel_id": str(channel.id), "panel_message_id": str(msg.id)})
+        return msg
+
+    class PanelView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.button(label="Verify", style=discord.ButtonStyle.primary, custom_id="rv:verify")
+        async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+            uid, guild = str(interaction.user.id), interaction.guild
+            if not guild:
+                return await interaction.response.send_message("Press the button in a server.", ephemeral=True)
+            if time.time() - _clicked.get(uid, 0) < 5:
+                return await interaction.response.send_message("One moment, I'm still working on your last click.", ephemeral=True)
+            _clicked[uid] = time.time()
+            if len(_clicked) > 2000:
+                _clicked.clear()
+            await interaction.response.defer(ephemeral=True)
+            cfg = await cfg_of(str(guild.id))
+            if not cfg:
+                return await interaction.followup.send("This server hasn't finished setting up Roblox verification yet.", ephemeral=True)
+            res = await api("POST", f"/internal/guild/{PLATFORM}/{guild.id}/verify", {"user_id": uid, "roblox_id": None})
+            if not res or not res.get("success"):
+                if res is None:
+                    return await interaction.followup.send("Verification isn't available right now. Try again in a moment.", ephemeral=True)
+                link, why = await start_link(uid, str(guild.id))
+                if not link:
+                    return await interaction.followup.send(why or "Couldn't verify you.", ephemeral=True)
+                return await interaction.followup.send(f"Sign in with Roblox to verify (OAuth2, nothing goes in your bio). The link works for 10 minutes and only for you:\n{link}\n"
+                                                       "When you finish I'll verify you here automatically.", ephemeral=True)
+            acct = res.get("account") or {}
+            who = f"[{acct.get('name')}]({acct.get('profile')}) (`{acct.get('id')}`)" if acct.get("id") else "your Roblox account"
+            await interaction.followup.send(f"Verified as {who}. I'm updating your roles and nickname now.", ephemeral=True)
+            member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+            if member:
+                await apply_one(guild, member)
+
+    bot.add_view(PanelView())
+
+
+    # ------------------------------------------------------------------ the /roblox command group
+    def is_manager(interaction):
+        user = interaction.user
+        return bool(interaction.guild) and (user.id == interaction.guild.owner_id or user.guild_permissions.administrator or user.guild_permissions.manage_guild)
+
+    def split_names(value):
+        return [t for t in (value or "").replace(",", " ").split() if t]
+
+    roblox, panel = roblox_group, roblox_panel
+
+    async def say(interaction, text, **kw):
+        return await interaction.response.send_message(text, ephemeral=True, **kw)
+
+    async def my_person(interaction):
+        """(accounts list, error text). The API makes the person record on first contact, so no Yapin' account is needed."""
+        person = await api("GET", f"/internal/person/{PLATFORM}/{interaction.user.id}") or {}
+        if not person.get("success"):
+            return None, "Verification isn't available right now. Try again in a moment."
+        return person.get("accounts") or [], None
+
+    def pick(accts, q):
+        return next((x for x in accts if str(x["id"]) == q or x["name"].lower() == q.lower()), None)
+
+    @roblox.command(name="verify", description="Verify in this server (as your default account, or the one you name)")
+    @app_commands.describe(account="A linked account's name or id (empty = your default)")
+    async def roblox_verify(interaction: discord.Interaction, account: str = ""):
+        uid, gid = str(interaction.user.id), str(interaction.guild_id or "")
+        if not interaction.guild:
+            return await say(interaction, "Run this in a server to verify there. To link an account from here, use `/roblox link`.")
+        if not await cfg_of(gid):
+            return await say(interaction, "This server hasn't set up Roblox verification.")
+        accts, err = await my_person(interaction)
+        if err:
+            return await say(interaction, err)
+        if not accts:
+            link, why = await start_link(uid, gid)
+            return await say(interaction, f"Sign in with Roblox to verify (OAuth2, nothing goes in your bio). The link works for 10 minutes and only for you:\n{link}\n"
+                                          "When you finish I'll verify you here automatically." if link else why)
+        res = await api("POST", f"/internal/guild/{PLATFORM}/{gid}/verify", {"user_id": uid, "roblox_id": account or None})
+        if not res or not res.get("success"):
+            return await say(interaction, (res or {}).get("data") or "Couldn't verify you.")
+        await interaction.response.defer(ephemeral=True)
+        member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+        if member:
+            await apply_one(interaction.guild, member)
+        await interaction.followup.send(f"Verified as **{res['account']['name']}**. I've sent you a message with the details.", ephemeral=True)
+
+    @roblox.command(name="link", description="Link a Roblox account by signing in with Roblox (no Yapin' account needed)")
+    async def roblox_link(interaction: discord.Interaction):
+        link, why = await start_link(interaction.user.id, interaction.guild_id or "")
+        if not link:
+            return await say(interaction, why)
+        view = discord.ui.View(timeout=600)
+        view.add_item(discord.ui.Button(label="Link with Roblox", style=discord.ButtonStyle.link, url=link))
+        await say(interaction, "Sign in with Roblox (OAuth2, nothing goes in your bio). The link works for 10 minutes and only for you.\n" + yapin_note(), view=view)
+
+    @roblox.command(name="accounts", description="List the Roblox accounts you've linked")
+    async def roblox_accounts(interaction: discord.Interaction):
+        accts, err = await my_person(interaction)
+        if err:
+            return await say(interaction, err)
+        if not accts:
+            return await say(interaction, "You haven't linked a Roblox account yet. Use `/roblox link`.")
+        lines = [f"{'⭐ ' if x['auto_verify'] else ''}{'🙈 ' if x.get('hidden') else ''}[{x['name']}]({x['profile']}) · `{x['id']}`" for x in accts]
+        await say(interaction, f"**Your Roblox accounts ({len(accts)}/100)**\n" + "\n".join(lines[:40]) + ("\n…" if len(lines) > 40 else "")
+                  + "\n⭐ = auto-verify · 🙈 = hidden from lookups and the API. Add more with `/roblox link`.")
+
+    @roblox.command(name="auto", description="Verify you automatically as one account in servers that use Roblox verification")
+    @app_commands.describe(account="A linked account's name or id, or off")
+    async def roblox_auto(interaction: discord.Interaction, account: str = "off"):
+        uid = str(interaction.user.id)
+        if account.lower() in ("off", "none", ""):
+            await api("POST", f"/internal/person/{PLATFORM}/{uid}/auto", {"roblox_id": None})
+            return await say(interaction, "Auto-verify is off.")
+        accts, err = await my_person(interaction)
+        x = pick(accts or [], account)
+        if err or not x:
+            return await say(interaction, err or "That isn't one of your linked accounts. See `/roblox accounts`.")
+        await api("POST", f"/internal/person/{PLATFORM}/{uid}/auto", {"roblox_id": x["id"]})
+        await say(interaction, f"**{x['name']}** will now verify you automatically in servers that use Roblox verification.")
+
+    @roblox.command(name="remove", description="Unlink one of your Roblox accounts")
+    @app_commands.describe(account="A linked account's name or id")
+    async def roblox_remove(interaction: discord.Interaction, account: str):
+        accts, err = await my_person(interaction)
+        x = pick(accts or [], account)
+        if err or not x:
+            return await say(interaction, err or "That isn't one of your linked accounts. See `/roblox accounts`.")
+        await api("DELETE", f"/internal/person/{PLATFORM}/{interaction.user.id}/roblox/{x['id']}")
+        await say(interaction, f"Removed **{x['name']}**.")
+
+    async def set_hidden(interaction, accounts, hide):
+        names = split_names(accounts)
+        verb = "hide" if hide else "show"
+        if not names:
+            return await say(interaction, f"Say which accounts to {verb}: one name, several names, or `all`. See `/roblox accounts`.")
+        accts, err = await my_person(interaction)
+        if err:
+            return await say(interaction, err)
+        body = {"hidden": hide}
+        if any(n.lower() == "all" for n in names):
+            body["all"] = True
+            shown = "all your accounts"
+        else:
+            chosen = [pick(accts, n) for n in names]
+            missing = [n for n, x in zip(names, chosen) if not x]
+            if missing:
+                return await say(interaction, f"Not one of your linked accounts: {', '.join(missing)}. See `/roblox accounts`.")
+            body["roblox_ids"] = [x["id"] for x in chosen]
+            shown = ", ".join(f"**{x['name']}**" for x in chosen)
+        d = await api("POST", f"/internal/person/{PLATFORM}/{interaction.user.id}/hide", body)
+        if not d or not d.get("success"):
+            return await say(interaction, "Couldn't change that right now. Try again in a moment.")
+        await say(interaction, f"Hidden: {shown}. They no longer show in lookups or the API, but servers still see them when you verify." if hide else f"Visible again: {shown}.")
+
+    @roblox.command(name="hide", description="Hide accounts from lookups and the API (one, several, or all)")
+    @app_commands.describe(accounts="Account names or ids, several separated by spaces, or all")
+    async def roblox_hide(interaction: discord.Interaction, accounts: str):
+        await set_hidden(interaction, accounts, True)
+
+    @roblox.command(name="show", description="Show hidden accounts again (one, several, or all)")
+    @app_commands.describe(accounts="Account names or ids, several separated by spaces, or all")
+    async def roblox_show(interaction: discord.Interaction, accounts: str):
+        await set_hidden(interaction, accounts, False)
+
+    @roblox.command(name="group", description="Info about a Roblox group (ID, link or name)")
+    @app_commands.describe(group="The group's ID, link or name")
+    async def roblox_group_info(interaction: discord.Interaction, group: str):
+        await interaction.response.defer(thinking=True)
+        info, err = await fetch_group(group)
+        if err:
+            return await interaction.followup.send(err)
+        await interaction.followup.send(embed=group_embed(info, color_of(interaction.user.id)))
+
+    @roblox.command(name="sync", description="Sync every member's Roblox roles and nickname with the group (server admins)")
+    async def roblox_sync(interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await say(interaction, "Only server admins can run a sync.")
+        if not await cfg_of(str(interaction.guild_id)):
+            return await say(interaction, "Set the group first: `/roblox panel setgroup`.")
+        await say(interaction, "Syncing every member now. This can take a few minutes; I'll send you the result, including anything I'm not allowed to do "
+                               "(missing permissions or a role that sits too high).")
+        guild, user = interaction.guild, interaction.user
+
+        async def job():
+            text = summary_text(await sync_guild(guild))
+            try:
+                await user.send(text[:1900])
+            except discord.HTTPException:
+                pass
+        task = asyncio.create_task(job())
+        _tasks.add(task)                                 # keep a reference so it isn't collected mid-sync
+        task.add_done_callback(_tasks.discard)
+
+    # ---- /roblox panel ... (server admins)
+    async def stats_line(gid):
+        d = await api("GET", f"/internal/guild/{PLATFORM}/{gid}/stats")
+        if not d or not d.get("success"):
+            return None
+        return f"Verified here: **{d['verified']}** now · **{d['ever_verified']}** ever · last 24h {d['last_24h']} · 7 days {d['last_7d']} · 30 days {d['last_30d']}"
+
+    async def panel_apply(interaction, body=None):
+        """Save a change (or just read the config) and answer with the server's current setup."""
+        if not is_manager(interaction):
+            return await say(interaction, "Only server admins can set up verification.")
+        guild, gid = interaction.guild, str(interaction.guild_id)
+        d = await api("PUT" if body else "GET", f"/internal/guild/{PLATFORM}/{gid}/config", body or None)
+        c = (d or {}).get("config") or {}
+        if (body or {}).get("verified_role_id") == "create":
+            await ensure_verified_role(guild, c, Issues())
+        lines = [f"Group: `{c.get('group_id') or 'not set'}`", f"Nickname: `{c.get('nickname_template') or 'off'}` (use {{name}}, {{display}}, {{id}}, {{rank}})",
+                 f"Verified role: {'<@&' + str(c['verified_role_id']) + '>' if c.get('verified_role_id') and c.get('verified_role_id') != 'create' else 'none'} · "
+                 f"Unverified role: {'<@&' + str(c['unverified_role_id']) + '>' if c.get('unverified_role_id') else 'none'}",
+                 f"Mirror group roles: {'on' if c.get('mirror_roles') else 'off'} · DM prompt on join: {'on' if c.get('prompt_dm') else 'off'}",
+                 f"Panel: {'posted in <#' + str(c['panel_channel_id']) + '>' if c.get('panel_message_id') else 'not posted. Use `/roblox panel send`'}"]
+        last = (stateDB.get(gid) or {}).get("last")
+        if last and last.get("problems"):
+            lines.append("**The last sync hit problems:**\n" + "\n".join(f"• {l}" for l in last["problems"]))
+        line = await stats_line(gid) if c.get("group_id") else None
+        if line:
+            lines.append(line)
+        lines.append("Run `/roblox sync` to apply it to everyone. A backup sync runs every 24 hours.")
+        await say(interaction, "\n".join(lines))
+
+    ONOFF = [app_commands.Choice(name="on", value="on"), app_commands.Choice(name="off", value="off")]
+
+    @panel.command(name="status", description="Show this server's Roblox verification setup")
+    async def panel_status(interaction: discord.Interaction):
+        await panel_apply(interaction)
+
+    @panel.command(name="setgroup", description="Set the Roblox group this server mirrors")
+    @app_commands.describe(group_id="The number in the group's URL")
+    async def panel_setgroup(interaction: discord.Interaction, group_id: str):
+        if not group_id.strip().isdigit():
+            return await say(interaction, "Give the Roblox group ID (the number in the group's URL).")
+        await panel_apply(interaction, {"group_id": group_id.strip()})
+
+    @panel.command(name="nickname", description="Set the nickname template, or off")
+    @app_commands.describe(template="Use {name}, {display}, {id}, {rank}; or off")
+    async def panel_nickname(interaction: discord.Interaction, template: str):
+        v = template.strip()
+        await panel_apply(interaction, {"nickname_template": "" if v.lower() in ("off", "none", "") else "{name}" if v.lower() in ("on", "true", "yes") else v})
+
+    @panel.command(name="role", description="Set the verified role (pick one, or leave empty to create it)")
+    async def panel_role(interaction: discord.Interaction, role: discord.Role = None):
+        await panel_apply(interaction, {"verified_role_id": "create" if role is None else str(role.id)})
+
+    @panel.command(name="unverified", description="Set the role people get until they verify (pick one, or leave empty to create it)")
+    async def panel_unverified(interaction: discord.Interaction, role: discord.Role = None):
+        await panel_apply(interaction, {"unverified_role_id": "create" if role is None else str(role.id)})
+
+    @panel.command(name="mirror", description="Make Discord roles follow the group's roles (create, rename, delete)")
+    @app_commands.choices(state=ONOFF)
+    async def panel_mirror(interaction: discord.Interaction, state: app_commands.Choice[str]):
+        await panel_apply(interaction, {"mirror_roles": state.value == "on"})
+
+    @panel.command(name="prompt", description="DM new members a Roblox verification prompt when they join")
+    @app_commands.choices(state=ONOFF)
+    @app_commands.describe(text="Optional message to put in the DM")
+    async def panel_prompt(interaction: discord.Interaction, state: app_commands.Choice[str], text: str = ""):
+        body = {"prompt_dm": state.value == "on"}
+        if text.strip():
+            body["prompt_text"] = text.strip()
+        await panel_apply(interaction, body)
+
+    @panel.command(name="title", description="Set the panel's title (empty = default)")
+    async def panel_title(interaction: discord.Interaction, title: str = ""):
+        await panel_apply(interaction, {"panel_title": "" if title.lower() in ("off", "default") else title.strip()})
+
+    @panel.command(name="text", description="Set the panel's text (empty = default)")
+    async def panel_text(interaction: discord.Interaction, text: str = ""):
+        await panel_apply(interaction, {"panel_text": "" if text.lower() in ("off", "default") else text.strip()})
+
+    @panel.command(name="stats", description="How many people verified here")
+    async def panel_stats(interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await say(interaction, "Only server admins can see verification stats.")
+        await say(interaction, (await stats_line(str(interaction.guild_id))) or "Stats aren't available right now.")
+
+    @panel.command(name="send", description="Post the verification panel (a message with a Verify button)")
+    @app_commands.describe(channel="Where to post it (default: here)")
+    async def panel_send(interaction: discord.Interaction, channel: discord.TextChannel = None):
+        if not is_manager(interaction):
+            return await say(interaction, "Only server admins can set up verification.")
+        cfg = await cfg_of(str(interaction.guild_id))
+        if not cfg:
+            return await say(interaction, "Set the group first: `/roblox panel setgroup`.")
+        target = channel or interaction.channel
+        try:
+            await send_panel(interaction.guild, target, cfg)
+        except discord.HTTPException as e:
+            why = ("I'm missing **View Channel**, **Send Messages** or **Embed Links** there. Give my role those permissions in that channel."
+                   if Issues.denied(e) else str(e))
+            return await say(interaction, f"I couldn't post the panel in {target.mention}: {why}")
+        await say(interaction, f"The verification panel is posted in {target.mention}. People press **Verify** to get their roles.")
+
+    m.rverify_sync = sync_guild
+    _ROBLOX["notice"] = verified_notice
+    return roblox
+
+
+def cmdlog_init(m):
+    bot = m.bot
+    cfgDB = m.cmdlogDB                               # guild id (or "botlog") -> {"channel", "enabled", "events", "commands", "retry_at", "refused"}
+    hooks = {}                                       # channel id -> discord.Webhook, shared by every log posting there
+    lock = asyncio.Lock()
+
+    async def hook_for(channel):
+        """A webhook the bot can use in this channel: one it already made (shared by the logs), else a new one."""
+        if channel.id in hooks:
+            return hooks[channel.id]
+        mine = [w for w in await channel.webhooks() if w.token and (w.user == bot.user or w.application_id == bot.user.id)]
+        mine.sort(key=lambda w: not (w.name or "").startswith("Shapes"))
+        hook = mine[0] if mine else await channel.create_webhook(name=HOOK_NAME, reason="Command log")
+        hooks[channel.id] = hook
+        return hook
+
+    async def post(key, embed):
+        """Post one embed to a log's channel. Returns None, or a plain sentence about what the bot isn't allowed to do."""
+        cfg = cfgDB.get(key)
+        if not cfg or not cfg.get("enabled") or not cfg.get("channel"):
+            return None
+        channel = bot.get_channel(int(cfg["channel"]))
+        if channel is None:
+            return None
+        async with lock:
+            if not (cfg.get("refused") and time.time() < float(cfg.get("retry_at") or 0)):
+                try:
+                    hook = await hook_for(channel)
+                    await hook.send(embed=embed, username=bot.user.name, avatar_url=bot.user.display_avatar.url)
+                    if cfg.pop("refused", None):
+                        cfgDB.set(key, cfg)
+                    return None
+                except discord.NotFound:                               # the webhook was deleted: forget it and try a fresh one once
+                    hooks.pop(channel.id, None)
+                    try:
+                        hook = await hook_for(channel)
+                        await hook.send(embed=embed, username=bot.user.name, avatar_url=bot.user.display_avatar.url)
+                        return None
+                    except discord.HTTPException:
+                        pass
+                except discord.Forbidden:
+                    hooks.pop(channel.id, None)
+                    cfg.update(refused=True, retry_at=time.time() + RETRY_WEBHOOK_AFTER)
+                    cfgDB.set(key, cfg)
+                except discord.HTTPException as e:
+                    print(f"[cmdlog] webhook in {channel.id}: {e}")
+            try:                                                       # the webhook isn't available: post as the bot
+                await channel.send(embed=embed)
+                return "I can't use webhooks in that channel, so I'm posting as the bot. Give me **Manage Webhooks** there to use one."
+            except discord.HTTPException as e:
+                print(f"[cmdlog] couldn't post in {channel.id}: {e}")
+                return "I can't post in that channel. I need **View Channel**, **Send Messages** and **Embed Links** there."
+
+    def command_embed(interaction, command):
+        args = " ".join(f"{k}:{v}" for k, v in (interaction.namespace.__dict__.items() if interaction.namespace else []))[:200]
+        embed = discord.Embed(title=f"/{command.qualified_name}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="User", value=f"{interaction.user.mention} (@{interaction.user.name})", inline=True)
+        if interaction.channel_id:
+            embed.add_field(name="Channel", value=f"<#{interaction.channel_id}>", inline=True)
+        if args:
+            embed.add_field(name="Arguments", value="```\n" + args.replace("```", "'''") + "\n```", inline=False)
+        if interaction.guild:
+            embed.set_footer(text=f"{interaction.guild.name} ({interaction.guild.id})")
+        return embed
+
+    async def on_command(interaction, command):
+        try:
+            if interaction.guild_id:
+                await post(str(interaction.guild_id), command_embed(interaction, command))
+            g = cfgDB.get(BOTLOG_KEY)
+            if g and g.get("commands", True):
+                await post(BOTLOG_KEY, command_embed(interaction, command))
+        except Exception as e:
+            print(f"[cmdlog] {e}")
+    bot.add_listener(on_command, "on_app_command_completion")
+
+    async def server_event(kind, guild):
+        g = cfgDB.get(BOTLOG_KEY)
+        if not g or not g.get("events", True):
+            return
+        humans = sum(1 for mem in guild.members if not mem.bot) if guild.chunked else None
+        total = guild.member_count or 0
+        embed = discord.Embed(title=("➕ Shapes was added to " if kind == "add" else "➖ Shapes was removed from ") + guild.name,
+                              color=discord.Color.green() if kind == "add" else discord.Color.red(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Server", value=f"{guild.name}\n`{guild.id}`", inline=True)
+        embed.add_field(name="Members", value=(f"**{total:,}** total\n{humans:,} people · {total - humans:,} bots" if humans is not None else f"**{total:,}** total (people and bots)"), inline=True)
+        embed.add_field(name="Servers now", value=str(len(bot.guilds)), inline=True)
+        embed.set_footer(text="Shapes server log")
+        await post(BOTLOG_KEY, embed)
+
+    async def on_guild_join(guild):
+        await server_event("add", guild)
+
+    async def on_guild_remove(guild):
+        await server_event("remove", guild)
+    bot.add_listener(on_guild_join, "on_guild_join")
+    bot.add_listener(on_guild_remove, "on_guild_remove")
+
+    def public_warning(channel):
+        """A log shows who ran what, so say so when everyone can read the channel."""
+        everyone = channel.guild.default_role
+        return ("\n⚠️ Everyone in the server can see that channel, so they'll see who runs which command. Pick a private channel if that's not what you want."
+                if channel.permissions_for(everyone).view_channel else "")
+
+    STATE = [app_commands.Choice(name="on", value="on"), app_commands.Choice(name="off", value="off")]
+
+    @bot.tree.command(name="cmdlog", description="Log every command used in this server to a channel (server admins)")
+    @app_commands.describe(channel="Where to post the log", state="Turn the log on or off")
+    @app_commands.choices(state=STATE)
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def cmdlog(interaction: discord.Interaction, channel: discord.TextChannel = None, state: app_commands.Choice[str] = None):
+        user = interaction.user
+        if not (user.id == interaction.guild.owner_id or user.guild_permissions.administrator or user.guild_permissions.manage_guild):
+            return await interaction.response.send_message("Only server admins can change the command log.", ephemeral=True)
+        key = str(interaction.guild_id)
+        cfg = cfgDB.get(key) or {"enabled": False, "channel": None}
+        note = ""
+        if channel is not None:
+            cfg["channel"] = str(channel.id)
+            cfg.pop("refused", None)
+            hooks.pop(channel.id, None)
+            if state is None:
+                cfg["enabled"] = True
+            note = public_warning(channel)
+        if state is not None:
+            if state.value == "on" and not cfg.get("channel"):
+                return await interaction.response.send_message("Pick a channel first: `/cmdlog channel:#logs`.", ephemeral=True)
+            cfg["enabled"] = state.value == "on"
+        cfgDB.set(key, cfg)
+        where = f"<#{cfg['channel']}>" if cfg.get("channel") else "no channel yet"
+        await interaction.response.send_message(f"The command log is **{'on' if cfg.get('enabled') else 'off'}** ({where}).{note}", ephemeral=True)
+
+    @bot.tree.command(name="botlog", description="Bot owners only: log every command and every server added or removed")
+    @app_commands.describe(channel="Where to post the global log", state="Turn the whole log on or off",
+                           commands="Log commands from every server", events="Log servers added and removed",
+                           dms="Post every DM the bot sends or receives")
+    @app_commands.choices(state=STATE)
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def botlog(interaction: discord.Interaction, channel: discord.TextChannel = None, state: app_commands.Choice[str] = None,
+                     commands: bool = None, events: bool = None, dms: bool = None):
+        if not m.is_bot_owner(interaction.user):
+            return await interaction.response.send_message("Only the bot owners can use the bot log.", ephemeral=True)
+        cfg = cfgDB.get(BOTLOG_KEY) or {"enabled": False, "channel": None, "commands": True, "events": True}
+        if channel is not None:
+            cfg["channel"] = str(channel.id)
+            cfg.pop("refused", None)
+            hooks.pop(channel.id, None)
+            if state is None:
+                cfg["enabled"] = True
+        if state is not None:
+            if state.value == "on" and not cfg.get("channel"):
+                return await interaction.response.send_message("Pick a channel first: `/botlog channel:#logs`.", ephemeral=True)
+            cfg["enabled"] = state.value == "on"
+        if commands is not None:
+            cfg["commands"] = commands
+        if events is not None:
+            cfg["events"] = events
+        if dms is not None:
+            cfg["dms"] = dms
+        cfgDB.set(BOTLOG_KEY, cfg)
+        await interaction.response.send_message(
+            f"The bot log is **{'on' if cfg.get('enabled') else 'off'}** (" + (f"<#{cfg['channel']}>" if cfg.get("channel") else "no channel yet") +
+            f"). Commands: {'on' if cfg.get('commands', True) else 'off'} · Server events: {'on' if cfg.get('events', True) else 'off'} · "
+            f"DMs: {'on' if cfg.get('dms', True) else 'off'}.", ephemeral=True)
+
+    m.cmdlog_post = post
+
+
+# --- Roblox group info (used by /roblox group) ---
+GROUP_UA = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+            "accept": "application/json"}
+GROUP_URL = re.compile(r"roblox\.com/(?:[a-z-]+/)?(?:groups|communities)/(\d+)", re.I)
+
+
+async def _group_json(session, url):
+    try:
+        async with session.get(url, headers=GROUP_UA, timeout=aiohttp.ClientTimeout(total=12)) as r:
+            data = await r.json(content_type=None)
+            return (data if r.status < 400 else None), r.status
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return None, 0
+
+
+async def find_group_id(session, query):
+    """(group id, error text). Accepts an ID, a group link, or a name (the best match wins, an exact name first)."""
+    q = (query or "").strip()
+    if q.isdigit():
+        return q, None
+    found = GROUP_URL.search(q)
+    if found:
+        return found.group(1), None
+    if not q:
+        return None, "Give a group ID, a roblox.com group link, or a group name."
+    data, status = await _group_json(session, f"https://groups.roblox.com/v1/groups/search?keyword={urllib.parse.quote(q, safe='')}&limit=10")
+    rows = (data or {}).get("data") or []
+    if not rows:
+        return None, "Roblox couldn't be reached right now." if status in (0, 429) or status >= 500 else f"I couldn't find a group called **{q}**."
+    best = next((g for g in rows if str(g.get("name", "")).lower() == q.lower()), rows[0])
+    return str(best["id"]), None
+
+
+async def fetch_group(group_id):
+    """(info dict, error text) for one group: details, creation date, icon and role count."""
+    async with aiohttp.ClientSession() as session:
+        gid, err = await find_group_id(session, group_id)
+        if err:
+            return None, err
+        base, status = await _group_json(session, f"https://groups.roblox.com/v1/groups/{gid}")
+        if not base or not base.get("id"):
+            return None, "Roblox couldn't be reached right now." if status in (0, 429) or status >= 500 else f"I couldn't find a group with the ID `{gid}`."
+        created, icon, roles = await asyncio.gather(
+            _group_json(session, f"https://groups.roblox.com/v2/groups?groupIds={gid}"),
+            _group_json(session, f"https://thumbnails.roblox.com/v1/groups/icons?groupIds={gid}&size=420x420&format=Png"),
+            _group_json(session, f"https://groups.roblox.com/v1/groups/{gid}/roles"))
+        v2 = next(iter((created[0] or {}).get("data") or []), {}) or {}
+        base["created"] = v2.get("created")
+        base["icon"] = next(iter((icon[0] or {}).get("data") or []), {}).get("imageUrl")
+        base["role_count"] = len((roles[0] or {}).get("roles") or []) or None
+        return base, None
+
+
+def _group_date(iso):
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def group_embed(info, color):
+    """The embed for a fetch_group() result."""
+    gid = info["id"]
+    verified = " ✅" if info.get("hasVerifiedBadge") else ""
+    desc = (info.get("description") or "").strip()
+    embed = discord.Embed(title=f"{info.get('name')}{verified}", url=f"https://www.roblox.com/communities/{gid}", color=color,
+                          description=(desc[:600] + ("…" if len(desc) > 600 else "")) if desc else None)
+    owner = info.get("owner") or {}
+    if owner.get("userId"):
+        embed.add_field(name="Owner", value=f"[{owner.get('displayName') or owner.get('username')}](https://www.roblox.com/users/{owner['userId']}/profile)\n@{owner.get('username')}", inline=True)
+    else:
+        embed.add_field(name="Owner", value="Nobody (unowned)", inline=True)
+    embed.add_field(name="Members", value=f"{int(info.get('memberCount') or 0):,}", inline=True)
+    embed.add_field(name="Group ID", value=f"`{gid}`", inline=True)
+    created = _group_date(info.get("created"))
+    if created:
+        embed.add_field(name="Created", value=created, inline=True)
+    embed.add_field(name="Join", value="Anyone can join" if info.get("publicEntryAllowed") else "Join requests (approval needed)", inline=True)
+    if info.get("role_count"):
+        embed.add_field(name="Roles", value=str(info["role_count"]), inline=True)
+    if info.get("isLocked"):
+        embed.add_field(name="Status", value="🔒 Locked by Roblox", inline=False)
+    shout = info.get("shout") or {}
+    if shout.get("body"):
+        who = (shout.get("poster") or {}).get("username")
+        when = _group_date(shout.get("updated"))
+        embed.add_field(name="Shout", value=shout["body"][:500] + (f"\n— {who}" if who else "") + (f", {when}" if when else ""), inline=False)
+    if info.get("icon"):
+        embed.set_thumbnail(url=info["icon"])
+    embed.set_footer(text="Roblox group")
+    return embed
+
+
+# --- PlayVortex (https://playvortex.io): /vortex game, /vortex user, /vortex cookie ---
+# API: /api/games/<id> and /api/users/<id>. Pages: /users/<id>/profile and /games/<id>.
+# A person can store their own Vortex login (/vortex cookie) so lookups are made as them; that adds how they relate to
+# the user (friend request, following) which the API only knows for a signed-in viewer.
+VORTEX_URL = os.environ.get("PLAYVORTEX_URL", "https://playvortex.io").rstrip("/")
+VORTEX_COOKIE_NAME = os.environ.get("PLAYVORTEX_COOKIE_NAME", "session")      # the cookie's name when someone pastes only its value
+_vortex_cache = {}
+_VORTEX_SHARED_COOKIE = os.environ.get("PLAYVORTEX_COOKIE", "").strip()       # optional: one login for everyone (bot-owner account)
+
+
+def vortex_auth_headers(secret):
+    """Headers for a pasted login. `name=value` is sent as a cookie as it is; a JWT-looking value as a Bearer token;
+    anything else as the value of the cookie named PLAYVORTEX_COOKIE_NAME."""
+    secret = (secret or "").strip()
+    if not secret:
+        return {}
+    if secret.lower().startswith("bearer "):
+        return {"Authorization": secret}
+    if "=" in secret.split(";")[0]:
+        return {"Cookie": secret}
+    if re.fullmatch(r"[\w-]+\.[\w-]+\.[\w-]+", secret):
+        return {"Authorization": f"Bearer {secret}"}
+    return {"Cookie": f"{VORTEX_COOKIE_NAME}={secret}"}
+
+
+def vortex_secret_of(user_id):
+    entry = usersDB.get(str(user_id))
+    own = entry.get("vortex") if isinstance(entry, dict) else None
+    return own or _VORTEX_SHARED_COOKIE or ""
+
+
+def vortex_get(kind, ident, secret=""):
+    """The JSON object for /api/<kind>/<ident>, 'missing' when it doesn't exist, None when the site can't be reached."""
+    ident = str(ident).strip()
+    if not re.fullmatch(r"[\w.-]{1,64}", ident):
+        return "missing"
+    key = (kind, ident.lower(), hashlib.sha256(secret.encode()).hexdigest()[:12] if secret else "")     # a login's results are never shared
+    hit = _vortex_cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        r = requests.get(f"{VORTEX_URL}/api/{kind}/{urllib.parse.quote(ident)}", timeout=10,
+                         headers={"Accept": "application/json", "User-Agent": "ShapesBot", **vortex_auth_headers(secret)})
+        if r.status_code in (400, 404):
+            result = "missing"
+        elif r.status_code in (401, 403) and secret:
+            result = "denied"
+        else:
+            r.raise_for_status()
+            data = r.json()
+            result = data if isinstance(data, dict) and data else "missing"
+    except (requests.RequestException, ValueError):
+        return None
+    _vortex_cache[key] = (time.time() + 120, result)
+    if len(_vortex_cache) > 300:
+        _vortex_cache.pop(next(iter(_vortex_cache)))
+    return result
+
+
+def _vtime(value, style="D"):
+    """A Discord timestamp tag from an ISO string (2026-04-23T05:37:25.988850+00:00) or Unix seconds/millis."""
+    if value in (None, "", False):
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            seconds = value / 1000 if value > 1e12 else value
+        else:
+            text = str(value).strip()
+            try:
+                seconds = float(text)
+                seconds = seconds / 1000 if seconds > 1e12 else seconds
+            except ValueError:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                seconds = parsed.timestamp()
+        return f"<t:{int(seconds)}:{style}>"
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _vnum(value):
+    return f"{value:,}" if isinstance(value, (int, float)) and not isinstance(value, bool) else (str(value) if value not in (None, "") else None)
+
+
+def vortex_user_url(user_id):
+    return f"{VORTEX_URL}/users/{urllib.parse.quote(str(user_id))}/profile"
+
+
+def vortex_game_url(game_id):
+    return f"{VORTEX_URL}/games/{urllib.parse.quote(str(game_id))}"
+
+
+_VORTEX_BADGES = (("is_staff", "Staff"), ("is_moderator", "Moderator"), ("is_developer", "Developer"), ("is_content_creator", "Content Creator"), ("is_booster", "Booster"))
+_VORTEX_STATUS = {"online": "🟢 Online", "offline": "⚫ Offline", "away": "🟡 Away", "playing": "🎮 Playing", "in_game": "🎮 In a game"}
+_VORTEX_RELATION = {"request_sent": "Friend request sent", "request_received": "Sent you a friend request", "friends": "Friends", "none": None}
+
+
+def _vclean(text, limit):
+    text = str(text or "").strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def vortex_user_embed(data, color, signed_in=False):
+    uid = data.get("id")
+    embed = discord.Embed(title=_vclean(data.get("username") or f"User {uid}", 200), url=vortex_user_url(uid) if uid is not None else None, color=color)
+    embed.description = _vclean(data.get("bio"), 600) or None
+    status = str(data.get("online_status") or "").lower()
+    badges = [label for key, label in _VORTEX_BADGES if data.get(key)]
+    fields = [("Followers", _vnum(data.get("follower_count")), True), ("Following", _vnum(data.get("following_count")), True),
+              ("Friends", _vnum(data.get("friend_count")), True), ("Visits", _vnum(data.get("visits")), True),
+              ("Status", _VORTEX_STATUS.get(status, status.replace("_", " ").title() or None), True),
+              ("Joined", _vtime(data.get("created_at")), True)]
+    if status != "online":
+        fields.append(("Last seen", _vtime(data.get("last_seen"), "R"), True))
+    if badges:
+        fields.append(("Badges", ", ".join(badges), False))
+    prev = [str(p.get("username") if isinstance(p, dict) else p) for p in (data.get("previous_usernames") or [])]
+    if prev:
+        fields.append(("Previous usernames", _vclean(", ".join(prev), 300), False))
+    if signed_in:       # these only mean something to the person who is signed in
+        rel = [_VORTEX_RELATION.get(str(data.get("friendship_status") or "").lower(), str(data.get("friendship_status") or "").replace("_", " ").title()),
+               {"following": "You follow them"}.get(str(data.get("follow_status") or "").lower(), "")]
+        fields.append(("You and them", "\n".join(x for x in rel if x) or None, False))
+    if data.get("is_deleted"):
+        fields.insert(0, ("⚠️", "This account was deleted.", False))
+    for name, value, inline in fields[:25]:
+        if value:
+            embed.add_field(name=name, value=value, inline=inline)
+    return embed
+
+
+def vortex_game_embed(data, color):
+    gid = data.get("id")
+    embed = discord.Embed(title=_vclean(data.get("name") or f"Game {gid}", 200), url=vortex_game_url(gid) if gid is not None else None, color=color)
+    embed.description = _vclean(data.get("description"), 600) or None
+    creator = data.get("creator_name")
+    if creator and data.get("creator_id") is not None:
+        creator = f"[{creator}]({vortex_user_url(data['creator_id'])})"
+    fields = [("Creator", creator, True), ("Playing now", _vnum(data.get("player_count")), True), ("Max players", _vnum(data.get("max_players")), True),
+              ("Running servers", _vnum(data.get("total_instances")), True), ("Created", _vtime(data.get("created_at")), True),
+              ("Map updated", _vtime(data.get("map_updated_at")), True), ("ID", _vnum(gid), True)]
+    for name, value, inline in fields:
+        if value:
+            embed.add_field(name=name, value=value, inline=inline)
+    for t in data.get("thumbnails") or []:                         # the first thumbnail that is a plain link
+        url = t.get("url") if isinstance(t, dict) else t
+        if isinstance(url, str):
+            url = VORTEX_URL + url if url.startswith("/") else url
+            if url.startswith("https://"):
+                embed.set_image(url=url)
+                break
+    return embed
+
+
+def _link_view(*buttons):
+    view = discord.ui.View(timeout=None)
+    for label, url in buttons:
+        view.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=url))
+    return view
+
+
+def _embed_color(user_id):
+    saved = embedDB.get(f"{user_id}")
+    return saved if saved else discord.Color.blue()
+
+
+async def _vortex_lookup(interaction, kind, ident):
+    await interaction.response.defer()
+    secret = vortex_secret_of(interaction.user.id)
+    data = await asyncio.to_thread(vortex_get, kind, ident, secret)
+    what = "game" if kind == "games" else "user"
+    rejected = False
+    if data == "denied":                    # the stored login stopped working: fall back to a plain lookup
+        data = await asyncio.to_thread(vortex_get, kind, ident, "")
+        secret, rejected = "", True
+    if data is None:
+        return await interaction.edit_original_response(embed=discord.Embed(title="Vortex didn't answer", description="Try again in a moment.", color=discord.Color.red()))
+    if data == "missing":
+        return await interaction.edit_original_response(embed=discord.Embed(title=f"No {what} found for `{_vclean(ident, 60)}`", color=discord.Color.red()))
+    color = _embed_color(interaction.user.id)
+    if kind == "games":
+        embed = vortex_game_embed(data, color)
+        buttons = [("View game", vortex_game_url(data["id"]))] if data.get("id") is not None else []
+        if data.get("creator_id") is not None:
+            buttons.append((f"{data.get('creator_name') or 'Creator'}'s profile", vortex_user_url(data["creator_id"])))
+    else:
+        embed = vortex_user_embed(data, color, signed_in=bool(secret))
+        buttons = [("View profile", vortex_user_url(data["id"]))] if data.get("id") is not None else []
+    embed.set_footer(text=f"Requested By {interaction.user.name} | playvortex.io" + (" | your saved login was rejected, run /vortex cookie" if rejected else ""))
+    await interaction.edit_original_response(embed=embed, view=_link_view(*buttons) if buttons else None)
+
+
+class VortexCookieModal(discord.ui.Modal, title="Vortex login"):
+    """A form, so the cookie is never typed into the chat."""
+    cookie = discord.ui.TextInput(label="Your Vortex cookie", style=discord.TextStyle.paragraph, required=False, max_length=4000,
+                                  placeholder="name=value, just the value, or a Bearer token. Empty deletes your saved login.")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        uid = str(interaction.user.id)
+        cookie = str(self.cookie.value or "").strip()
+        entry = usersDB.get(uid)
+        entry = dict(entry) if isinstance(entry, dict) else {}
+        if not cookie:
+            entry.pop("vortex", None)
+            usersDB.set(uid, entry)
+            return await interaction.response.send_message("Your Vortex login was deleted.", ephemeral=True)
+        if "\n" in cookie or not cookie.isprintable():
+            return await interaction.response.send_message("That doesn't look like a cookie (it has line breaks). Nothing was saved.", ephemeral=True)
+        entry["vortex"] = cookie
+        usersDB.set(uid, entry)
+        _vortex_cache.clear()
+        await interaction.response.send_message("Saved. Your Vortex lookups now use your login. Run `/vortex cookie` and submit it empty to delete it.", ephemeral=True)
+
+
+# =============================================================================================================
+# Cogs. Each one is a class in this file; Shapes.setup_hook loads them. Commands with a space are app_commands.Groups.
+# =============================================================================================================
+_ROBLOX = {}      # filled by the Roblox cog: the handler for the API's "someone verified" notice
+
+
+@app.route("/internal/verified", methods=["POST"])
+def roblox_verified_notice():
+    handler = _ROBLOX.get("notice")
+    return handler() if handler else (jsonify({"success": False}), 503)
+
+
+
+# --- DM log: every DM the bot sends or receives -------------------------------------------------------------
+# Written to the dmlog table (who, which way, what was said, what caused it), shown with /dmlog (bot owners) and posted to the
+# bot log channel when /botlog dms is on. Sending is caught once, on discord.py's Messageable.send and on interaction
+# responses in a DM; receiving is caught as a DM to the bot or a command run in a DM.
+import contextvars
+_dm_user = contextvars.ContextVar("dm_user", default=None)         # set while a command that was run in a DM is being answered
+_dm_cmd = contextvars.ContextVar("dm_cmd", default=None)
+_DM_KEEP = 5000
+_last_dm_trim = 0.0
+
+
+def _dm_text(content=None, embeds=None, embed=None):
+    parts = [str(content)] if content else []
+    for e in list(embeds or []) + ([embed] if embed else []):
+        d = e.to_dict() if hasattr(e, "to_dict") else (e or {})
+        for key in ("title", "description"):
+            if d.get(key):
+                parts.append(str(d[key]))
+        for f in d.get("fields") or []:
+            parts.append(f"{f.get('name', '')}: {f.get('value', '')}")
+    return " | ".join(parts)[:1000]
+
+
+def _dm_source():
+    cmd = _dm_cmd.get()
+    if cmd:
+        return f"/{cmd}"
+    frame = sys._getframe(2)
+    here = os.path.dirname(os.path.abspath(__file__))
+    while frame:
+        code = frame.f_code
+        if os.path.abspath(code.co_filename).startswith(here) and code.co_name not in ("<module>", "_dm_source", "log_dm", "send", "send_message", "_send_logged"):
+            return code.co_name
+        frame = frame.f_back
+    return "bot"
+
+
+def log_dm(direction, user, text, source=None):
+    """Write one DM down (user is a discord user/member or an id). Never raises."""
+    global _last_dm_trim
+    try:
+        stamp = time.time()
+        uid = str(getattr(user, "id", user) or "")
+        name = getattr(user, "name", None) or uid
+        dmlogDB.set(f"{int(stamp * 1000)}-{os.urandom(2).hex()}", {"at": int(stamp), "dir": direction, "user_id": uid, "name": name,
+                                                                   "text": str(text or "")[:1000], "source": str(source or "")[:80]})
+        print(f"[dm {'->' if direction == 'out' else '<-'}] {name}: {str(text or '')[:100]!r} ({source})")
+        if stamp - _last_dm_trim > 3600:
+            _last_dm_trim = stamp
+            rows = sorted(dmlogDB.items().items())
+            for key, _row in rows[:max(0, len(rows) - _DM_KEEP)]:
+                dmlogDB.remove(key)
+        cfg = cmdlogDB.get(BOTLOG_KEY) or {}
+        post_fn = getattr(sys.modules[__name__], "cmdlog_post", None)
+        if post_fn and cfg.get("enabled") and cfg.get("dms", True):
+            embed = discord.Embed(title=("📤 DM sent to " if direction == "out" else "📥 DM from ") + str(name), description=str(text or "")[:1500] or "(no text)",
+                                  color=discord.Color.green() if direction == "out" else discord.Color.orange(), timestamp=discord.utils.utcnow())
+            embed.set_footer(text=f"{source or ''} · {uid}")
+            asyncio.get_running_loop().create_task(post_fn(BOTLOG_KEY, embed))
+    except Exception as e:
+        print(f"[dm log] {type(e).__name__}: {e}")
+
+
+def _install_dm_logging():
+    orig_send = discord.abc.Messageable.send
+
+    async def send(self, content=None, **kw):
+        message = await orig_send(self, content, **kw)
+        try:
+            channel = getattr(message, "channel", None)
+            if isinstance(channel, discord.DMChannel) and getattr(channel, "recipient", None) and (bot.user is None or channel.recipient.id != bot.user.id):
+                log_dm("out", channel.recipient, _dm_text(content, kw.get("embeds"), kw.get("embed")), _dm_source())
+        except Exception as e:
+            print(f"[dm log] {type(e).__name__}: {e}")
+        return message
+    discord.abc.Messageable.send = send
+
+    def wrap(cls, name, text_of):
+        orig = getattr(cls, name)
+
+        async def wrapped(self, *args, **kw):
+            result = await orig(self, *args, **kw)
+            who = _dm_user.get()
+            if who is not None:
+                log_dm("out", who, text_of(args, kw), _dm_source())
+            return result
+        setattr(cls, name, wrapped)
+    first = lambda args, kw: _dm_text(kw.get("content") if "content" in kw else (args[0] if args else None), kw.get("embeds"), kw.get("embed"))
+    wrap(discord.InteractionResponse, "send_message", first)
+    wrap(discord.InteractionResponse, "edit_message", first)
+    wrap(discord.Interaction, "edit_original_response", first)
+    wrap(discord.Webhook, "send", first)         # followups; only logged while a DM command is being answered (see _dm_user)
+
+    async def check(interaction):
+        if interaction.guild_id is None and interaction.user and not interaction.user.bot:
+            _dm_user.set(interaction.user)
+            name = interaction.command.qualified_name if interaction.command else "command"
+            _dm_cmd.set(name)
+            args = " ".join(f"{k}:{v}" for k, v in (interaction.namespace.__dict__.items() if interaction.namespace else []))[:300]
+            log_dm("in", interaction.user, f"/{name} {args}".strip(), "command in a DM")
+        return True
+    bot.tree.interaction_check = check
+
+    async def on_dm(message):
+        if message.guild is None and not message.author.bot and (bot.user is None or message.author.id != bot.user.id):
+            log_dm("in", message.author, message.content or "(attachment)", "DM to the bot")
+    bot.add_listener(on_dm, "on_message")
+
+
+class DMLogCog(commands.Cog, name="DM log"):
+    """Tracks every DM the bot sends or receives. /dmlog shows them (bot owners)."""
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    async def cog_load(self):
+        _install_dm_logging()
+
+    @app_commands.command(name="dmlog", description="Bot owners only: show the latest DMs the bot sent or received")
+    @app_commands.describe(user="Only this person", count="How many to show (default 15, max 40)")
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def dmlog(self, interaction: discord.Interaction, user: discord.User = None, count: app_commands.Range[int, 1, 40] = 15):
+        if not is_bot_owner(interaction.user):
+            return await interaction.response.send_message("Only the bot owners can read the DM log.", ephemeral=True)
+        rows = [v for v in dmlogDB.items().values() if isinstance(v, dict) and (user is None or v.get("user_id") == str(user.id))]
+        rows.sort(key=lambda r: -int(r.get("at") or 0))
+        if not rows:
+            return await interaction.response.send_message("No DMs logged yet.", ephemeral=True)
+        lines = [f"{'📤' if r['dir'] == 'out' else '📥'} <t:{r['at']}:R> **{r.get('name')}** ({r.get('source') or ''})\n> {str(r.get('text') or '')[:150]}" for r in rows[:count]]
+        await interaction.response.send_message(f"**DM log** ({len(rows)} total)\n" + "\n".join(lines)[:1900], ephemeral=True)
+
+
+# --- Last.fm (/lastfm link, /lastfm unlink, /lastfm user): links are kept by the Shapes API per platform ("discord" here) ---
+LASTFM_LINK_TTL = 600
+
+
+def _shapes_call(method, path, body=None):
+    """The Shapes API's JSON (a dict), or None when it can't be reached."""
+    try:
+        r = requests.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=15)
+        data = r.json()
+        return data if isinstance(data, dict) else None
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def lastfm_name_of(user_id):
+    data = _shapes_call("GET", f"/internal/links/{user_id}?platform=discord") or {}
+    return (data.get("lastfm") or {}).get("name")
+
+
+def lastfm_line(p):
+    scrobbles = f"{int(p['scrobbles']):,}" if str(p.get("scrobbles") or "").isdigit() else "?"
+    text = f"[{p['name']}]({p['url']}) · {scrobbles} scrobbles"
+    if p.get("track"):
+        text += f"\n{'🎶 Now playing' if p.get('now') else '⏮️ Last played'}: {p['track']}"
+    return text
+
+
+class LastfmCog(commands.Cog, name="Last.fm"):
+    """/lastfm link, /lastfm unlink, /lastfm user."""
+    lastfm = app_commands.Group(name="lastfm", description="Link Last.fm and see what people are listening to",
+                                allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
+                                allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True))
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    @lastfm.command(name="link", description="Link your Last.fm account")
+    async def link(self, interaction: discord.Interaction):
+        started = await asyncio.to_thread(_shapes_call, "POST", "/internal/link/start",
+                                          {"provider": "lastfm", "platform": "discord", "yapin_id": str(interaction.user.id), "yapin_name": interaction.user.name})
+        url = (started or {}).get("url")
+        if not url:
+            return await interaction.response.send_message(str((started or {}).get("data") or "Couldn't reach the linking service. Try again in a moment."), ephemeral=True)
+        view = discord.ui.View(timeout=LASTFM_LINK_TTL)
+        view.add_item(discord.ui.Button(label="Authorize on Last.fm", style=discord.ButtonStyle.link, url=url))
+        await interaction.response.send_message("Tap the button, approve access on Last.fm and you're linked. The link works for 10 minutes and only for you.", view=view, ephemeral=True)
+
+    @lastfm.command(name="unlink", description="Unlink your Last.fm account")
+    async def unlink(self, interaction: discord.Interaction):
+        had = await asyncio.to_thread(lastfm_name_of, interaction.user.id)
+        await asyncio.to_thread(_shapes_call, "DELETE", f"/internal/links/{interaction.user.id}/lastfm?platform=discord")
+        await interaction.response.send_message("Unlinked your Last.fm account." if had else "You had no Last.fm account linked.", ephemeral=True)
+
+    @lastfm.command(name="user", description="See what you or someone else is listening to")
+    @app_commands.describe(user="Who to show (default: you)")
+    async def user(self, interaction: discord.Interaction, user: discord.User = None):
+        target = user or interaction.user
+        name = await asyncio.to_thread(lastfm_name_of, target.id)
+        if not name:
+            who = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"
+            return await interaction.response.send_message(f"{who} linked a Last.fm account. Use `/lastfm link`.", ephemeral=True)
+        await interaction.response.defer()
+        data = await asyncio.to_thread(_shapes_call, "GET", f"/internal/lastfm/{urllib.parse.quote(str(name), safe='')}")
+        p = (data or {}).get("profile") if data and data.get("success") else None
+        if not p:
+            return await interaction.followup.send(f"Couldn't reach Last.fm for `{name}` right now.")
+        embed = discord.Embed(title=f"{target.display_name} on Last.fm", description=lastfm_line(p), color=_embed_color(interaction.user.id))
+        if p.get("image"):
+            embed.set_thumbnail(url=p["image"])
+        embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
+        await interaction.followup.send(embed=embed)
+
+
+class RobloxCog(commands.Cog, name="Roblox"):
+    """Roblox verification, linked accounts and group info: the /roblox group."""
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.group = roblox_init(sys.modules[__name__])
+
+    async def cog_load(self):
+        self.bot.tree.add_command(self.group)
+
+    async def cog_unload(self):
+        self.bot.tree.remove_command(self.group.name)
+
+
+class CommandLogCog(commands.Cog, name="Command logs"):
+    """/cmdlog (a server's command log) and /botlog (bot owners)."""
+
+    def __init__(self, bot):
+        self.bot = bot
+        cmdlog_init(sys.modules[__name__])
+
+
+class VortexCog(commands.Cog, name="Vortex"):
+    """PlayVortex lookups: /vortex game, /vortex user, /vortex cookie."""
+    vortex = app_commands.Group(name="vortex", description="Look things up on PlayVortex",
+                                allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
+                                allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True))
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    @vortex.command(name="game", description="Look up a Vortex game by its game ID")
+    @app_commands.describe(game="The game's ID (the number in its link)")
+    async def game(self, interaction: discord.Interaction, game: str):
+        await _vortex_lookup(interaction, "games", game)
+
+    @vortex.command(name="user", description="Look up a Vortex user by their user ID (not their username)")
+    @app_commands.describe(user_id="The user's ID (the number in their profile link)")
+    async def user(self, interaction: discord.Interaction, user_id: str):
+        if not str(user_id).strip().isdigit():
+            return await interaction.response.send_message("Vortex lookups use the **user ID** (the number in their profile link), not the username.", ephemeral=True)
+        await _vortex_lookup(interaction, "users", user_id)
+
+    @vortex.command(name="cookie", description="Save your Vortex login so lookups are made as you")
+    async def cookie(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(VortexCookieModal())
+
+
+class ServerCog(commands.Cog, name="Server"):
+    """/server info."""
+    server = app_commands.Group(name="server", description="Information about this server", guild_only=True)
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    @server.command(name="info", description="Show information about this server")
+    async def info(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        people = sum(1 for mem in guild.members if not mem.bot)
+        bots = sum(1 for mem in guild.members if mem.bot)
+        embed = discord.Embed(title=guild.name, color=_embed_color(interaction.user.id), description=guild.description or None)
+        embed.add_field(name="Owner", value=f"<@{guild.owner_id}>", inline=True)
+        embed.add_field(name="Server ID", value=f"`{guild.id}`", inline=True)
+        embed.add_field(name="Created", value=f"<t:{int(guild.created_at.timestamp())}:D>", inline=True)
+        embed.add_field(name="Members", inline=False,
+                        value=f"**{guild.member_count:,}** total (people and bots)\n**{people:,}** people · **{bots:,}** bots" if guild.chunked
+                        else f"**{guild.member_count:,}** total (people and bots)")
+        text, voice = len(guild.text_channels), len(guild.voice_channels)
+        embed.add_field(name="Channels", value=f"{text + voice:,} total\n{text:,} text · {voice:,} voice\n{len(guild.categories):,} categories", inline=True)
+        embed.add_field(name="Roles", value=f"{len(guild.roles):,}", inline=True)
+        embed.add_field(name="Boosts", value=f"Level {guild.premium_tier} · {guild.premium_subscription_count or 0}", inline=True)
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        if guild.banner:
+            embed.set_image(url=guild.banner.url)
+        embed.set_footer(text=f"Requested by {interaction.user.name} | {MainURL}")
+        await interaction.response.send_message(embed=embed)
+
+
+COGS = (RobloxCog, CommandLogCog, VortexCog, ServerCog, LastfmCog, DMLogCog)
+
+
 # === Bot Runner in Thread ===
 def run_bot():
+    if not token:
+        print("DISCORD_TOKEN is not set. Copy .env.example to .env and fill it in.")
+        os._exit(1)
     bot.run(token)
 # === Run Bot + Flask Webserver ===
 if __name__ == "__main__":

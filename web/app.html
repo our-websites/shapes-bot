@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;800&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+<title>Shapes dashboard</title>
+<style>
+  :root { color-scheme: dark; --bg:#050505; --panel:#0d0d0f; --sunk:#0a0a0b; --ink:#ffffff; --muted:#9b9b9f; --line:rgba(160,160,170,.25);
+    --accent:#6366f1; --accent-ink:#ffffff; --accent-soft:rgba(99,102,241,.2); --danger:#f2877f; --ok:#6fcf8d; --field:#08080a; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); display: flex; flex-direction: column;
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus { outline: 2px solid var(--accent); outline-offset: 1px; }      /* :focus-visible is too new for KaiOS 3 */
+  input:focus, textarea:focus, select:focus { outline-offset: 0; }
+  [hidden] { display: none !important; }
+  .muted { color: var(--muted); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  header { display: flex; align-items: center; gap: 16px; padding: 0 16px; height: 52px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -.01em; }
+  .mark { width: 28px; height: 28px; border-radius: 50%; background: var(--ink); color: var(--bg); display: grid; place-items: center; font-size: 13px; font-weight: 700; overflow: hidden; flex: none; }
+  .mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  nav { display: flex; flex-wrap: wrap; gap: 2px; margin-left: 8px; }
+  nav button { background: none; border: 0; padding: 7px 12px; border-radius: 7px; color: var(--muted); font-weight: 550; }
+  nav button:hover { background: var(--sunk); color: var(--ink); }
+  nav button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+  .spacer { flex: 1; }
+  .meta { font-size: 12.5px; color: var(--muted); display: flex; gap: 14px; align-items: center; }
+  .meta a { color: var(--muted); }
+
+  main { flex: 1; min-height: 0; padding: 12px; }
+  .view { display: none; height: 100%; }
+  .view.on { display: block; }
+
+  .layout { display: grid; gap: 12px; height: 100%; min-height: 0; }
+  #v-servers .layout { grid-template-columns: 220px minmax(0, 1fr); }
+  #v-dms .layout { grid-template-columns: 280px minmax(0, 1fr); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .card > h2 { margin: 0; padding: 11px 14px; font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); border-bottom: 1px solid var(--line); flex: none; }
+  .scroll { overflow: auto; min-height: 0; flex: 1; }
+  .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
+
+  .row { display: flex; align-items: center; gap: 10px; padding: 8px 14px; width: 100%; background: none; border: 0; text-align: left; border-radius: 0; }
+  .row:hover { background: var(--sunk); }
+  .row[aria-current="true"] { background: var(--accent-soft); }
+  .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .count { color: var(--muted); font-size: 12px; }
+  .av { width: 28px; height: 28px; border-radius: 50%; background: var(--line); object-fit: cover; flex: none; display: grid; place-items: center; font-size: 12px; font-weight: 650; color: var(--muted); overflow: hidden; }
+  .av.sq { border-radius: 7px; }
+  .av.sm { width: 22px; height: 22px; font-size: 10px; }
+
+  .detail { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+  .detail-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex: none; flex-wrap: wrap; }
+  .detail-head h1 { font-size: 16px; margin: 0; letter-spacing: -.01em; }
+  .tabs { display: flex; gap: 2px; margin-left: auto; }
+  .tabs button { background: none; border: 0; padding: 6px 11px; border-radius: 7px; color: var(--muted); font-weight: 550; }
+  .tabs button:hover { background: var(--sunk); color: var(--ink); }
+  .tabs button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+  .pane { display: none; flex: 1; min-height: 0; }
+  .pane.on { display: flex; }
+
+  .chat { display: grid; grid-template-columns: 210px minmax(0, 1fr); width: 100%; min-height: 0; }
+  .tree { border-right: 1px solid var(--line); overflow: auto; padding: 6px 0; }
+  .cat { padding: 10px 14px 3px; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .tree .row { padding: 5px 14px; }
+  .tree .row::before { content: "#"; color: var(--muted); }
+  .thread { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .thread-head { padding: 9px 14px; border-bottom: 1px solid var(--line); font-weight: 600; flex: none; display: flex; justify-content: space-between; gap: 8px; }
+  .msgs { flex: 1; overflow: auto; padding: 6px 0; min-height: 0; }
+  .msg { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; padding: 6px 14px; }
+  .msg:hover { background: var(--sunk); }
+  .msg .av { width: 34px; height: 34px; }
+  .msg .who { font-weight: 650; }
+  .msg time { color: var(--muted); font-size: 12px; margin-left: 7px; }
+  .badge { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); margin-left: 6px; vertical-align: 1px; }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .body code { background: var(--sunk); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .mention { background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 0 3px; }
+  .pics { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  .pics img { max-width: min(360px, 100%); max-height: 280px; border-radius: 8px; border: 1px solid var(--line); background: var(--sunk); display: block; }
+  .quote { margin-top: 6px; border-left: 3px solid var(--accent); padding: 4px 10px; background: var(--sunk); border-radius: 0 6px 6px 0; }
+  .quote b { display: block; }
+  .composer { border-top: 1px solid var(--line); padding: 10px 12px; display: grid; gap: 8px; flex: none; }
+  .composer .line { display: flex; gap: 8px; }
+  .composer textarea { flex: 1; resize: none; }
+
+  input[type=text], input[type=url], input[type=number], input[type=search], select, textarea {
+    background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-width: 0;
+  }
+  textarea { width: 100%; }
+  .btn { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 14px; font-weight: 600; }
+  .btn:hover { filter: brightness(1.07); }
+  .btn:disabled { opacity: .5; cursor: default; filter: none; }
+  .btn.ghost { background: none; color: var(--ink); border: 1px solid var(--line); }
+  .btn.ghost:hover { background: var(--sunk); }
+  .status { font-size: 13px; min-height: 18px; }
+  .status.err { color: var(--danger); }
+  .status.ok { color: var(--ok); }
+
+  .list { flex: 1; overflow: auto; min-height: 0; width: 100%; }
+  .toolbar { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+  .toolbar input { flex: 1; }
+  .chip { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); margin: 1px 3px 1px 0; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; }
+
+  .form { padding: 16px 18px; overflow: auto; width: 100%; max-width: 760px; display: grid; gap: 14px; align-content: start; }
+  .field { display: grid; gap: 5px; }
+  .field > label, .group-title { font-size: 12.5px; font-weight: 650; }
+  .hint { font-size: 12.5px; color: var(--muted); }
+  fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px 12px; margin: 0; display: grid; gap: 10px; }
+  legend { font-size: 12.5px; font-weight: 650; padding: 0 6px; }
+  .inline { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .inline input[type=number] { width: 80px; }
+  .switch { display: flex; align-items: center; gap: 8px; font-weight: 550; }
+  .switch input { width: 16px; height: 16px; accent-color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); background: var(--sunk); position: sticky; top: 0; }
+  .announce { display: grid; grid-template-columns: minmax(0, 380px) minmax(0, 1fr); gap: 12px; height: 100%; min-height: 0; }
+  .announce .form { max-width: none; }
+  .preview { max-width: 100%; max-height: 160px; border-radius: 8px; border: 1px solid var(--line); display: none; }
+  .progress { height: 6px; border-radius: 4px; background: var(--line); overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+
+  #v-data .layout { grid-template-columns: 280px minmax(0, 1fr); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { background: none; border: 0; padding: 6px 14px; font-weight: 550; color: var(--muted); }
+  .seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+  .editing { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--accent-soft); border-bottom: 1px solid var(--line); }
+  .editing .av { width: 40px; height: 40px; font-size: 16px; }
+  .editing small { display: block; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; font-size: 11px; color: var(--accent); }
+  .editing b { font-size: 16px; }
+  .rec { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+  .rec > header { height: auto; border: 0; padding: 10px 14px 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; background: none; }
+  .rec h3 { margin: 0; font-size: 14px; } .rec code.db { font-size: 12px; color: var(--muted); }
+  .rec textarea { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; width: calc(100% - 28px); margin: 8px 14px; min-height: 120px; tab-size: 2; }
+  .rec .inline { padding: 0 14px 12px; }
+  .btn.danger { background: none; color: var(--danger); border: 1px solid var(--danger); }
+  .hist { font-size: 12.5px; color: var(--muted); padding: 0 14px 10px; }
+  @media (max-width: 860px) {
+    body { height: auto; } main { overflow: visible; }
+    header { flex-wrap: wrap; height: auto; padding: 8px 12px; } .meta { display: none; }
+    #v-servers .layout, #v-dms .layout, #v-data .layout, .announce, .chat { grid-template-columns: 1fr; height: auto; }
+    .card { max-height: none; } .scroll { max-height: 220px; } .msgs { max-height: 55vh; }
+    .tree { max-height: 160px; border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+  body { font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; }
+  h1,h2,.brand span { font-family:"Poppins","Inter",sans-serif; }
+  button.primary, button[type=submit] { background:linear-gradient(135deg,#6366f1,#4f46e5); color:#fff; }
+  ::-webkit-scrollbar { width:12px; } ::-webkit-scrollbar-track { background:#050505; } ::-webkit-scrollbar-thumb { background:rgba(99,102,241,.4); border-radius:6px; border:3px solid #050505; }
+  * { scrollbar-width:thin; scrollbar-color:rgba(99,102,241,.4) #050505; }
+  .tbl { overflow-x: auto; }
+  .tbl td, .tbl th { font-size: 12.5px; }
+  .tbl td.wrap { overflow-wrap: anywhere; }
+  /* Small screens (KaiOS phones are about 240 px wide): one column, bigger targets, nothing that needs a mouse. */
+  @media (max-width: 520px) {
+    body { font-size: 13px; }
+    header { gap: 8px; padding: 6px 8px; }
+    nav { margin-left: 0; width: 100%; }
+    nav button { padding: 8px 9px; font-size: 13px; }
+    main { padding: 6px; }
+    .row { padding: 10px 10px; }
+    .btn, button.primary { min-height: 36px; }
+    .detail-head { padding: 8px 10px; } .tabs { margin-left: 0; flex-wrap: wrap; }
+    .form { padding: 10px; } .toolbar { padding: 8px; flex-wrap: wrap; }
+    .msg { grid-template-columns: 1fr; gap: 2px; padding: 6px 10px; } .msg .av { display: none; }
+    .composer { padding: 8px; } .composer .line { flex-direction: column; }
+    .announce { grid-template-columns: 1fr; height: auto; }
+    th, td { padding: 6px 6px; }
+    .editing { padding: 10px; }
+    .rec textarea { width: calc(100% - 20px); margin: 8px 10px; }
+    .scroll { max-height: 260px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="mark" id="botmark" aria-hidden="true">S</div><span id="botname">Shapes</span></div>
+  <nav role="tablist" aria-label="Sections">
+    <button role="tab" data-view="servers" aria-selected="true">Servers</button>
+    <button role="tab" data-view="dms" aria-selected="false">Direct messages</button>
+    <button role="tab" data-view="dmpeople" aria-selected="false">DM people</button>
+    <button role="tab" data-view="logs" aria-selected="false">Logs</button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="meta"><span id="stats"></span><span id="build"></span><!--SIGNOUT--></div>
+</header>
+
+<main>
+  <section class="view on" id="v-servers" aria-label="Servers">
+    <div class="layout">
+      <div class="card"><h2>Servers</h2><div class="scroll" id="serverlist"></div></div>
+      <div class="card" id="serverpane"><div class="empty">Choose a server.</div></div>
+    </div>
+  </section>
+
+  <section class="view" id="v-dms" aria-label="Direct messages">
+    <div class="layout">
+      <div class="card">
+        <h2>Conversations <button class="btn ghost" id="dmlogbtn" type="button" style="float:right;padding:2px 10px">DM log</button></h2>
+        <div class="toolbar" style="position:relative">
+          <input type="search" id="dmsearch" placeholder="Start a DM: search a name or paste an ID" autocomplete="off" aria-label="Find a person to message">
+        </div>
+        <div id="dmresults"></div>
+        <div class="scroll" id="dmlist"></div>
+      </div>
+      <div class="card" id="dmpane"><div class="empty">Open a conversation, or search for someone above.</div></div>
+    </div>
+  </section>
+
+  <section class="view" id="v-announce" aria-label="Announcements">
+    <div class="announce">
+      <div class="card">
+        <h2>Message</h2>
+        <form class="form" id="annform">
+          <div class="field"><label for="anntitle">Title <span class="muted">(optional)</span></label><input type="text" id="anntitle" maxlength="200"></div>
+          <div class="field"><label for="annmsg">Announcement</label><textarea id="annmsg" rows="7" required maxlength="4000"></textarea></div>
+          <div class="field"><label for="annimg">Image link <span class="muted">(optional)</span></label>
+            <input type="url" id="annimg" placeholder="https://…">
+            <span class="hint">Must be a public https link. Files can't be uploaded here.</span>
+            <img id="annprev" class="preview" alt="Image preview">
+          </div>
+          <div class="inline"><button class="btn" id="annsend" type="submit">Send to selected servers</button><span class="status" id="annstatus" role="status"></span></div>
+          <div class="progress" id="annprog" hidden><div></div></div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Where to send it</h2>
+        <div class="toolbar"><label class="switch"><input type="checkbox" id="annall" checked> Select all</label><span class="muted" id="anncount"></span></div>
+        <div class="scroll"><table><thead><tr><th style="width:36px"></th><th>Server</th><th>Channel</th><th>Result</th></tr></thead><tbody id="anntargets"></tbody></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-dmpeople" aria-label="DM people">
+    <div class="announce">
+      <div class="card">
+        <h2>Message</h2>
+        <form class="form" id="mdform">
+          <div class="field"><label for="mdtitle">Title <span class="muted">(optional)</span></label><input type="text" id="mdtitle" maxlength="200"></div>
+          <div class="field"><label for="mdmsg">Message</label><textarea id="mdmsg" rows="6" required maxlength="4000"></textarea></div>
+          <div class="field"><label for="mdimg">Image link <span class="muted">(optional)</span></label><input type="url" id="mdimg" placeholder="https://…"></div>
+          <div class="field"><label for="mdcolor">Embed colour</label><select id="mdcolor"></select></div>
+          <label class="switch"><input type="checkbox" id="mdhide"> Hide who sent it</label>
+          <span class="hint">Normally the message says which team member sent it. Hiding that sends it as plain Shapes.</span>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Who gets it</h2>
+        <div class="form">
+          <div class="field"><label for="mdids">People</label><textarea id="mdids" rows="5" placeholder="One ID or @mention per line, or separate them with commas"></textarea></div>
+          <label class="switch" id="mdeveryonebox" hidden><input type="checkbox" id="mdeveryone"> Everyone in every server <span class="muted">(bot owners only)</span></label>
+          <div class="inline"><button class="btn" id="mdsend" type="button">Send</button><span class="status" id="mdstatus" role="status"></span></div>
+          <div class="progress" id="mdprog" hidden><div></div></div>
+          <span class="hint">Up to 200 people at a time (owners have no limit). Each message goes out a moment apart so Discord doesn't rate-limit the bot.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-logs" aria-label="Logs">
+    <div class="layout" style="grid-template-columns: minmax(0, 1fr)">
+      <div class="card">
+        <h2>Logs</h2>
+        <div class="toolbar"><div class="seg" role="group" aria-label="Which log"><button data-log="actions" aria-pressed="true">Dashboard activity</button><button data-log="bot" aria-pressed="false" id="logbotbtn">Bot command log</button></div></div>
+        <div class="scroll tbl" id="logpane"><div class="empty">Loading…</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-data" aria-label="Edit data">
+    <div class="layout">
+      <div class="card">
+        <h2>Who or what to edit</h2>
+        <div class="toolbar"><div class="seg" role="group" aria-label="Type"><button data-kind="server" aria-pressed="true">Server</button><button data-kind="user" aria-pressed="false">User</button></div></div>
+        <div class="toolbar" id="dsearchbar" hidden><input type="search" id="dsearch" placeholder="Search a name, or paste an ID" autocomplete="off" aria-label="Find a user"></div>
+        <div class="scroll" id="dpicker"></div>
+      </div>
+      <div class="card" id="dpane"><div class="empty">Pick a server or a user to see and edit what the bot has saved for them.</div></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url, opts) {
+  const o = opts ? { ...opts } : {};
+  if (o.json !== undefined) { o.method = o.method || 'POST'; o.headers = { 'Content-Type': 'application/json' }; o.body = JSON.stringify(o.json); delete o.json; }
+  const r = await fetch(url, o);
+  if (r.status === 401) { location.href = '/login'; throw new Error('signed out'); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ('Request failed (' + r.status + ')'));
+  return data;
+}
+function initial(n) { return esc((String(n || '?').trim()[0] || '?').toUpperCase()); }
+function avatar(url, name, cls = '') {
+  return url ? `<img class="av ${cls}" src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="av ${cls}" aria-hidden="true">${initial(name)}</div>`;
+}
+function ago(v) {
+  if (!v) return '';
+  const d = typeof v === 'number' ? new Date(v * 1000) : new Date(v);
+  if (isNaN(d)) return '';
+  const sec = (Date.now() - d) / 1000;
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + (sec > 31536000 ? ' ' + d.getFullYear() : '');
+}
+const IMG = /\.(png|jpe?g|gif|webp|avif)(\?[^\s]*)?$/i;
+/* Escape first, then add links, inline code, bold, mentions and pictures, so nothing from a message can inject HTML. */
+function render(text, extraImages = []) {
+  const pics = [...extraImages];
+  let h = esc(text).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, (u) => {
+    const raw = u.replace(/&amp;/g, '&');
+    if (IMG.test(raw) && !pics.includes(raw)) pics.push(raw);
+    return `<a href="${esc(raw)}" target="_blank" rel="noopener noreferrer nofollow">${u}</a>`;
+  });
+  h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+       .replace(/&lt;@[!&amp;]*([^&\s]+?)&gt;/g, (_, id) => `<span class="mention">@${esc(id.length > 10 ? id.slice(0, 6) + '…' : id)}</span>`)
+       .replace(/&lt;#([^&\s]+?)&gt;/g, '<span class="mention">#channel</span>');
+  const imgs = pics.slice(0, 6).map(u => `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer"><img src="${esc(u)}" alt="Image in message" loading="lazy" referrerpolicy="no-referrer" onerror="this.closest('a').remove()"></a>`).join('');
+  return `<div class="body">${h}</div>${imgs ? `<div class="pics">${imgs}</div>` : ''}`;
+}
+function messageHTML(m) {
+  const quotes = (m.embeds || []).filter(e => e.title || e.description).map(e =>
+    `<div class="quote">${e.title ? `<b>${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener noreferrer">${esc(e.title)}</a>` : esc(e.title)}</b>` : ''}${e.description ? render(e.description) : ''}</div>`).join('');
+  return `<div class="msg">${avatar(m.avatar, m.author)}<div><span class="who">${esc(m.author)}</span>${m.bot ? '<span class="badge">BOT</span>' : ''}<time>${esc(ago(m.created_at))}</time>${m.content ? render(m.content, m.images) : (m.images.length ? render('', m.images) : '')}${quotes}</div></div>`;
+}
+
+/* ---------- navigation ---------- */
+$$('nav button').forEach(b => b.onclick = () => {
+  $$('nav button').forEach(x => x.setAttribute('aria-selected', x === b));
+  $$('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + b.dataset.view));
+  if (b.dataset.view === 'dms') loadDMs();
+  if (b.dataset.view === 'announce') loadTargets();
+  if (b.dataset.view === 'data') drawPicker();
+  if (b.dataset.view === 'dmpeople') drawDMPeople();
+  if (b.dataset.view === 'logs') loadLog();
+});
+
+/* ---------- overview ---------- */
+let servers = [], isOwner = false, colors = [];
+async function loadOverview() {
+  const d = await api('/api/overview');
+  servers = d.servers;
+  isOwner = !!d.is_owner; colors = d.colors || [];
+  const av = d.me && d.me.avatar;                  // the bot's own picture instead of an initial
+  if (av && $('#botmark').dataset.src !== av) {
+    const img = document.createElement('img'); img.alt = ''; img.referrerPolicy = 'no-referrer';
+    img.onload = () => { $('#botmark').textContent = ''; $('#botmark').appendChild(img); };
+    img.src = av; $('#botmark').dataset.src = av;
+  }
+  const up = d.uptime_seconds, days = Math.floor(up / 86400), hrs = Math.floor(up % 86400 / 3600), mins = Math.floor(up % 3600 / 60);
+  { const b = $('#build'), k = d.commit || {}, ak = d.api_commit || {}; b.textContent = '';
+    if (k.sha) { b.append(' · Bot '); if (k.url) { const a = document.createElement('a'); a.href = k.url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = k.sha; b.append(a); } else b.append(k.sha); }
+    if (ak.sha) b.append(' · API ' + ak.sha); }
+  $('#stats').textContent = `${servers.length} servers · ${d.commands.length} commands · up ${days ? days + 'd ' : ''}${hrs}h ${mins}m`;
+  $('#serverlist').innerHTML = servers.length ? servers.map(s =>
+    `<button class="row" data-id="${esc(s.id)}">${avatar(s.icon, s.name, 'sq')}<span class="name">${esc(s.name)}</span><span class="count" title="${s.people ?? '?'} people · ${s.bots ?? '?'} bots">${s.member_count ?? ''}</span></button>`).join('')
+    : '<div class="empty">The bot is not in any server yet.</div>';
+}
+$('#serverlist').onclick = e => { const r = e.target.closest('.row'); if (r) openServer(r.dataset.id); };
+
+/* ---------- server ---------- */
+let S = null, channel = null, poll = null;
+async function openServer(id) {
+  $$('#serverlist .row').forEach(r => r.setAttribute('aria-current', r.dataset.id === id));
+  const info = servers.find(s => s.id === id);
+  $('#serverpane').innerHTML = `<div class="empty">Loading…</div>`;
+  try {
+    const d = await api('/api/servers/' + encodeURIComponent(id));
+    S = { id, info, ...d, memberRows: [], next: undefined };
+    channel = null; clearInterval(poll);
+    $('#serverpane').innerHTML = `
+      <div class="detail">
+        <div class="detail-head">${avatar(info.icon, info.name, 'sq')}<h1>${esc(info.name)}</h1>
+          <span class="muted">${info.member_count ?? '?'} members${info.people != null ? ` (${info.people} people · ${info.bots ?? 0} bots)` : ''}</span>
+          <div class="tabs" role="tablist">
+            <button role="tab" data-pane="chat" aria-selected="true">Channels</button>
+            <button role="tab" data-pane="members" aria-selected="false">Members</button>
+            <button role="tab" data-pane="roles" aria-selected="false">Roles</button>
+          </div></div>
+        <div class="pane on" id="p-chat"></div><div class="pane" id="p-members"></div><div class="pane" id="p-roles"></div>
+      </div>`;
+    $$('#serverpane .tabs button').forEach(b => b.onclick = () => {
+      $$('#serverpane .tabs button').forEach(x => x.setAttribute('aria-selected', x === b));
+      $$('#serverpane .pane').forEach(p => p.classList.toggle('on', p.id === 'p-' + b.dataset.pane));
+      if (b.dataset.pane === 'members' && S.next === undefined) loadMembers();
+      if (b.dataset.pane === 'automod') loadAutomod();
+      if (b.dataset.pane !== 'chat') clearInterval(poll); else if (channel) startPoll();
+    });
+    drawChat(); drawRoles();
+  } catch (e) { $('#serverpane').innerHTML = `<div class="empty">Couldn't load this server: ${esc(e.message)}</div>`; }
+}
+function drawChat() {
+  const tree = S.categories.map(c => (c.name ? `<div class="cat">${esc(c.name)}</div>` : '') +
+    c.channels.map(ch => `<button class="row" data-id="${esc(ch.id)}" data-name="${esc(ch.name)}"><span class="name">${esc(ch.name)}</span></button>`).join('')).join('');
+  $('#p-chat').innerHTML = `<div class="chat"><div class="tree">${tree || '<div class="empty">No channels.</div>'}</div><div class="thread" id="thread"><div class="empty">Choose a channel.</div></div></div>`;
+  $('#p-chat .tree').onclick = e => { const r = e.target.closest('.row'); if (!r) return; $$('#p-chat .tree .row').forEach(x => x.setAttribute('aria-current', x === r)); openChannel(r.dataset.id, '# ' + r.dataset.name); };
+}
+function threadShell(title) {
+  $('#thread').innerHTML = `<div class="thread-head"><span>${esc(title)}</span><span class="muted" id="tstate"></span></div><div class="msgs" id="msgs"></div>
+    <form class="composer" id="composer"><div class="line"><textarea id="ctext" rows="2" placeholder="Message as the bot (Enter to send, Shift+Enter for a new line)" maxlength="4000"></textarea><button class="btn" type="submit">Send</button></div>
+    <div class="inline"><input type="url" id="cimg" placeholder="Image link (optional, https)" style="flex:1"><label class="switch"><input type="checkbox" id="chide"> Hide who sent it</label><span class="status" id="cstatus" role="status"></span></div></form>`;
+  const form = $('#composer'), box = $('#ctext');
+  box.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const st = $('#cstatus'); st.className = 'status'; st.textContent = '';
+    try {
+      await api('/api/channels/' + encodeURIComponent(channel) + '/send', { json: { message: box.value, image_url: $('#cimg').value, hidden: $('#chide').checked } });
+      box.value = ''; $('#cimg').value = ''; await loadMessages(true);
+    } catch (err) { st.className = 'status err'; st.textContent = err.message; }
+  };
+}
+function openChannel(id, title) { channel = id; threadShell(title); loadMessages(true); startPoll(); }
+function startPoll() { clearInterval(poll); poll = setInterval(() => loadMessages(false), 8000); }
+async function loadMessages(scroll) {
+  if (!channel) return;
+  const box = $('#msgs'); if (!box) return;
+  const atBottom = scroll || box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  try {
+    const d = await api('/api/channels/' + encodeURIComponent(channel) + '/messages?limit=60');
+    const list = d.messages.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    box.innerHTML = list.length ? list.map(messageHTML).join('') : '<div class="empty">No messages yet.</div>';
+    $('#tstate').textContent = '';
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch (e) { $('#tstate').textContent = 'Couldn’t refresh: ' + e.message; }
+}
+async function loadMembers() {
+  const pane = $('#p-members');
+  S.next = null; S.memberRows = [];
+  pane.innerHTML = `<div class="detail" style="width:100%"><div class="toolbar"><input type="search" id="mfilter" placeholder="Filter loaded members" aria-label="Filter members"><span class="muted" id="mcount"></span></div><div class="list" id="mlist"></div><div class="toolbar" id="mmore" hidden><button class="btn ghost" id="mbtn">Load more</button></div></div>`;
+  $('#mfilter').oninput = drawMembers; $('#mbtn').onclick = () => fetchMembers();
+  await fetchMembers();
+}
+async function fetchMembers() {
+  const btn = $('#mbtn'); if (btn) btn.disabled = true;
+  try {
+    const d = await api(`/api/servers/${encodeURIComponent(S.id)}/members` + (S.next ? '?after=' + encodeURIComponent(S.next) : ''));
+    S.memberRows.push(...d.members); S.next = d.next; drawMembers();
+  } catch (e) { $('#mlist').innerHTML = `<div class="empty">Couldn't load members: ${esc(e.message)}</div>`; }
+  if (btn) { btn.disabled = false; $('#mmore').hidden = !S.next; }
+}
+function drawMembers() {
+  const q = ($('#mfilter').value || '').toLowerCase(), roles = Object.fromEntries(S.roles.map(r => [r.id, r]));
+  const rows = S.memberRows.filter(m => !q || m.name.toLowerCase().includes(q) || m.display.toLowerCase().includes(q));
+  $('#mcount').textContent = rows.length + ' shown';
+  $('#mlist').innerHTML = rows.map(m => `<div class="row" style="cursor:default">${avatar(m.avatar, m.display)}<span class="name"><b>${esc(m.display)}</b>${m.display !== m.name ? ` <span class="muted">@${esc(m.name)}</span>` : ''}${m.bot ? '<span class="badge">BOT</span>' : ''}
+    <div>${m.roles.map(id => roles[id] ? `<span class="chip">${esc(roles[id].name)}</span>` : '').join('')}</div></span>
+    <button class="btn ghost" data-dm="${esc(m.id)}" data-n="${esc(m.display)}">Message</button></div>`).join('') || '<div class="empty">Nobody matches.</div>';
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-dm]'); if (!b) return;
+  try { const d = await api('/api/dms', { json: { user_id: b.dataset.dm, name: b.dataset.n } }); $('nav [data-view=dms]').click(); await loadDMs(); openDM(d.dm); }
+  catch (err) { alert(err.message); }
+});
+function colorOf(c) { if (c === null || c === undefined || c === 0 || c === '') return null; return typeof c === 'number' ? '#' + c.toString(16).padStart(6, '0') : String(c); }
+function drawRoles() {
+  $('#p-roles').innerHTML = `<div class="list">${S.roles.length ? S.roles.map(r => `<div class="row" style="cursor:default"><span class="dot" style="background:${esc(colorOf(r.color) || 'var(--muted)')}"></span><span class="name">${esc(r.name)}</span>${r.admin ? '<span class="badge">ADMIN</span>' : ''}</div>`).join('') : '<div class="empty">No roles.</div>'}</div>`;
+}
+
+/* ---------- automod ---------- */
+async function loadAutomod() {
+  const pane = $('#p-automod'); pane.innerHTML = '<div class="empty" style="width:100%">Loading…</div>';
+  try {
+    const c = await api(`/api/servers/${encodeURIComponent(S.id)}/automod`);
+    const R = c.rules, A = c.actions;
+    const chans = S.categories.flatMap(x => x.channels);
+    const sw = (id, label, on) => `<label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}> ${label}</label>`;
+    const num = (id, v, min, max) => `<input type="number" id="${id}" value="${esc(v)}" min="${min}" max="${max}">`;
+    pane.innerHTML = `<form class="form" id="amform">
+      ${sw('am-enabled', 'Automod is on for this server', c.enabled)}
+      <div class="field"><label for="am-log">Log channel</label><select id="am-log"><option value="">No log</option>${chans.map(ch => `<option value="${esc(ch.id)}" ${String(c.log_channel) === ch.id ? 'selected' : ''}># ${esc(ch.name)}</option>`).join('')}</select>
+        <span class="hint">Server admins are never checked.</span></div>
+      <fieldset><legend>Blocked words</legend>${sw('am-words', 'Delete messages containing these words', R.words.on)}<textarea id="am-list" rows="3" placeholder="One word per line or comma separated">${esc(R.words.list.join('\n'))}</textarea></fieldset>
+      <fieldset><legend>Links</legend>${sw('am-links', 'Delete messages with links', R.links.on)}${sw('am-invites', 'Delete server invites', R.invites.on)}
+        <div class="field"><label for="am-allow">Allowed domains</label><textarea id="am-allow" rows="2" placeholder="example.com">${esc(R.links.allow.join('\n'))}</textarea></div></fieldset>
+      <fieldset><legend>Behaviour</legend>
+        <div class="inline">${sw('am-caps', 'Too many capitals', R.caps.on)} from ${num('am-capspct', R.caps.percent, 30, 100)} % of letters</div>
+        <div class="inline">${sw('am-spam', 'Spam', R.spam.on)} ${num('am-spamn', R.spam.count, 2, 30)} messages in ${num('am-spams', R.spam.seconds, 1, 120)} seconds</div>
+        <div class="inline">${sw('am-mentions', 'Mass mentions', R.mentions.on)} more than ${num('am-mentionn', R.mentions.limit, 1, 50)} mentions</div></fieldset>
+      <fieldset><legend>Punishment</legend>
+        <div class="inline">${sw('am-warn', 'Warn in the channel', A.warn)}</div>
+        <div class="inline">Time out after ${num('am-tafter', A.timeout_after, 0, 50)} strikes for ${num('am-tmin', A.timeout_minutes, 1, 40320)} minutes <span class="hint">(0 = never)</span></div>
+        <div class="inline">Kick after ${num('am-kick', A.kick_after, 0, 50)} strikes <span class="hint">(0 = never)</span></div>
+        <div class="inline">Strikes expire after ${num('am-window', A.strike_minutes, 1, 1440)} minutes</div></fieldset>
+      <div class="inline"><button class="btn" type="submit">Save automod</button><span class="status" id="amstatus" role="status"></span></div></form>`;
+    $('#amform').onsubmit = async e => {
+      e.preventDefault(); const st = $('#amstatus'); st.className = 'status'; st.textContent = '';
+      const v = id => $('#' + id), on = id => v(id).checked;
+      const body = { enabled: on('am-enabled'), log_channel: v('am-log').value || null, rules: {
+        words: { on: on('am-words'), list: v('am-list').value }, links: { on: on('am-links'), allow: v('am-allow').value }, invites: { on: on('am-invites') },
+        caps: { on: on('am-caps'), percent: v('am-capspct').value }, spam: { on: on('am-spam'), count: v('am-spamn').value, seconds: v('am-spams').value },
+        mentions: { on: on('am-mentions'), limit: v('am-mentionn').value } },
+        actions: { delete: true, warn: on('am-warn'), timeout_after: v('am-tafter').value, timeout_minutes: v('am-tmin').value, kick_after: v('am-kick').value, strike_minutes: v('am-window').value } };
+      try { await api(`/api/servers/${encodeURIComponent(S.id)}/automod`, { json: body }); st.className = 'status ok'; st.textContent = 'Saved.'; }
+      catch (err) { st.className = 'status err'; st.textContent = err.message; }
+    };
+  } catch (e) { pane.innerHTML = `<div class="empty" style="width:100%">Couldn't load automod: ${esc(e.message)}</div>`; }
+}
+
+/* ---------- direct messages ---------- */
+let dmChannel = null, dmPoll = null, dms = [];
+async function loadDMs() {
+  try { dms = (await api('/api/dms')).dms; } catch (e) { dms = []; }
+  $('#dmlist').innerHTML = dms.length ? dms.map(d => `<button class="row" data-u="${esc(d.user_id)}" ${dmChannel === d.channel_id ? 'aria-current="true"' : ''}>${avatar(null, d.name)}<span class="name"><b>${esc(d.name)}</b><div class="muted" style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis">${esc(d.preview || '')}</div></span><span class="count">${esc(ago(d.last))}</span></button>`).join('')
+    : '<div class="empty">No conversations yet. People who message the bot appear here, or start one above.</div>';
+}
+async function showDMLog(userId) {
+  dmChannel = null; clearInterval(dmPoll);
+  $('#dmpane').innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const d = await api('/api/dms/log' + (userId ? '?user_id=' + encodeURIComponent(userId) : ''));
+    $('#dmpane').innerHTML = `<div class="thread" style="height:100%"><div class="thread-head"><span>DM log${userId ? ' for this person' : ''}</span><span class="muted">${d.total} message${d.total === 1 ? '' : 's'}, newest first</span></div>
+      <div class="msgs" style="display:grid;gap:8px;align-content:start">${d.log.length ? d.log.map(r => `<div class="rec" style="padding:8px 12px"><div class="muted" style="font-size:12.5px">${r.dir === 'out' ? '→ Sent to' : '← Received from'} <b>${esc(r.name || r.user_id)}</b> · ${esc(ago(r.at))} · ${esc(r.source || '')}</div><div style="white-space:pre-wrap;word-break:break-word">${esc(r.text || '')}</div></div>`).join('') : '<div class="empty">No DMs yet. Every DM the bot sends or receives shows up here.</div>'}</div></div>`;
+  } catch (e) { $('#dmpane').innerHTML = `<div class="empty">Couldn’t load: ${esc(e.message)}</div>`; }
+}
+$('#dmlogbtn').onclick = () => showDMLog('');
+$('#dmlist').onclick = e => { const r = e.target.closest('.row'); if (r) openDM(dms.find(d => d.user_id === r.dataset.u)); };
+function openDM(d) {
+  if (!d) return;
+  dmChannel = d.channel_id; clearInterval(dmPoll);
+  $('#dmpane').innerHTML = `<div class="thread" style="height:100%"><div class="thread-head"><span>${esc(d.name)}</span><span class="muted" id="dstate"></span><button class="btn ghost" type="button" id="dmlogone" style="padding:2px 10px">Log</button></div><div class="msgs" id="dmsgs"></div>
+    <form class="composer" id="dform"><div class="line"><textarea id="dtext" rows="2" placeholder="Write to ${esc(d.name)}" maxlength="4000"></textarea><button class="btn" type="submit">Send</button></div><div class="inline"><input type="url" id="dimg" placeholder="Image link (optional, https)" style="flex:1"><label class="switch"><input type="checkbox" id="dhide"> Hide who sent it</label><span class="status" id="dstatus" role="status"></span></div></form></div>`;
+  $('#dmlogone').onclick = () => showDMLog(d.user_id);
+  $('#dtext').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#dform').requestSubmit(); } };
+  $('#dform').onsubmit = async e => {
+    e.preventDefault(); const st = $('#dstatus'); st.className = 'status'; st.textContent = '';
+    try { await api('/api/channels/' + encodeURIComponent(dmChannel) + '/send', { json: { message: $('#dtext').value, image_url: $('#dimg').value, hidden: $('#dhide').checked } }); $('#dtext').value = ''; $('#dimg').value = ''; await loadDM(true); }
+    catch (err) { st.className = 'status err'; st.textContent = err.message; }
+  };
+  loadDM(true); dmPoll = setInterval(() => loadDM(false), 6000); loadDMs();
+}
+async function loadDM(scroll) {
+  const box = $('#dmsgs'); if (!box || !dmChannel) return;
+  const atBottom = scroll || box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  try {
+    const d = await api('/api/channels/' + encodeURIComponent(dmChannel) + '/messages?limit=60');
+    const list = d.messages.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    box.innerHTML = list.length ? list.map(messageHTML).join('') : '<div class="empty">No messages yet. Say hello.</div>';
+    $('#dstate').textContent = ''; if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch (e) { $('#dstate').textContent = 'Couldn’t refresh: ' + e.message; }
+}
+let searchTimer;
+$('#dmsearch').oninput = () => {
+  clearTimeout(searchTimer);
+  const q = $('#dmsearch').value.trim();
+  if (q.length < 2) { $('#dmresults').innerHTML = ''; return; }
+  searchTimer = setTimeout(async () => {
+    try {
+      const users = (await api('/api/users/search?q=' + encodeURIComponent(q))).users;
+      const byId = /^\d{5,}$/.test(q) || /^[A-Za-z0-9_-]{16,}$/.test(q) ? [{ id: q, display: 'Use ID ' + q, avatar: null, name: q }] : [];
+      $('#dmresults').innerHTML = [...users, ...byId].map(u => `<button class="row" data-dm="${esc(u.id)}" data-n="${esc(u.display)}">${avatar(u.avatar, u.display)}<span class="name">${esc(u.display)}${u.display !== u.name ? ` <span class="muted">@${esc(u.name)}</span>` : ''}</span></button>`).join('') || '<div class="empty" style="padding:10px">Nobody found. Paste their ID to message them directly.</div>';
+    } catch (e) { $('#dmresults').innerHTML = `<div class="empty" style="padding:10px">${esc(e.message)}</div>`; }
+  }, 250);
+};
+$('#dmresults').addEventListener('click', () => { $('#dmresults').innerHTML = ''; $('#dmsearch').value = ''; });
+
+/* ---------- announcements ---------- */
+let targets = [];
+async function loadTargets() {
+  if (targets.length) return;
+  try {
+    targets = (await api('/api/announce/targets')).servers;
+    $('#anntargets').innerHTML = targets.map(t => `<tr data-id="${esc(t.id)}"><td><input type="checkbox" class="pick" ${t.default ? 'checked' : 'disabled'} aria-label="Send to ${esc(t.name)}"></td><td>${esc(t.name)}</td>
+      <td><select class="chan" aria-label="Channel in ${esc(t.name)}">${t.channels.map(c => `<option value="${esc(c.id)}" ${c.id === t.default ? 'selected' : ''}># ${esc(c.name)}</option>`).join('') || '<option value="">No text channels</option>'}</select></td><td class="res muted">—</td></tr>`).join('')
+      || '<tr><td colspan="4" class="empty">No servers.</td></tr>';
+    countPicks();
+  } catch (e) { $('#anntargets').innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`; }
+}
+function countPicks() { const n = $$('#anntargets .pick:checked').length; $('#anncount').textContent = n + ' of ' + targets.length + ' selected'; }
+$('#anntargets').onchange = countPicks;
+$('#annall').onchange = e => { $$('#anntargets .pick:not(:disabled)').forEach(c => c.checked = e.target.checked); countPicks(); };
+$('#annimg').oninput = () => { const u = $('#annimg').value.trim(), p = $('#annprev'); if (/^https:\/\//.test(u)) { p.src = u; p.style.display = 'block'; p.onerror = () => p.style.display = 'none'; } else p.style.display = 'none'; };
+$('#annform').onsubmit = async e => {
+  e.preventDefault();
+  const st = $('#annstatus'); st.className = 'status'; st.textContent = '';
+  const map = {}; $$('#anntargets tr').forEach(tr => { if ($('.pick', tr)?.checked) map[tr.dataset.id] = $('.chan', tr).value; });
+  const n = Object.keys(map).length;
+  if (!n) { st.className = 'status err'; st.textContent = 'Pick at least one server.'; return; }
+  if (!confirm(`Send this announcement to ${n} server${n === 1 ? '' : 's'}? It can't be unsent from here.`)) return;
+  $('#annsend').disabled = true; $$('#anntargets .res').forEach(r => { r.textContent = 'waiting'; r.className = 'res muted'; });
+  const bar = $('#annprog'); bar.hidden = false; $('div', bar).style.width = '0';
+  try {
+    const { job, total } = await api('/api/announce', { json: { title: $('#anntitle').value, message: $('#annmsg').value, image_url: $('#annimg').value, targets: map } });
+    const seen = new Set();
+    while (true) {
+      await new Promise(r => setTimeout(r, 900));
+      const j = await api('/api/announce/' + encodeURIComponent(job));
+      j.results.forEach(r => { if (seen.has(r.server)) return; seen.add(r.server); const cell = $(`#anntargets tr[data-id="${CSS.escape(r.server)}"] .res`); if (cell) { cell.textContent = r.ok ? 'Sent' : (r.error || 'Failed'); cell.className = 'res ' + (r.ok ? 'ok' : 'err'); cell.style.color = r.ok ? 'var(--ok)' : 'var(--danger)'; } });
+      $('div', bar).style.width = (j.results.length / total * 100) + '%';
+      if (j.done) { const bad = j.results.filter(r => !r.ok).length; st.className = 'status ' + (bad ? 'err' : 'ok'); st.textContent = bad ? `${total - bad} sent, ${bad} failed.` : `Sent to ${total}.`; break; }
+    }
+  } catch (err) { st.className = 'status err'; st.textContent = err.message; }
+  $('#annsend').disabled = false;
+};
+
+/* ---------- DM people ---------- */
+let mdReady = false;
+function drawDMPeople() {
+  $('#mdeveryonebox').hidden = !isOwner;
+  const opts = '<option value="mine">My colour</option><option value="random">Random</option>' + colors.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
+  if ($('#mdcolor').dataset.n !== String(colors.length)) { $('#mdcolor').innerHTML = opts; $('#mdcolor').dataset.n = String(colors.length); }
+  if (mdReady) return; mdReady = true;
+  $('#mdeveryone').onchange = e => { $('#mdids').disabled = e.target.checked; };
+  $('#mdsend').onclick = async () => {
+    const st = $('#mdstatus'); st.className = 'status'; st.textContent = '';
+    const everyone = isOwner && $('#mdeveryone').checked, text = $('#mdmsg').value.trim();
+    if (!text) { st.className = 'status err'; st.textContent = 'Write the message first.'; return; }
+    if (!everyone && !$('#mdids').value.trim()) { st.className = 'status err'; st.textContent = 'Add at least one person.'; return; }
+    if (!confirm(everyone ? 'DM EVERYONE in every server? This can’t be undone.' : 'Send this DM now? It can’t be unsent.')) return;
+    $('#mdsend').disabled = true; const bar = $('#mdprog'); bar.hidden = false; $('div', bar).style.width = '0';
+    try {
+      const { job, total } = await api('/api/dm/send', { json: { message: text, title: $('#mdtitle').value, image_url: $('#mdimg').value, user_ids: $('#mdids').value, everyone,
+        hidden: $('#mdhide').checked, color: $('#mdcolor').value } });
+      st.textContent = 'Sending to ' + total + '…';
+      while (true) {
+        await new Promise(r => setTimeout(r, 1200));
+        const j = await api('/api/dm/job/' + encodeURIComponent(job));
+        $('div', bar).style.width = (j.total ? j.done / j.total * 100 : 0) + '%'; st.textContent = j.done + ' of ' + j.total + ' done…';
+        if (j.finished) { st.className = 'status ' + (j.failed ? 'err' : 'ok'); st.textContent = j.sent + ' sent' + (j.failed ? ', ' + j.failed + ' failed (DMs closed or not found)' : '') + '.' + (j.error ? ' ' + j.error : ''); break; }
+      }
+    } catch (err) { st.className = 'status err'; st.textContent = err.message; }
+    $('#mdsend').disabled = false;
+  };
+}
+
+/* ---------- logs ---------- */
+let logKind = 'actions';
+$$('#v-logs [data-log]').forEach(b => b.onclick = () => { logKind = b.dataset.log; $$('#v-logs [data-log]').forEach(x => x.setAttribute('aria-pressed', x === b)); loadLog(); });
+const when = t => t ? new Date(t * 1000).toLocaleString() : '';
+async function loadLog() {
+  $('#logbotbtn').hidden = true;                 // the Discord bot posts its command log to a channel (/botlog), it has no list here
+  const pane = $('#logpane'); pane.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    if (logKind === 'actions') {
+      const rows = (await api('/api/actions')).actions;
+      pane.innerHTML = rows.length ? `<table><thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(when(r.at))}</td><td>${esc(r.actor || '')}</td>
+        <td class="wrap"><b>${esc(r.kind)}</b> ${esc(r.detail || '')}${r.target ? `<div class="muted">${esc(r.target)}</div>` : ''}${r.server_id ? `<div class="muted">server ${esc(r.server_id)}</div>` : ''}</td></tr>`).join('')}</tbody></table>`
+        : '<div class="empty">Nothing has been done from the dashboards yet.</div>';
+      return;
+    }
+    const d = await api('/api/botlog'), c = d.config;
+    pane.innerHTML = `<form class="form" id="blform" style="max-width:none"><label class="switch"><input type="checkbox" id="bl-on" ${c.enabled ? 'checked' : ''}> Post the bot log to a channel</label>
+      <div class="field"><label for="bl-ch">Channel (name, #mention or ID)</label><input type="text" id="bl-ch" value="${esc(c.channel || '')}" placeholder="Leave as is to keep the current channel"></div>
+      <label class="switch"><input type="checkbox" id="bl-cmd" ${c.commands ? 'checked' : ''}> Every command run in any server</label>
+      <label class="switch"><input type="checkbox" id="bl-ev" ${c.events ? 'checked' : ''}> Bot events (joins, leaves, errors)</label>
+      <div class="inline"><button class="btn" type="submit">Save</button><span class="status" id="blstatus" role="status"></span></div></form>
+      ${d.rows.length ? `<table><thead><tr><th>When</th><th>Who</th><th>Command</th><th>Where</th></tr></thead><tbody>${d.rows.map(r => `<tr><td>${esc(when(r.at))}</td><td>${esc(r.username || r.user_id)}</td>
+        <td class="wrap">/${esc(r.command)} ${esc(r.args || '')}</td><td class="wrap">${esc(r.server || '')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No commands logged yet.</div>'}`;
+    $('#blform').onsubmit = async e => {
+      e.preventDefault(); const st = $('#blstatus'); st.className = 'status'; st.textContent = '';
+      try { const ch = $('#bl-ch').value.trim();
+        await api('/api/botlog', { json: { enabled: $('#bl-on').checked, commands: $('#bl-cmd').checked, events: $('#bl-ev').checked, channel: ch && ch !== String(c.channel || '') ? ch : '' } });
+        st.className = 'status ok'; st.textContent = 'Saved.'; }
+      catch (err) { st.className = 'status err'; st.textContent = err.message; }
+    };
+  } catch (e) { pane.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+/* ---------- data editor ---------- */
+let dkind = 'server', dtimer;
+$$('#v-data [data-kind]').forEach(b => b.onclick = () => {
+  dkind = b.dataset.kind; $$('#v-data [data-kind]').forEach(x => x.setAttribute('aria-pressed', x === b));
+  $('#dsearchbar').hidden = dkind !== 'user'; $('#dpane').innerHTML = '<div class="empty">Pick a ' + dkind + ' to edit.</div>'; drawPicker();
+});
+function drawPicker() {
+  if (dkind === 'server') {
+    $('#dpicker').innerHTML = servers.map(s => `<button class="row" data-id="${esc(s.id)}">${avatar(s.icon, s.name, 'sq')}<span class="name">${esc(s.name)}</span></button>`).join('') || '<div class="empty">No servers.</div>';
+  } else if (!$('#dsearch').value) { $('#dpicker').innerHTML = '<div class="empty">Search for someone, or paste their ID.</div>'; }
+}
+$('#dsearch').oninput = () => {
+  clearTimeout(dtimer); const q = $('#dsearch').value.trim();
+  if (q.length < 2) { drawPicker(); return; }
+  dtimer = setTimeout(async () => {
+    try {
+      const users = (await api('/api/users/search?q=' + encodeURIComponent(q))).users;
+      const byId = /^[A-Za-z0-9_-]{5,}$/.test(q) && !users.some(u => u.id === q) ? [{ id: q, display: 'Edit by ID: ' + q, name: q, avatar: null }] : [];
+      $('#dpicker').innerHTML = [...users, ...byId].map(u => `<button class="row" data-id="${esc(u.id)}">${avatar(u.avatar, u.display)}<span class="name">${esc(u.display)}${u.display !== u.name ? ` <span class="muted">@${esc(u.name)}</span>` : ''}</span></button>`).join('') || '<div class="empty">Nobody found.</div>';
+    } catch (e) { $('#dpicker').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }, 250);
+};
+$('#dpicker').onclick = e => { const r = e.target.closest('.row'); if (!r) return; $$('#dpicker .row').forEach(x => x.setAttribute('aria-current', x === r)); openData(dkind, r.dataset.id); };
+async function openData(kind, id) {
+  $('#dpane').innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const d = await api(`/api/data/${kind}/${encodeURIComponent(id)}`);
+    const en = d.entity;
+    $('#dpane').innerHTML = `<div class="editing">${avatar(en.avatar, en.name, kind === 'server' ? 'sq' : '')}<div><small>Editing ${esc(kind)}</small><b>${esc(en.name)}</b> <span class="muted">${esc(en.note || '')} · ID ${esc(en.id)}</span></div></div>
+      <div class="scroll" style="padding:12px;display:grid;gap:12px;align-content:start" id="recs">${d.records.map((r, i) => recHTML(r, i)).join('')}
+      ${d.history.length ? `<div class="rec"><header><h3>Recent changes</h3></header><div class="hist" style="padding-top:8px">${d.history.map(h => `${esc(ago(h.at))} · ${esc(h.action)} ${esc(h.db)}`).join('<br>')}</div></div>` : ''}</div>`;
+    d.records.forEach((r, i) => wireRec(kind, id, r, i));
+  } catch (e) { $('#dpane').innerHTML = `<div class="empty">Couldn't load: ${esc(e.message)}</div>`; }
+}
+const pretty = v => v === null || v === undefined ? '' : JSON.stringify(v, null, 2);
+function recHTML(r, i) {
+  if (r.readonly) return `<div class="rec" id="rec${i}"><header><h3>${esc(r.label)}</h3><code class="db">${esc(r.db)}</code><span class="muted">${esc(r.about)}</span>${r.exists ? '' : '<span class="badge">NOTHING LINKED</span>'}</header>
+    <pre style="margin:0;padding:10px 14px;overflow:auto;max-height:260px;font-size:12.5px">${r.exists ? esc(pretty(r.value)) : 'Nothing here yet.'}</pre></div>`;
+  return `<div class="rec" id="rec${i}"><header><h3>${esc(r.label)}</h3><code class="db">${esc(r.db)}</code><span class="muted">${esc(r.about)}</span>${r.exists ? '' : '<span class="badge">NOTHING SAVED</span>'}</header>
+    <textarea spellcheck="false" aria-label="${esc(r.label)} data (JSON)" placeholder="Nothing saved yet. Paste JSON here to create it.">${esc(pretty(r.value))}</textarea>
+    <div class="inline"><button class="btn" data-a="save">Save</button><button class="btn ghost" data-a="revert">Revert</button><button class="btn danger" data-a="delete">Delete</button><span class="status" role="status"></span></div></div>`;
+}
+function wireRec(kind, id, r, i) {
+  if (r.readonly) return;
+  const box = $('#rec' + i), ta = $('textarea', box), st = $('.status', box);
+  const say = (m, c) => { st.className = 'status ' + (c || ''); st.textContent = m; };
+  ta.onkeydown = e => { if (e.key === 'Tab') { e.preventDefault(); const p = ta.selectionStart; ta.setRangeText('  ', p, ta.selectionEnd, 'end'); } };
+  $('[data-a=revert]', box).onclick = () => { ta.value = pretty(r.value); say(''); };
+  $('[data-a=save]', box).onclick = async () => {
+    let value; try { value = JSON.parse(ta.value); } catch (e) { say('That isn’t valid JSON: ' + e.message, 'err'); return; }
+    if (!confirm(`Save ${r.label} for ${$('.editing b').textContent}?`)) return;
+    try { const out = await api(`/api/data/${kind}/${encodeURIComponent(id)}/${r.db}`, { method: 'PUT', json: { value } }); r.value = out.value; ta.value = pretty(out.value); say('Saved.', 'ok'); }
+    catch (e) { say(e.message, 'err'); }
+  };
+  $('[data-a=delete]', box).onclick = async () => {
+    if (!confirm(`Delete ${r.label} for ${$('.editing b').textContent}? The bot will treat it as never set.`)) return;
+    try { await api(`/api/data/${kind}/${encodeURIComponent(id)}/${r.db}`, { method: 'DELETE' }); r.value = null; ta.value = ''; say('Deleted.', 'ok'); }
+    catch (e) { say(e.message, 'err'); }
+  };
+}
+
+loadOverview().catch(e => { $('#serverlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+setInterval(() => loadOverview().catch(() => {}), 60000);
+</script>
+<script>if (window.self !== window.top) { const so = document.getElementById("signout"); if (so) so.remove(); }</script>
+</body>
+</html>
