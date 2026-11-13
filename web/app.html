@@ -16,14 +16,17 @@
   a { color: var(--accent); }
   button, input, select, textarea { font: inherit; color: inherit; }
   button { cursor: pointer; }
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  :focus { outline: 2px solid var(--accent); outline-offset: 1px; }      /* :focus-visible is too new for KaiOS 3 */
+  input:focus, textarea:focus, select:focus { outline-offset: 0; }
+  [hidden] { display: none !important; }
   .muted { color: var(--muted); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
   header { display: flex; align-items: center; gap: 16px; padding: 0 16px; height: 52px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
   .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -.01em; }
-  .mark { width: 24px; height: 24px; border-radius: 6px; background: var(--ink); color: var(--bg); display: grid; place-items: center; font-size: 13px; font-weight: 700; }
-  nav { display: flex; gap: 2px; margin-left: 8px; }
+  .mark { width: 28px; height: 28px; border-radius: 50%; background: var(--ink); color: var(--bg); display: grid; place-items: center; font-size: 13px; font-weight: 700; overflow: hidden; flex: none; }
+  .mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  nav { display: flex; flex-wrap: wrap; gap: 2px; margin-left: 8px; }
   nav button { background: none; border: 0; padding: 7px 12px; border-radius: 7px; color: var(--muted); font-weight: 550; }
   nav button:hover { background: var(--sunk); color: var(--ink); }
   nav button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
@@ -152,15 +155,39 @@
   button.primary, button[type=submit] { background:linear-gradient(135deg,#6366f1,#4f46e5); color:#fff; }
   ::-webkit-scrollbar { width:12px; } ::-webkit-scrollbar-track { background:#050505; } ::-webkit-scrollbar-thumb { background:rgba(99,102,241,.4); border-radius:6px; border:3px solid #050505; }
   * { scrollbar-width:thin; scrollbar-color:rgba(99,102,241,.4) #050505; }
+  .tbl { overflow-x: auto; }
+  .tbl td, .tbl th { font-size: 12.5px; }
+  .tbl td.wrap { overflow-wrap: anywhere; }
+  /* Small screens (KaiOS phones are about 240 px wide): one column, bigger targets, nothing that needs a mouse. */
+  @media (max-width: 520px) {
+    body { font-size: 13px; }
+    header { gap: 8px; padding: 6px 8px; }
+    nav { margin-left: 0; width: 100%; }
+    nav button { padding: 8px 9px; font-size: 13px; }
+    main { padding: 6px; }
+    .row { padding: 10px 10px; }
+    .btn, button.primary { min-height: 36px; }
+    .detail-head { padding: 8px 10px; } .tabs { margin-left: 0; flex-wrap: wrap; }
+    .form { padding: 10px; } .toolbar { padding: 8px; flex-wrap: wrap; }
+    .msg { grid-template-columns: 1fr; gap: 2px; padding: 6px 10px; } .msg .av { display: none; }
+    .composer { padding: 8px; } .composer .line { flex-direction: column; }
+    .announce { grid-template-columns: 1fr; height: auto; }
+    th, td { padding: 6px 6px; }
+    .editing { padding: 10px; }
+    .rec textarea { width: calc(100% - 20px); margin: 8px 10px; }
+    .scroll { max-height: 260px; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <div class="brand"><div class="mark">S</div><span id="botname">Shapes</span></div>
+  <div class="brand"><div class="mark" id="botmark" aria-hidden="true">S</div><span id="botname">Shapes</span></div>
   <nav role="tablist" aria-label="Sections">
     <button role="tab" data-view="servers" aria-selected="true">Servers</button>
     <button role="tab" data-view="dms" aria-selected="false">Direct messages</button>
     <button role="tab" data-view="announce" aria-selected="false">Announcements</button>
+    <button role="tab" data-view="dmpeople" aria-selected="false">DM people</button>
+    <button role="tab" data-view="logs" aria-selected="false">Logs</button>
     <button role="tab" data-view="data" aria-selected="false">Data</button>
   </nav>
   <div class="spacer"></div>
@@ -209,6 +236,42 @@
         <h2>Where to send it</h2>
         <div class="toolbar"><label class="switch"><input type="checkbox" id="annall" checked> Select all</label><span class="muted" id="anncount"></span></div>
         <div class="scroll"><table><thead><tr><th style="width:36px"></th><th>Server</th><th>Channel</th><th>Result</th></tr></thead><tbody id="anntargets"></tbody></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-dmpeople" aria-label="DM people">
+    <div class="announce">
+      <div class="card">
+        <h2>Message</h2>
+        <form class="form" id="mdform">
+          <div class="field"><label for="mdtitle">Title <span class="muted">(optional)</span></label><input type="text" id="mdtitle" maxlength="200"></div>
+          <div class="field"><label for="mdmsg">Message</label><textarea id="mdmsg" rows="6" required maxlength="4000"></textarea></div>
+          <div class="field"><label for="mdimg">Image link <span class="muted">(optional)</span></label><input type="url" id="mdimg" placeholder="https://…"></div>
+          <div class="field"><label for="mdcolor">Embed colour</label><select id="mdcolor"></select></div>
+          <label class="switch"><input type="checkbox" id="mdhide"> Hide who sent it</label>
+          <span class="hint">Normally the message says which team member sent it. Hiding that sends it as plain Shapes.</span>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Who gets it</h2>
+        <div class="form">
+          <div class="field"><label for="mdids">People</label><textarea id="mdids" rows="5" placeholder="One ID or @mention per line, or separate them with commas"></textarea></div>
+          <label class="switch" id="mdeveryonebox" hidden><input type="checkbox" id="mdeveryone"> Everyone in every server <span class="muted">(bot owners only)</span></label>
+          <div class="inline"><button class="btn" id="mdsend" type="button">Send</button><span class="status" id="mdstatus" role="status"></span></div>
+          <div class="progress" id="mdprog" hidden><div></div></div>
+          <span class="hint">Up to 200 people at a time (owners have no limit). Each message goes out a moment apart so Yapin' doesn't block the bot.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-logs" aria-label="Logs">
+    <div class="layout" style="grid-template-columns: minmax(0, 1fr)">
+      <div class="card">
+        <h2>Logs</h2>
+        <div class="toolbar"><div class="seg" role="group" aria-label="Which log"><button data-log="actions" aria-pressed="true">Dashboard activity</button><button data-log="bot" aria-pressed="false" id="logbotbtn">Bot command log</button></div></div>
+        <div class="scroll tbl" id="logpane"><div class="empty">Loading…</div></div>
       </div>
     </div>
   </section>
@@ -281,14 +344,22 @@ $$('nav button').forEach(b => b.onclick = () => {
   if (b.dataset.view === 'dms') loadDMs();
   if (b.dataset.view === 'announce') loadTargets();
   if (b.dataset.view === 'data') drawPicker();
+  if (b.dataset.view === 'dmpeople') drawDMPeople();
+  if (b.dataset.view === 'logs') loadLog();
 });
 
 /* ---------- overview ---------- */
-let servers = [];
+let servers = [], isOwner = false, colors = [];
 async function loadOverview() {
   const d = await api('/api/overview');
   servers = d.servers;
-  $('#botname').textContent = (d.me && (d.me.username || d.me.display_name)) || 'Shapes';
+  isOwner = !!d.is_owner; colors = d.colors || [];
+  const av = d.me && d.me.avatar;                  // the bot's own picture instead of an initial
+  if (av && $('#botmark').dataset.src !== av) {
+    const img = document.createElement('img'); img.alt = ''; img.referrerPolicy = 'no-referrer';
+    img.onload = () => { $('#botmark').textContent = ''; $('#botmark').appendChild(img); };
+    img.src = av; $('#botmark').dataset.src = av;
+  }
   const up = d.uptime_seconds, days = Math.floor(up / 86400), hrs = Math.floor(up % 86400 / 3600), mins = Math.floor(up % 3600 / 60);
   $('#stats').textContent = `${servers.length} servers · ${d.commands.length} commands · up ${days ? days + 'd ' : ''}${hrs}h ${mins}m`;
   $('#serverlist').innerHTML = servers.length ? servers.map(s =>
@@ -338,14 +409,14 @@ function drawChat() {
 function threadShell(title) {
   $('#thread').innerHTML = `<div class="thread-head"><span>${esc(title)}</span><span class="muted" id="tstate"></span></div><div class="msgs" id="msgs"></div>
     <form class="composer" id="composer"><div class="line"><textarea id="ctext" rows="2" placeholder="Message as the bot (Enter to send, Shift+Enter for a new line)" maxlength="4000"></textarea><button class="btn" type="submit">Send</button></div>
-    <div class="inline"><input type="url" id="cimg" placeholder="Image link (optional, https)" style="flex:1"><span class="status" id="cstatus" role="status"></span></div></form>`;
+    <div class="inline"><input type="url" id="cimg" placeholder="Image link (optional, https)" style="flex:1"><label class="switch"><input type="checkbox" id="chide"> Hide who sent it</label><span class="status" id="cstatus" role="status"></span></div></form>`;
   const form = $('#composer'), box = $('#ctext');
   box.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } };
   form.onsubmit = async e => {
     e.preventDefault();
     const st = $('#cstatus'); st.className = 'status'; st.textContent = '';
     try {
-      await api('/api/channels/' + encodeURIComponent(channel) + '/send', { json: { message: box.value, image_url: $('#cimg').value } });
+      await api('/api/channels/' + encodeURIComponent(channel) + '/send', { json: { message: box.value, image_url: $('#cimg').value, hidden: $('#chide').checked } });
       box.value = ''; $('#cimg').value = ''; await loadMessages(true);
     } catch (err) { st.className = 'status err'; st.textContent = err.message; }
   };
@@ -459,12 +530,12 @@ function openDM(d) {
   if (!d) return;
   dmChannel = d.channel_id; clearInterval(dmPoll);
   $('#dmpane').innerHTML = `<div class="thread" style="height:100%"><div class="thread-head"><span>${esc(d.name)}</span><span class="muted" id="dstate"></span><button class="btn ghost" type="button" id="dmlogone" style="padding:2px 10px">Log</button></div><div class="msgs" id="dmsgs"></div>
-    <form class="composer" id="dform"><div class="line"><textarea id="dtext" rows="2" placeholder="Write to ${esc(d.name)}" maxlength="4000"></textarea><button class="btn" type="submit">Send</button></div><div class="inline"><input type="url" id="dimg" placeholder="Image link (optional, https)" style="flex:1"><span class="status" id="dstatus" role="status"></span></div></form></div>`;
+    <form class="composer" id="dform"><div class="line"><textarea id="dtext" rows="2" placeholder="Write to ${esc(d.name)}" maxlength="4000"></textarea><button class="btn" type="submit">Send</button></div><div class="inline"><input type="url" id="dimg" placeholder="Image link (optional, https)" style="flex:1"><label class="switch"><input type="checkbox" id="dhide"> Hide who sent it</label><span class="status" id="dstatus" role="status"></span></div></form></div>`;
   $('#dmlogone').onclick = () => showDMLog(d.user_id);
   $('#dtext').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#dform').requestSubmit(); } };
   $('#dform').onsubmit = async e => {
     e.preventDefault(); const st = $('#dstatus'); st.className = 'status'; st.textContent = '';
-    try { await api('/api/channels/' + encodeURIComponent(dmChannel) + '/send', { json: { message: $('#dtext').value, image_url: $('#dimg').value } }); $('#dtext').value = ''; $('#dimg').value = ''; await loadDM(true); }
+    try { await api('/api/channels/' + encodeURIComponent(dmChannel) + '/send', { json: { message: $('#dtext').value, image_url: $('#dimg').value, hidden: $('#dhide').checked } }); $('#dtext').value = ''; $('#dimg').value = ''; await loadDM(true); }
     catch (err) { st.className = 'status err'; st.textContent = err.message; }
   };
   loadDM(true); dmPoll = setInterval(() => loadDM(false), 6000); loadDMs();
@@ -532,6 +603,69 @@ $('#annform').onsubmit = async e => {
   } catch (err) { st.className = 'status err'; st.textContent = err.message; }
   $('#annsend').disabled = false;
 };
+
+/* ---------- DM people ---------- */
+let mdReady = false;
+function drawDMPeople() {
+  $('#mdeveryonebox').hidden = !isOwner;
+  const opts = '<option value="mine">My colour</option><option value="random">Random</option>' + colors.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
+  if ($('#mdcolor').dataset.n !== String(colors.length)) { $('#mdcolor').innerHTML = opts; $('#mdcolor').dataset.n = String(colors.length); }
+  if (mdReady) return; mdReady = true;
+  $('#mdeveryone').onchange = e => { $('#mdids').disabled = e.target.checked; };
+  $('#mdsend').onclick = async () => {
+    const st = $('#mdstatus'); st.className = 'status'; st.textContent = '';
+    const everyone = isOwner && $('#mdeveryone').checked, text = $('#mdmsg').value.trim();
+    if (!text) { st.className = 'status err'; st.textContent = 'Write the message first.'; return; }
+    if (!everyone && !$('#mdids').value.trim()) { st.className = 'status err'; st.textContent = 'Add at least one person.'; return; }
+    if (!confirm(everyone ? 'DM EVERYONE in every server? This can’t be undone.' : 'Send this DM now? It can’t be unsent.')) return;
+    $('#mdsend').disabled = true; const bar = $('#mdprog'); bar.hidden = false; $('div', bar).style.width = '0';
+    try {
+      const { job, total } = await api('/api/dm/send', { json: { message: text, title: $('#mdtitle').value, image_url: $('#mdimg').value, user_ids: $('#mdids').value, everyone,
+        hidden: $('#mdhide').checked, color: $('#mdcolor').value } });
+      st.textContent = 'Sending to ' + total + '…';
+      while (true) {
+        await new Promise(r => setTimeout(r, 1200));
+        const j = await api('/api/dm/job/' + encodeURIComponent(job));
+        $('div', bar).style.width = (j.total ? j.done / j.total * 100 : 0) + '%'; st.textContent = j.done + ' of ' + j.total + ' done…';
+        if (j.finished) { st.className = 'status ' + (j.failed ? 'err' : 'ok'); st.textContent = j.sent + ' sent' + (j.failed ? ', ' + j.failed + ' failed (DMs closed or not found)' : '') + '.' + (j.error ? ' ' + j.error : ''); break; }
+      }
+    } catch (err) { st.className = 'status err'; st.textContent = err.message; }
+    $('#mdsend').disabled = false;
+  };
+}
+
+/* ---------- logs ---------- */
+let logKind = 'actions';
+$$('#v-logs [data-log]').forEach(b => b.onclick = () => { logKind = b.dataset.log; $$('#v-logs [data-log]').forEach(x => x.setAttribute('aria-pressed', x === b)); loadLog(); });
+const when = t => t ? new Date(t * 1000).toLocaleString() : '';
+async function loadLog() {
+  $('#logbotbtn').hidden = !isOwner;
+  const pane = $('#logpane'); pane.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    if (logKind === 'actions') {
+      const rows = (await api('/api/actions')).actions;
+      pane.innerHTML = rows.length ? `<table><thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(when(r.at))}</td><td>${esc(r.actor || '')}</td>
+        <td class="wrap"><b>${esc(r.kind)}</b> ${esc(r.detail || '')}${r.target ? `<div class="muted">${esc(r.target)}</div>` : ''}${r.server_id ? `<div class="muted">server ${esc(r.server_id)}</div>` : ''}</td></tr>`).join('')}</tbody></table>`
+        : '<div class="empty">Nothing has been done from the dashboards yet.</div>';
+      return;
+    }
+    const d = await api('/api/botlog'), c = d.config;
+    pane.innerHTML = `<form class="form" id="blform" style="max-width:none"><label class="switch"><input type="checkbox" id="bl-on" ${c.enabled ? 'checked' : ''}> Post the bot log to a channel</label>
+      <div class="field"><label for="bl-ch">Channel (name, #mention or ID)</label><input type="text" id="bl-ch" value="${esc(c.channel || '')}" placeholder="Leave as is to keep the current channel"></div>
+      <label class="switch"><input type="checkbox" id="bl-cmd" ${c.commands ? 'checked' : ''}> Every command run in any server</label>
+      <label class="switch"><input type="checkbox" id="bl-ev" ${c.events ? 'checked' : ''}> Bot events (joins, leaves, errors)</label>
+      <div class="inline"><button class="btn" type="submit">Save</button><span class="status" id="blstatus" role="status"></span></div></form>
+      ${d.rows.length ? `<table><thead><tr><th>When</th><th>Who</th><th>Command</th><th>Where</th></tr></thead><tbody>${d.rows.map(r => `<tr><td>${esc(when(r.at))}</td><td>${esc(r.username || r.user_id)}</td>
+        <td class="wrap">/${esc(r.command)} ${esc(r.args || '')}</td><td class="wrap">${esc(r.server || '')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No commands logged yet.</div>'}`;
+    $('#blform').onsubmit = async e => {
+      e.preventDefault(); const st = $('#blstatus'); st.className = 'status'; st.textContent = '';
+      try { const ch = $('#bl-ch').value.trim();
+        await api('/api/botlog', { json: { enabled: $('#bl-on').checked, commands: $('#bl-cmd').checked, events: $('#bl-ev').checked, channel: ch && ch !== String(c.channel || '') ? ch : '' } });
+        st.className = 'status ok'; st.textContent = 'Saved.'; }
+      catch (err) { st.className = 'status err'; st.textContent = err.message; }
+    };
+  } catch (e) { pane.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
 
 /* ---------- data editor ---------- */
 let dkind = 'server', dtimer;

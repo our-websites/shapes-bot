@@ -7641,6 +7641,7 @@ def api_overview():
     return jsonify({
         "ready": True, "me": {**dict(bot.me or {}), "avatar": _avatar_of(dict(bot.me or {}))}, "uptime_seconds": int(time.time() - started_at),
         "storage": __import__("tables").backend_summary(), "commands": sorted(bot.commands), "servers": servers,
+        "is_owner": actor_is_owner(), "colors": color_choices(),
     })
 
 
