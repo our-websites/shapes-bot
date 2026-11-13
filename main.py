@@ -10,6 +10,9 @@ Layout of this file:
   4. events (counting, autorole, ready)
   5. web server + startup
 """
+
+import sys
+sys.dont_write_bytecode = True      # don't litter __pycache__ folders
 import asyncio
 import base64
 import hashlib
@@ -1599,6 +1602,20 @@ def human_count(sid, total=None):
     return int(total) if total is not None else None
 
 
+def server_counts(sid, total=None):
+    """(total, people, bots) for a server. Total is what the API reports (bots included), people are counted from the member list."""
+    try:
+        total = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total = None
+    people = human_count(sid, total)
+    if total is None:
+        total = people
+    if people is None:
+        return total, None, None
+    return max(total, people), people, max(0, max(total, people) - people)
+
+
 def human_counts(servers):
     """{server id: people} for a list of server dicts, looked up a few at a time."""
     def one(s):
@@ -2661,11 +2678,15 @@ def _server_event(kind, sid, name, data, total):
     name = name or str(sid)
     fields = [{"name": "Server", "value": f"{name}\\n`{sid}`", "inline": True}]
     try:
-        members = human_count(sid, _first(data, "member_count", "members_count", "memberCount"))
+        members, people, bots_n = server_counts(sid, _first(data, "member_count", "members_count", "memberCount"))
     except Exception:
         members = _first(data, "member_count", "members_count", "memberCount")
+        people = bots_n = None
     if members is not None:
-        fields.append({"name": "Members", "value": f"{members:,}" if isinstance(members, int) else str(members), "inline": True})
+        text = f"**{members:,}** total" if isinstance(members, int) else str(members)
+        if people is not None:
+            text += f"\n{people:,} people · {bots_n:,} bots"
+        fields.append({"name": "Members", "value": text, "inline": True})
     owner = data.get("owner_id")
     if owner:
         fields.append({"name": "Owner", "value": f"<@{owner}>", "inline": True})
@@ -3271,8 +3292,9 @@ def server_summary(sid):
     categories = {str(_first(c.get("category") or {}, "id") or c.get("category_id")) for c in channels if c.get("category") or c.get("category_id")}
     owner = _first(info, "owner_id", "ownerId")
     owner = str(owner.get("id") if isinstance(owner, dict) else owner) if owner is not None else None
+    counts = server_counts(sid, total)
     return {"id": sid, "name": info.get("name") or "Server", "description": str(info.get("description") or "")[:400], "owner": owner,
-            "members": human_count(sid, total), "humans": human_count(sid, total), "bots": bots,
+            "members": counts[0], "humans": counts[1], "bots": counts[2],
             "channels": len(channels), "text": texts, "voice": len(channels) - texts, "categories": len(categories), "roles": len(roles),
             "extra": [(label, str(info[key])) for key, label in (("verified", "Verified"), ("public", "Public"), ("boost_level", "Boost level")) if info.get(key) not in (None, "", False)],
             "icon": _icon_of(info), "banner": _asset_url(_first(info, "banner_path", "banner_url", "banner"), "banners")}
@@ -7607,8 +7629,15 @@ def api_overview():
     raw = list(cached("servers", 15, bot.servers))
     counts = human_counts(raw)                    # people only: the API's own count includes bots
     for s in raw:
-        servers.append({**dict(s), "id": str(s.get("id")), "name": s.get("name") or str(s.get("id")), "member_count": counts.get(str(s.get("id"))),
-                        "icon": _icon_of(s)})
+        sid = str(s.get("id"))
+        people = counts.get(sid)
+        try:
+            total = int(_first(s, "member_count", "members_count", "memberCount"))
+        except (TypeError, ValueError):
+            total = people
+        total = max(total, people) if total is not None and people is not None else total
+        servers.append({**dict(s), "id": sid, "name": s.get("name") or sid, "member_count": total, "people": people,
+                        "bots": (total - people) if total is not None and people is not None else None, "icon": _icon_of(s)})
     return jsonify({
         "ready": True, "me": {**dict(bot.me or {}), "avatar": _avatar_of(dict(bot.me or {}))}, "uptime_seconds": int(time.time() - started_at),
         "storage": __import__("tables").backend_summary(), "commands": sorted(bot.commands), "servers": servers,
@@ -8282,7 +8311,8 @@ def _entity(kind, entity_id):
         info = dict(cached(f"server:{entity_id}", 30, lambda: bot.server(entity_id)))
         return {"kind": "server", "id": entity_id, "name": info.get("name") or entity_id,
                 "avatar": _icon_of(info),
-                "note": f"{human_count(entity_id, _first(info, 'member_count', 'members_count', 'memberCount')) or '?'} people"}
+                "note": (lambda c: f"{c[0] if c[0] is not None else '?'} members" + (f" ({c[1]:,} people · {c[2]:,} bots)" if c[1] is not None else ""))(
+                    server_counts(entity_id, _first(info, 'member_count', 'members_count', 'memberCount')))}
     p = _person(dict(bot.user(entity_id)))
     return {"kind": "user", "id": entity_id, "name": p["display"], "avatar": p["avatar"], "note": f"@{p['name']}" + (" · bot" if p["bot"] else "")}
 

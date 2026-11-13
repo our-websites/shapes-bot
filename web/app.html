@@ -292,7 +292,7 @@ async function loadOverview() {
   const up = d.uptime_seconds, days = Math.floor(up / 86400), hrs = Math.floor(up % 86400 / 3600), mins = Math.floor(up % 3600 / 60);
   $('#stats').textContent = `${servers.length} servers · ${d.commands.length} commands · up ${days ? days + 'd ' : ''}${hrs}h ${mins}m`;
   $('#serverlist').innerHTML = servers.length ? servers.map(s =>
-    `<button class="row" data-id="${esc(s.id)}">${avatar(s.icon, s.name, 'sq')}<span class="name">${esc(s.name)}</span><span class="count">${s.member_count ?? ''}</span></button>`).join('')
+    `<button class="row" data-id="${esc(s.id)}">${avatar(s.icon, s.name, 'sq')}<span class="name">${esc(s.name)}</span><span class="count" title="${s.people ?? '?'} people · ${s.bots ?? '?'} bots">${s.member_count ?? ''}</span></button>`).join('')
     : '<div class="empty">The bot is not in any server yet.</div>';
 }
 $('#serverlist').onclick = e => { const r = e.target.closest('.row'); if (r) openServer(r.dataset.id); };
@@ -310,7 +310,7 @@ async function openServer(id) {
     $('#serverpane').innerHTML = `
       <div class="detail">
         <div class="detail-head">${avatar(info.icon, info.name, 'sq')}<h1>${esc(info.name)}</h1>
-          <span class="muted">${info.member_count ?? '?'} people</span>
+          <span class="muted">${info.member_count ?? '?'} members${info.people != null ? ` (${info.people} people · ${info.bots ?? 0} bots)` : ''}</span>
           <div class="tabs" role="tablist">
             <button role="tab" data-pane="chat" aria-selected="true">Channels</button>
             <button role="tab" data-pane="members" aria-selected="false">Members</button>

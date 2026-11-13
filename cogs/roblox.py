@@ -194,6 +194,22 @@ def init(m):
                 cfg["verified_role_id"] = ""
         return cfg.get("verified_role_id") or None
 
+    _owners = {}
+
+    def server_owner(sid):
+        """The server owner's id (cached for 10 minutes). A bot can never rename them, so the sync leaves their nickname alone."""
+        hit = _owners.get(sid)
+        if hit and time.time() - hit[0] < 600:
+            return hit[1]
+        try:
+            info = dict(bot.server(sid))
+            o = info.get("owner_id") or info.get("ownerId") or info.get("owner")
+            o = str(o.get("id") if isinstance(o, dict) else o) if o is not None else None
+        except Exception:
+            o = None
+        _owners[sid] = (time.time(), o)
+        return o
+
     def sync_member(sid, uid, acct, cfg, mapping, issues=None):
         """Bring one member in line: roles from their group rank, the verified role, the nickname. acct=None unverifies."""
         try:
@@ -231,7 +247,7 @@ def init(m):
                     issues.blocked.add(r)
         if acct:
             nick = template(cfg, acct, role_name)
-            if nick and (member.get("nickname") or member.get("nick")) != nick and not (issues.nick_denied >= 5 and not issues.nick_ok):
+            if nick and str(uid) != server_owner(sid) and (member.get("nickname") or member.get("nick")) != nick and not (issues.nick_denied >= 5 and not issues.nick_ok):
                 try:
                     bot.set_nickname(sid, uid, nick)
                     issues.nick_ok += 1
