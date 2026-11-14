@@ -414,14 +414,24 @@ class YUser:
 
     @property
     def is_bot(self):
-        """Yapin's user object has no bot flag in its API description, so this looks at every sign: the message event's
-        author_bot, a "bot" badge, a bot object/flag (the bot's own /me has one), or a type of "bot"."""
+        """Yapin's user object has no documented bot flag, so this looks at every sign: the message event's author_bot, a "bot" badge
+        (a plain word or a badge object), a bot flag/object, an account type of bot/app/integration, an application or bot id, or an
+        integration-style flag. Anything that says "bot" in one of those places counts."""
         d = self.data
-        kind = str(_first(d, "type", "kind", "account_type", "user_type") or "").lower()
-        badges = {str(b).lower().replace(" ", "_") for b in (d.get("badges") or []) if isinstance(b, str)}
+        words = {"bot", "verified_bot", "app", "application", "integration", "automated"}
+        norm = lambda v: str(v).lower().replace(" ", "_").replace("-", "_")
+        kind = norm(_first(d, "type", "kind", "account_type", "user_type", "accountType", "userType") or "")
+        badges = set()
+        for b in (d.get("badges") or []):
+            badges.add(norm(b)) if isinstance(b, str) else badges.update(norm(b.get(k)) for k in ("name", "id", "slug", "label", "key") if isinstance(b, dict) and b.get(k))
+        flags = d.get("flags")
+        flagset = {norm(x) for x in flags} if isinstance(flags, (list, tuple)) else set()
         flag = d.get("bot")
-        return bool(self._bot_hint or flag is True or isinstance(flag, dict) or d.get("is_bot") is True or d.get("isBot") is True
-                    or d.get("author_bot") is True or kind == "bot" or badges & {"bot", "verified_bot", "app"})
+        return bool(self._bot_hint or flag is True or isinstance(flag, dict) or str(flag).lower() == "true"
+                    or d.get("is_bot") is True or d.get("isBot") is True or d.get("author_bot") is True
+                    or d.get("is_application") is True or d.get("application") or d.get("application_id") or d.get("bot_id") or d.get("botId")
+                    or d.get("managed") is True or d.get("integration") is True
+                    or kind in words or badges & words or flagset & words)
 
     @property
     def bot(self):
@@ -8547,11 +8557,32 @@ def countinglb():
     return {"Leaderboard": list(lb.items())}, 200
 
 
+_member_shape_logged = False
+
+
+def _log_member_shape(page):
+    """Once per run, print what a member record looks like (the bot's own and one other) so bot detection can be checked against real data."""
+    global _member_shape_logged
+    if _member_shape_logged or not page:
+        return
+    _member_shape_logged = True
+    try:
+        me = str((bot.me or {}).get("id") or "")
+        mine = next((dict(m) for m in page if str(_first(dict(m), "user_id", "id") or (dict(m).get("user") or {}).get("id")) == me), None)
+        other = next((dict(m) for m in page if dict(m) is not mine), None)
+        show = lambda r: json.dumps({k: (v if not isinstance(v, (dict, list)) or len(str(v)) < 160 else "…") for k, v in (r or {}).items()}, default=str)[:700]
+        print(f"[members] the bot's own record: {show(mine)}")
+        print(f"[members] another record: {show(other)}")
+    except Exception as e:
+        print(f"[members] couldn't describe a record: {e}")
+
+
 def _all_members(server_id, limit=5000):
     """Every member (paged 200 at a time), as flat dicts from _person."""
     out, after = [], None
     while len(out) < limit:
         page = bot.members(server_id, after=after)
+        _log_member_shape(page)
         people = [_person(dict(m)) for m in page]
         out.extend(people)
         if len(page) < 200 or not people:
