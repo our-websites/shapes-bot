@@ -13,6 +13,7 @@ The bot keeps its data in its own Cloudflare D1 database (separate from the Yapi
 ## Commands with spaces
 - `/roblox`: `info`, `avatar`, `outfits`, `item`, `bundle`, `asset`, `place`, `badge`, `badges`, `recentbadges`, `limiteds`, `british`, `todiscord`, `fromdiscord`, `group` (group info by ID, link or name), plus verification: `verify`, `link`, `accounts`, `auto`, `remove`, `hide`, `show`, `sync`, and `panel` (`status`, `setgroup`, `nickname`, `role`, `unverified`, `mirror`, `prompt`, `title`, `text`, `stats`, `send`).
 - `/vortex`: `game`, `user`, `cookie` (PlayVortex lookups; the cookie is entered in a form, never in chat).
+- `/roll`, `/coinflip`, `/8ball`, `/choose`, `/calc`, `/cat`, `/dog`, `/fact`: dice, coins, answers, picks, maths, pictures and facts.
 - `/lastfm`: `link`, `unlink`, `user` (links are stored by the Shapes API, kept separate from Yapin' links).
 - `/server info`
 
