@@ -28,6 +28,7 @@ import urllib.parse
 import hmac
 import random
 import secrets
+import types
 import hashlib
 import re
 import io
@@ -482,7 +483,10 @@ MainURL = "https://shapes.lol"
 searchengine = "621a38269031b4e89" # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
 # Secrets and settings, all from the environment (.env). See .env.example for the full list.
-PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY")
+PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY")      # verifies Discord's signed event webhooks (/discord/webhook)
+DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID") or ""          # "Sign in with Discord" on the dashboard
+DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET") or ""
+DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI") or ""    # must match one registered at discord.com/developers (…/login/discord/callback)
 APIBaseURL_Key = (os.environ.get("SHAPES_API_TOKEN") or os.environ.get("Shapes_API_Key") or "").strip()    # bearer token for the Shapes API's /internal routes
 APIBaseURL_Headers = {"Authorization": f"Bearer {APIBaseURL_Key}"}
 token = (os.environ.get("DISCORD_TOKEN") or "").strip()                    # the bot token
@@ -632,7 +636,7 @@ def log_action(kind, detail, server_id="", target=""):
     """Everything done from the dashboard is written down (shown under Logs)."""
     try:
         now = time.time()
-        actionsDB.set(f"{int(now * 1000)}-{os.urandom(2).hex()}", {"at": int(now), "actor_id": "admin", "actor": "Admin key", "kind": kind,
+        actionsDB.set(f"{int(now * 1000)}-{os.urandom(2).hex()}", {"at": int(now), "actor_id": str(session.get("admin_id") or "admin"), "actor": session.get("admin_name") or "Admin key", "kind": kind,
                                                                     "detail": str(detail)[:400], "server_id": str(server_id or ""), "target": str(target or "")})
         keys = sorted(actionsDB.items())
         for old in keys[:max(0, len(keys) - 2000)]:
@@ -668,7 +672,53 @@ def admin_login():
         else:
             _login_attempts.setdefault(ip, []).append(time.time())
             error = "That key isn't right."
-    return render_template_string(_web_file("login.html"), error=error)
+    return render_template_string(_web_file("login.html"), error=error, discord_oauth=bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET))
+
+
+def _oauth_redirect_uri():
+    if DISCORD_REDIRECT_URI:
+        return DISCORD_REDIRECT_URI
+    proto = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    return f"{proto}://{host}/login/discord/callback"
+
+
+@app.route("/login/discord")
+def admin_login_discord():
+    """Bot owners can sign in with their Discord account instead of the admin key."""
+    if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET):
+        return redirect(url_for("admin_login"))
+    session["oauth_state"] = secrets.token_urlsafe(24)
+    q = urllib.parse.urlencode({"client_id": DISCORD_CLIENT_ID, "response_type": "code", "scope": "identify", "prompt": "none",
+                                "redirect_uri": _oauth_redirect_uri(), "state": session["oauth_state"]})
+    return redirect(f"https://discord.com/oauth2/authorize?{q}")
+
+
+@app.route("/login/discord/callback")
+def admin_login_discord_callback():
+    def fail(msg):
+        return render_template_string(_web_file("login.html"), error=msg, discord_oauth=bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET)), 400
+    state = session.pop("oauth_state", None)
+    if request.args.get("error"):
+        return fail("Discord sign-in was cancelled.")
+    if not state or not hmac.compare_digest(state, request.args.get("state", "")) or not request.args.get("code"):
+        return fail("That sign-in link expired. Try again.")
+    try:
+        tok = requests.post("https://discord.com/api/v10/oauth2/token", data={
+            "client_id": DISCORD_CLIENT_ID, "client_secret": DISCORD_CLIENT_SECRET, "grant_type": "authorization_code",
+            "code": request.args["code"], "redirect_uri": _oauth_redirect_uri()}, timeout=15)
+        access = tok.json().get("access_token")
+        me = requests.get("https://discord.com/api/v10/users/@me", headers={"Authorization": f"Bearer {access}"}, timeout=15).json() if access else {}
+    except (requests.RequestException, ValueError):
+        return fail("Couldn't reach Discord. Try again in a moment.")
+    if not me.get("id"):
+        return fail("Discord didn't accept that sign-in. Check DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET and the redirect URI (" + _oauth_redirect_uri() + ").")
+    user = types.SimpleNamespace(id=me["id"], name=me.get("username", ""))
+    if not is_bot_owner(user):
+        return fail("This Discord account isn't a bot owner.")
+    session.clear()
+    session.update(admin=True, admin_id=str(me["id"]), admin_name=me.get("global_name") or me.get("username") or "Owner")
+    return redirect(url_for("dashboard"))
 
 
 @app.route("/logout")
@@ -1035,10 +1085,13 @@ def send_webhook():
     if not signature or not timestamp:
         return Response("missing signature", 401)
 
+    if not PUBLIC_KEY:
+        print("[events] DISCORD_PUBLIC_KEY isn't set, so Discord's event webhooks can't be verified.")
+        return Response("not configured", 503)
     try:
         verify_key = nacl.signing.VerifyKey(bytes.fromhex(PUBLIC_KEY))
         verify_key.verify(f'{timestamp}{body}'.encode(), bytes.fromhex(signature))
-    except nacl.exceptions.BadSignatureError:
+    except (nacl.exceptions.BadSignatureError, ValueError):
         return Response("invalid signature", 401)
 
     payload = request.json
@@ -1059,8 +1112,8 @@ def send_webhook():
 
         webhook = os.environ.get('webhook_url')
         if not webhook:
-            print("Webhook URL not set in environment")
-            return "webhook missing", 500
+            print("webhook_url isn't set, so this event isn't posted anywhere.")
+            return Response(status=204)      # still acknowledge it, or Discord disables the endpoint
 
         if event_type == "APPLICATION_AUTHORIZED":
             # User authorization
