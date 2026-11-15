@@ -1,4 +1,4 @@
-# Discord Bot Code For shapes.lol
+# Discord Bot Code For Shapes
 
 One file: `main.py`. Features are cogs (classes in that file) and commands with a space are command groups.
 

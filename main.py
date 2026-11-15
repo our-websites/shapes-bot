@@ -479,7 +479,8 @@ intents.guilds = True
 intents.message_content = True
 owner = "sl.ip"
 co_owner = "<@481295611417853982>"
-MainURL = "https://shapes.lol"
+SITE_URL = "https://shapes-yapper.oriaxen.com"                              # the Shapes website (also hosts the counting leaderboard)
+MainURL = (os.environ.get("PUBLIC_URL") or SITE_URL).rstrip("/")             # shown in footers
 searchengine = "621a38269031b4e89" # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
 # Secrets and settings, all from the environment (.env). See .env.example for the full list.
@@ -1446,7 +1447,7 @@ async def update_guild_cache():
         cached_guilds = list(bot.guilds)
         print(f"[SYSTEM] Watching {len(cached_guilds)} Servers!")
         print(f"[SYSTEM] Watching {BotInfo.approximate_user_install_count} Users!")
-        await bot.change_presence(activity=discord.CustomActivity(name=f"🔗 shapes.lol/discord"))
+        await bot.change_presence(activity=discord.CustomActivity(name="🔗 /help"))
         await asyncio.sleep(2)
         #if len(bot.guilds) == 1:
             #print(bot.guilds[0].name)
@@ -1653,7 +1654,7 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     BotInfo = await bot.application_info()
     #print(BotInfo)
-    await bot.change_presence(activity=discord.CustomActivity(name=f"🔗 shapes.lol/discord"))
+    await bot.change_presence(activity=discord.CustomActivity(name="🔗 /help"))
     # Start the cache updater task
     Shapes(command_prefix="/", intents=discord.Intents.all())
     bot.loop.create_task(update_guild_cache())
@@ -2201,11 +2202,11 @@ async def settings(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=SettingsView(), ephemeral=True)
 
 
-@bot.tree.command(name="status", description=f"Get the {MainURL} status")
+@bot.tree.command(name="status", description="Get the bot status")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"[shapes.lol Status Page](https://shapes.lol/status)")
+    await interaction.response.send_message(f"[Shapes Status](https://status.lecanact.me)")
 
 @bot.tree.command(name="stop", description="Stop the bot.")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -2577,7 +2578,7 @@ async def ai(interaction: discord.Interaction, *, prompt: str):
 @bot.tree.command(name="google", description="Search Something On Google.")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def google(interaction: discord.Interaction, query: str = "shapes.lol"):
+async def google(interaction: discord.Interaction, query: str = "Shapes"):
     await interaction.response.defer()
     
     thinkingembed = discord.Embed(
@@ -3042,7 +3043,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                             roblox_badges = badges_data
                     
                     rolimons_stats_url = f"https://api.rolimons.com/players/v1/playerinfo/{UserID}"
-                    async with session.get(rolimons_stats_url, headers={'User-Agent': 'shapes.lol'}) as response:
+                    async with session.get(rolimons_stats_url, headers={'User-Agent': 'Shapes (Discord bot)'}) as response:
                         if response.status == 200:
                             rolimons_stats_data = await response.json()
                             if rolimons_stats_data.get('success'):
@@ -3278,7 +3279,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 embed.set_thumbnail(url=avatar_image)
             
             embed.set_footer(
-                text=f"{current_status['text']} | Requested by {interaction.user.name} | https://shapes.lol",
+                text=f"{current_status['text']} | Requested by {interaction.user.name} | {MainURL}",
                 icon_url=current_status['icon_url']
             )
             
@@ -3956,7 +3957,7 @@ class HelpDropdown(discord.ui.Select):
                 "• /ping - Check bot latency and connection\n"
                 "• /invite - Get bot invite link\n"
                 "• /google - Search something on Google\n"
-                "• /status - Check shapes.lol status\n"
+                "• /status - Bot status\n"
                 "• /userinstalls - Get user installation count\n"
                 "• /servercount - Get server count\n"
                 "• /server info - Information about this server\n"
@@ -4002,7 +4003,7 @@ async def countingleaderboard(interaction: discord.Interaction):
     
     embed = discord.Embed(
         title="Counting Leaderboard",
-        description=f"[Click here to view the counting leaderboard](https://shapes.lol/counting/leaderboard/)",
+        description=f"[Click here to view the counting leaderboard]({SITE_URL}/counting/leaderboard/)",
         color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
     )
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
@@ -5705,7 +5706,7 @@ async def discordbanner(interaction: discord.Interaction, user: Optional[discord
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def linkroblox(interaction: discord.Interaction):
     embed = discord.Embed(
-        description=f"[Click here to link your Roblox account](https://api.shapes.lol/login?type=discord)",
+        description=f"[Click here to link your Roblox account]({(os.environ.get("API_PUBLIC_URL") or "https://api.shapes-yapper.oriaxen.com").rstrip("/")}/login?type=discord)",
         color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
     )
     await interaction.response.send_message(embed=embed, ephemeral=False)
