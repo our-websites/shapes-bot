@@ -4877,7 +4877,7 @@ async def discorduser(interaction: discord.Interaction, user: discord.User = Non
                                 """
                                 
                                 server_stats = f"""
-                                > **Members:** {server['member_count'] + server['bot_count']:,} total
+                                > **Members:** {server['member_count'] + server['bot_count']:,}
                                 > **People:** {server['member_count']:,}
                                 > **Bots:** {server['bot_count']:,}
                                 > **Channels:** {server['channel_count']}
@@ -7197,7 +7197,7 @@ def cmdlog_init(m):
         embed = discord.Embed(title=("➕ Shapes was added to " if kind == "add" else "➖ Shapes was removed from ") + guild.name,
                               color=discord.Color.green() if kind == "add" else discord.Color.red(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Server", value=f"{guild.name}\n`{guild.id}`", inline=True)
-        embed.add_field(name="Members", value=(f"**{total:,}** total\n{humans:,} people · {total - humans:,} bots" if humans is not None else f"**{total:,}** total (people and bots)"), inline=True)
+        embed.add_field(name="Members", value=(f"**{total:,}** members\n{humans:,} people · {total - humans:,} bots" if humans is not None else f"**{total:,}** members"), inline=True)
         embed.add_field(name="Servers now", value=str(len(bot.guilds)), inline=True)
         embed.set_footer(text="Shapes server log")
         await post(BOTLOG_KEY, embed)
@@ -7894,8 +7894,8 @@ class ServerCog(commands.Cog, name="Server"):
         embed.add_field(name="Server ID", value=f"`{guild.id}`", inline=True)
         embed.add_field(name="Created", value=f"<t:{int(guild.created_at.timestamp())}:D>", inline=True)
         embed.add_field(name="Members", inline=False,
-                        value=f"**{guild.member_count:,}** total (people and bots)\n**{people:,}** people · **{bots:,}** bots" if guild.chunked
-                        else f"**{guild.member_count:,}** total (people and bots)")
+                        value=f"**{guild.member_count:,}** members\n**{people:,}** people · **{bots:,}** bots" if guild.chunked
+                        else f"**{guild.member_count:,}** members")
         text, voice = len(guild.text_channels), len(guild.voice_channels)
         embed.add_field(name="Channels", value=f"{text + voice:,} total\n{text:,} text · {voice:,} voice\n{len(guild.categories):,} categories", inline=True)
         embed.add_field(name="Roles", value=f"{len(guild.roles):,}", inline=True)
