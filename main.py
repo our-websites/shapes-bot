@@ -490,6 +490,15 @@ ADMIN_KEY = (os.environ.get("ADMIN_KEY") or "").strip()                    # pas
 GoogleAPIKey = (os.environ.get("GOOGLE_API_KEY") or "").strip()            # Google Custom Search key for /google
 ROBLOSECURITY = (os.environ.get("ROBLOSECURITY") or "").strip()            # a Roblox account's .ROBLOSECURITY cookie (presence, avatar renders, profile data)
 APIBaseURL = (os.environ.get("SHAPES_API_URL") or "http://localhost:1337").rstrip("/")     # the Shapes API
+API_DOWN_TEXT = "The Shapes API is down right now, so this is turned off for the moment. Try again in a few minutes."
+_api_state = {"down": False, "at": 0.0}
+
+
+def _api_mark(ok):
+    """Remember whether the Shapes API answered, so commands can say it's down instead of "not linked"."""
+    if not ok and not _api_state["down"]:
+        print("Shapes API Is Not Responding.")
+    _api_state.update(down=not ok, at=time.time())
 
 
 # last online cache
@@ -687,7 +696,7 @@ def _dash_color(choice):
     if choice == "mine":
         choice = "Blue"
     if choice not in DASH_COLORS:
-        raise ValueError("That isn't one of the colours.")
+        raise ValueError("That isn't one of the colors.")
     return DASH_COLORS[choice]
 
 
@@ -1172,11 +1181,32 @@ colors = lua.decode(colors_lua)
 bot = Shapes(command_prefix="/", intents=discord.Intents.all())
 
 # /roblox ... lives in one command group; the Roblox cog (below) adds the verification commands to it and the tree gets it when the cog loads.
+@bot.tree.error
+async def _tree_error(interaction, error):
+    if isinstance(error, app_commands.CheckFailure) and "Shapes API is down" in str(error):
+        return      # already answered with the "API is down" message
+    import traceback
+    print(f"[command error] {getattr(interaction.command, 'qualified_name', '?')}")
+    traceback.print_exception(type(error), error, error.__traceback__)
+
+
 roblox_group = app_commands.Group(
     name="roblox", description="Roblox lookups, verification, your linked accounts and group info",
     allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
     allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True))
 roblox_panel = app_commands.Group(name="panel", description="Set up Roblox verification for this server (server admins)", parent=roblox_group)
+
+
+async def _roblox_api_check(interaction):
+    """Everything under /roblox except `group` needs the Shapes API. If it's down, say so instead of running."""
+    if getattr(interaction.command, "name", "") == "group" or not await asyncio.to_thread(api_down):
+        return True
+    await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
+    raise app_commands.CheckFailure("Shapes API is down")
+
+
+roblox_group.interaction_check = _roblox_api_check
+roblox_panel.interaction_check = _roblox_api_check
 #tree = app_commands.CommandTree(bot)
 
 class TopGGIntegration:
@@ -1814,7 +1844,8 @@ async def discord2roblox(interaction: discord.Interaction, user: discord.User): 
     except requests.exceptions.RequestException as e:
         #print(f"Error fetching data for Discord ID: {userid}: {e}")
         failedembed3 = discord.Embed(
-            title=f"Error retrieving Roblox Profile from {user.name}",
+            title="The Shapes API is down",
+            description=API_DOWN_TEXT,
             color=discord.Color.red()
         )
         await interaction.edit_original_response(embed=failedembed3)
@@ -2364,7 +2395,8 @@ async def roblox2discord(interaction: discord.Interaction, user: str):
     except requests.exceptions.RequestException as e:
         #print(f"Error fetching data for ID {UserID}: {e}")
         failedembed2 = discord.Embed(
-            title=f"Error retrieving Discord User from {Username}",
+            title="The Shapes API is down",
+            description=API_DOWN_TEXT,
             color=discord.Color.red()
         )
         await interaction.edit_original_response(embed=failedembed2)
@@ -2411,7 +2443,8 @@ async def discord2roblox(interaction: discord.Interaction, user: discord.User):
     except requests.exceptions.RequestException as e:
         #print(f"Error fetching data for Discord ID: {userid}: {e}")
         failedembed3 = discord.Embed(
-            title=f"Error retrieving Roblox Profile from {user.name}",
+            title="The Shapes API is down",
+            description=API_DOWN_TEXT,
             color=discord.Color.red()
         )
         await interaction.edit_original_response(embed=failedembed3)
@@ -6381,9 +6414,13 @@ def roblox_init(m):
             return None
         try:
             r = http.request(method, f"{m.APIBaseURL}{path}", json=body, headers=headers, timeout=30)
+            if r.status_code >= 502:
+                raise requests.RequestException(f"HTTP {r.status_code}")
             data = r.json()
+            _api_mark(True)
             return data if isinstance(data, dict) else None
         except (requests.RequestException, ValueError):
+            _api_mark(False)
             return None
 
     async def api(method, path, body=None):
@@ -6777,7 +6814,7 @@ def roblox_init(m):
         """(accounts list, error text). The API makes the person record on first contact, so no Yapin' account is needed."""
         person = await api("GET", f"/internal/person/{PLATFORM}/{interaction.user.id}") or {}
         if not person.get("success"):
-            return None, "Verification isn't available right now. Try again in a moment."
+            return None, API_DOWN_TEXT
         return person.get("accounts") or [], None
 
     def pick(accts, q):
@@ -7650,14 +7687,27 @@ class DMLogCog(commands.Cog, name="DM log"):
 LASTFM_LINK_TTL = 600
 
 
-def _shapes_call(method, path, body=None):
+def _shapes_call(method, path, body=None, timeout=15):
     """The Shapes API's JSON (a dict), or None when it can't be reached."""
     try:
-        r = requests.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=15)
+        r = requests.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=timeout)
+        if r.status_code >= 502:
+            raise requests.RequestException(f"HTTP {r.status_code}")
         data = r.json()
+        _api_mark(True)
         return data if isinstance(data, dict) else None
     except (requests.RequestException, ValueError):
+        _api_mark(False)
         return None
+
+
+def api_down():
+    """True when the Shapes API isn't answering (and this bot is set up to use it). Re-checked at most every 20 seconds."""
+    if not APIBaseURL_Key:
+        return False
+    if time.time() - _api_state["at"] > 20:
+        _shapes_call("GET", "/internal/version", timeout=4)
+    return _api_state["down"]
 
 
 def lastfm_name_of(user_id):
@@ -7684,17 +7734,21 @@ class LastfmCog(commands.Cog, name="Last.fm"):
 
     @lastfm.command(name="link", description="Link your Last.fm account")
     async def link(self, interaction: discord.Interaction):
+        if await asyncio.to_thread(api_down):
+            return await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
         started = await asyncio.to_thread(_shapes_call, "POST", "/internal/link/start",
                                           {"provider": "lastfm", "platform": "discord", "yapin_id": str(interaction.user.id), "yapin_name": interaction.user.name})
         url = (started or {}).get("url")
         if not url:
-            return await interaction.response.send_message(str((started or {}).get("data") or "Couldn't reach the linking service. Try again in a moment."), ephemeral=True)
+            return await interaction.response.send_message(str((started or {}).get("data") or API_DOWN_TEXT), ephemeral=True)
         view = discord.ui.View(timeout=LASTFM_LINK_TTL)
         view.add_item(discord.ui.Button(label="Authorize on Last.fm", style=discord.ButtonStyle.link, url=url))
         await interaction.response.send_message("Tap the button, approve access on Last.fm and you're linked. The link works for 10 minutes and only for you.", view=view, ephemeral=True)
 
     @lastfm.command(name="unlink", description="Unlink your Last.fm account")
     async def unlink(self, interaction: discord.Interaction):
+        if await asyncio.to_thread(api_down):
+            return await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
         had = await asyncio.to_thread(lastfm_name_of, interaction.user.id)
         await asyncio.to_thread(_shapes_call, "DELETE", f"/internal/links/{interaction.user.id}/lastfm?platform=discord")
         await interaction.response.send_message("Unlinked your Last.fm account." if had else "You had no Last.fm account linked.", ephemeral=True)
@@ -7703,6 +7757,8 @@ class LastfmCog(commands.Cog, name="Last.fm"):
     @app_commands.describe(user="Who to show (default: you)")
     async def user(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
+        if await asyncio.to_thread(api_down):
+            return await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
         name = await asyncio.to_thread(lastfm_name_of, target.id)
         if not name:
             who = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"

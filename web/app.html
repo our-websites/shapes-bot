@@ -246,7 +246,7 @@
           <div class="field"><label for="mdtitle">Title <span class="muted">(optional)</span></label><input type="text" id="mdtitle" maxlength="200"></div>
           <div class="field"><label for="mdmsg">Message</label><textarea id="mdmsg" rows="6" required maxlength="4000"></textarea></div>
           <div class="field"><label for="mdimg">Image link <span class="muted">(optional)</span></label><input type="url" id="mdimg" placeholder="https://…"></div>
-          <div class="field"><label for="mdcolor">Embed colour</label><select id="mdcolor"></select></div>
+          <div class="field"><label for="mdcolor">Embed color</label><select id="mdcolor"></select></div>
           <label class="switch"><input type="checkbox" id="mdhide"> Hide who sent it</label>
           <span class="hint">Normally the message says which team member sent it. Hiding that sends it as plain Shapes.</span>
         </form>
@@ -608,7 +608,7 @@ $('#annform').onsubmit = async e => {
 let mdReady = false;
 function drawDMPeople() {
   $('#mdeveryonebox').hidden = !isOwner;
-  const opts = '<option value="mine">My colour</option><option value="random">Random</option>' + colors.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
+  const opts = '<option value="mine">My color</option><option value="random">Random</option>' + colors.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
   if ($('#mdcolor').dataset.n !== String(colors.length)) { $('#mdcolor').innerHTML = opts; $('#mdcolor').dataset.n = String(colors.length); }
   if (mdReady) return; mdReady = true;
   $('#mdeveryone').onchange = e => { $('#mdids').disabled = e.target.checked; };
