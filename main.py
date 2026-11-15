@@ -8457,6 +8457,178 @@ def api_actions():
     return jsonify({"actions": action_rows(request.args.get("server") or None, 200)})
 
 
+# --- partners, status and people (bot owners) ---
+
+def _owner_only():
+    if not actor_is_owner():
+        return jsonify({"error": "Only bot owners can do this."}), 403
+    return None
+
+
+def _partner_view(sid):
+    row = partnersDB.get(sid) or {}
+    try:
+        info = cached(f"summary:{sid}", 300, lambda: server_summary(sid))
+    except Exception:
+        info = None
+    return {"id": sid, "name": (info or {}).get("name") or row.get("name") or sid, "icon": (info or {}).get("icon") or row.get("icon"),
+            "description": row.get("description") or "", "description_fallback": ((info or {}).get("description") or "")[:400],
+            "invite": row.get("invite") or "", "invite_auto": bool(row.get("invite_auto")), "added_at": row.get("added_at") or 0,
+            "in_server": info is not None, "members": (info or {}).get("members"), "humans": (info or {}).get("humans")}
+
+
+@app.route("/api/partners", methods=["GET", "POST"])
+@admin_required
+def api_partners():
+    """The partners shown on the website's /partners page. Bot owners only. POST adds one: {server, description?, invite?}."""
+    denied = _owner_only()
+    if denied:
+        return denied
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        sid = str(body.get("server") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid):
+            return jsonify({"error": "Give the server's ID."}), 400
+        if partnersDB.exists(sid):
+            return jsonify({"error": "That server is already a partner."}), 409
+        try:
+            info = server_summary(sid)
+        except Exception:
+            return jsonify({"error": "I can only partner servers I'm in. I couldn't load that one."}), 400
+        row = {"name": info["name"], "icon": info["icon"], "added_by": current_actor()[0], "added_at": int(time.time())}
+        typed = str(body.get("invite") or "").strip()
+        if typed:
+            url = valid_invite_url(typed)
+            if not url:
+                return jsonify({"error": "The invite must be a https://www.yapin.gg/... link."}), 400
+            row.update(invite=url, invite_auto=False)
+        else:
+            url = make_partner_invite(sid)
+            row.update(invite=url, invite_auto=bool(url))
+        if str(body.get("description") or "").strip():
+            row["description"] = str(body["description"]).strip()[:400]
+        partnersDB.set(sid, row)
+        _cache.pop(f"summary:{sid}", None)
+        log_action("partner", f"added {info['name']}", server_id=sid)
+    rows = sorted((_partner_view(s) for s in partnersDB.all()), key=lambda r: r["added_at"])
+    return jsonify({"partners": rows, "site": f"{MainURL}/partners"})
+
+
+@app.route("/api/partners/<sid>", methods=["POST", "DELETE"])
+@admin_required
+def api_partner(sid):
+    """Edit ({description?, invite? (a link, or "new" to grab one)}) or remove a partner. Bot owners only."""
+    denied = _owner_only()
+    if denied:
+        return denied
+    row = partnersDB.get(sid)
+    if row is None:
+        return jsonify({"error": "That server isn't a partner."}), 404
+    name = row.get("name") or sid
+    if request.method == "DELETE":
+        partnersDB.remove(sid)
+        _cache.pop(f"summary:{sid}", None)
+        log_action("partner", f"removed {name}", server_id=sid)
+        return jsonify({"ok": True})
+    body = request.get_json(silent=True) or {}
+    row = dict(row)
+    if "description" in body:
+        row["description"] = str(body.get("description") or "").strip()[:400] or None
+    if "invite" in body:
+        typed = str(body.get("invite") or "").strip()
+        if typed.lower() in ("", "new"):
+            url = make_partner_invite(sid)
+            if not url:
+                return jsonify({"error": "I couldn't make or find an invite myself. Paste a https://www.yapin.gg/... link."}), 400
+            row.update(invite=url, invite_auto=True)
+        else:
+            url = valid_invite_url(typed)
+            if not url:
+                return jsonify({"error": "The invite must be a https://www.yapin.gg/... link."}), 400
+            row.update(invite=url, invite_auto=False)
+    partnersDB.set(sid, row)
+    _cache.pop(f"summary:{sid}", None)
+    log_action("partner", f"edited {name}", server_id=sid)
+    return jsonify({"ok": True, "partner": _partner_view(sid)})
+
+
+@app.route("/api/status")
+@admin_required
+def api_status():
+    """Is everything this bot depends on working? Anyone on the admin dashboard can see this."""
+    started = time.time()
+    down = bool(api_down())
+    api_ms = None
+    if api_ready() and not down:
+        t0 = time.time()
+        shapes_api("GET", "/internal/version", timeout=4)
+        api_ms = int((time.time() - t0) * 1000)
+        down = bool(_api_state["down"])
+    try:
+        count = len(bot.servers())
+    except Exception:
+        count = None
+    return jsonify({
+        "bot": {"uptime_seconds": int(time.time() - started_at), "servers": count, "commands": len(bot.tree.commands),
+                "partners": len(partnersDB.all()), "commit": commit_info()},
+        "api": {"configured": api_ready(), "down": down, "ms": api_ms, "commit": api_commit_info() if api_ready() and not down else None},
+        "checked_at": int(started)})
+
+
+def _person_platform(value):
+    return value if value in ("yapin", "discord") else "yapin"
+
+
+@app.route("/api/people/<platform>/<uid>")
+@admin_required
+def api_person(platform, uid):
+    """What the Shapes API has linked for a person (Roblox accounts, Discord link). Bot owners only."""
+    denied = _owner_only()
+    if denied:
+        return denied
+    platform = _person_platform(platform)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", uid):
+        return jsonify({"error": "That isn't an ID."}), 400
+    if api_down():
+        return jsonify({"error": API_DOWN_TEXT, "api_down": True}), 503
+    d = shapes_api("GET", f"/internal/person/{platform}/{urllib.parse.quote(uid, safe='')}")
+    if not d or not d.get("success"):
+        return jsonify({"error": API_DOWN_TEXT if d is None else "Nobody found with that ID.", "api_down": d is None}), 503 if d is None else 404
+    return jsonify({"platform": platform, "id": uid, "accounts": d.get("accounts", []), "max": d.get("max", 100),
+                    "discord_id": d.get("discord_id") or None, "discord_ids": d.get("discord_ids") or []})
+
+
+@app.route("/api/people/<platform>/<uid>/unlink", methods=["POST"])
+@admin_required
+def api_person_unlink(platform, uid):
+    """Unlink one Roblox account ({roblox_id}) or the Discord link ({discord: true}) from a person. Bot owners only."""
+    denied = _owner_only()
+    if denied:
+        return denied
+    platform = _person_platform(platform)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", uid):
+        return jsonify({"error": "That isn't an ID."}), 400
+    body = request.get_json(silent=True) or {}
+    quoted = urllib.parse.quote(uid, safe="")
+    if body.get("discord"):
+        did = str(body.get("discord_id") or "")
+        path = f"/internal/person/{platform}/{quoted}/discord" + (f"?discord_id={urllib.parse.quote(did, safe='')}" if did else "")
+        d = shapes_api("DELETE", path)
+        what = "Discord link"
+    else:
+        rid = str(body.get("roblox_id") or "")
+        if not rid:
+            return jsonify({"error": "Which Roblox account?"}), 400
+        d = shapes_api("DELETE", f"/internal/person/{platform}/{quoted}/roblox/{urllib.parse.quote(rid, safe='')}")
+        what = f"Roblox account {rid}"
+    if d is None:
+        return jsonify({"error": API_DOWN_TEXT, "api_down": True}), 503
+    if not d.get("success"):
+        return jsonify({"error": str(d.get("data") or d.get("error") or "The API refused that.")}), 400
+    log_action("people", f"unlinked {what}", target=f"{platform}:{uid}")
+    return jsonify({"ok": True})
+
+
 # --- announcements to every server ---
 
 _ANNOUNCE_NAMES = ("announcements", "announcement", "news", "updates", "general", "chat", "main", "lobby")

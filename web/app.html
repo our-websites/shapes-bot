@@ -189,6 +189,9 @@
     <button role="tab" data-view="dmpeople" aria-selected="false">DM people</button>
     <button role="tab" data-view="logs" aria-selected="false">Logs</button>
     <button role="tab" data-view="data" aria-selected="false">Data</button>
+    <button role="tab" data-view="partners" aria-selected="false" class="ownertab" hidden>Partners</button>
+    <button role="tab" data-view="people" aria-selected="false" class="ownertab" hidden>People</button>
+    <button role="tab" data-view="status" aria-selected="false">Status</button>
   </nav>
   <div class="spacer"></div>
   <div class="meta"><span id="stats"></span><span id="build"></span><!--SIGNOUT--></div>
@@ -287,6 +290,45 @@
       <div class="card" id="dpane"><div class="empty">Pick a server or a user to see and edit what the bot has saved for them.</div></div>
     </div>
   </section>
+  <section class="view" id="v-partners" aria-label="Partners">
+    <div class="layout" style="grid-template-columns: minmax(0, 1fr); height: auto">
+      <div class="card" style="max-height: none">
+        <h2>Add a partner</h2>
+        <form class="form" id="paform">
+          <div class="field"><label for="pa-id">Server ID</label><input type="text" id="pa-id" required maxlength="64" autocomplete="off" placeholder="The bot has to be in it"></div>
+          <div class="field"><label for="pa-desc">Description <span class="muted">(optional)</span></label><textarea id="pa-desc" rows="3" maxlength="400" placeholder="Empty uses the server's own description"></textarea></div>
+          <div class="field"><label for="pa-inv">Invite link <span class="muted">(optional)</span></label><input type="url" id="pa-inv" placeholder="https://www.yapin.gg/… (empty: I find one)"></div>
+          <div class="inline"><button class="btn" type="submit">Add partner</button><span class="status" id="pastatus" role="status"></span></div>
+          <span class="hint" id="pasite"></span>
+        </form>
+      </div>
+      <div class="card" style="max-height: none"><h2>Partners</h2><div id="partnerlist" style="padding:12px;display:grid;gap:12px"><div class="empty">Loading…</div></div></div>
+    </div>
+  </section>
+
+  <section class="view" id="v-people" aria-label="People">
+    <div class="layout" style="grid-template-columns: minmax(0, 1fr); height: auto">
+      <div class="card" style="max-height: none">
+        <h2>Linked accounts</h2>
+        <form class="toolbar" id="peform">
+          <div class="seg" role="group" aria-label="Which ID"><button type="button" data-pl="yapin" aria-pressed="true">Yapin' ID</button><button type="button" data-pl="discord" aria-pressed="false">Discord ID</button></div>
+          <input type="text" id="pe-id" required maxlength="64" placeholder="Paste their ID" autocomplete="off" aria-label="Their ID">
+          <button class="btn" type="submit">Look up</button>
+        </form>
+        <div class="scroll" id="pepane"><div class="empty">Look someone up to see the Roblox and Discord accounts linked to them, and unlink any that shouldn't be.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-status" aria-label="Status">
+    <div class="layout" style="grid-template-columns: minmax(0, 1fr); height: auto">
+      <div class="card" style="max-height: none">
+        <h2>Status</h2>
+        <div class="toolbar"><button class="btn" id="strefresh" type="button">Check again</button><span class="status" id="stwhen"></span></div>
+        <div class="scroll" id="stpane"><div class="empty">Loading…</div></div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -346,6 +388,8 @@ $$('nav button').forEach(b => b.onclick = () => {
   if (b.dataset.view === 'data') drawPicker();
   if (b.dataset.view === 'dmpeople') drawDMPeople();
   if (b.dataset.view === 'logs') loadLog();
+  if (b.dataset.view === 'partners') loadPartners();
+  if (b.dataset.view === 'status') loadStatus();
 });
 
 /* ---------- overview ---------- */
@@ -354,6 +398,7 @@ async function loadOverview() {
   const d = await api('/api/overview');
   servers = d.servers;
   isOwner = !!d.is_owner; colors = d.colors || [];
+  $$('.ownertab').forEach(b => { b.hidden = !isOwner; });
   const av = d.me && d.me.avatar;                  // the bot's own picture instead of an initial
   if (av && $('#botmark').dataset.src !== av) {
     const img = document.createElement('img'); img.alt = ''; img.referrerPolicy = 'no-referrer';
@@ -730,6 +775,84 @@ function wireRec(kind, id, r, i) {
     catch (e) { say(e.message, 'err'); }
   };
 }
+
+/* ---------- partners (bot owners) ---------- */
+async function loadPartners() {
+  const box = $('#partnerlist');
+  try {
+    const d = await api('/api/partners');
+    $('#pasite').textContent = d.site ? 'Shown on ' + d.site : '';
+    box.innerHTML = d.partners.length ? d.partners.map(partnerHTML).join('') : '<div class="empty">No partners yet.</div>';
+    $$('#partnerlist .rec').forEach(wirePartner);
+  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+function partnerHTML(p) {
+  return `<div class="rec" data-id="${esc(p.id)}"><header>${avatar(p.icon, p.name, 'sq')}<h3>${esc(p.name)}</h3><span class="muted">ID ${esc(p.id)}${p.members ? ' · ' + esc(p.members) + ' members' : ''}</span>${p.in_server ? '' : '<span class="badge">BOT NOT IN SERVER</span>'}</header>
+    <div class="form" style="max-width:none"><div class="field"><label>Description</label><textarea rows="3" maxlength="400" class="pd" style="min-height:64px;margin:0;width:100%" placeholder="${esc(p.description_fallback || 'Empty uses the server’s own description')}">${esc(p.description)}</textarea></div>
+    <div class="field"><label>Invite link ${p.invite_auto ? '<span class="muted">(found by the bot, kept fresh)</span>' : ''}</label><input type="url" class="pi" value="${esc(p.invite)}" placeholder="https://www.yapin.gg/…"></div>
+    <div class="inline"><button class="btn" data-a="save" type="button">Save</button><button class="btn ghost" data-a="auto" type="button">Find invite</button><button class="btn danger" data-a="remove" type="button">Remove</button><span class="status" role="status"></span></div></div></div>`;
+}
+function wirePartner(box) {
+  const id = box.dataset.id, st = $('.status', box), say = (m, c) => { st.className = 'status ' + (c || ''); st.textContent = m; };
+  const send = async body => { try { await api('/api/partners/' + encodeURIComponent(id), { json: body }); say('Saved.', 'ok'); loadPartners(); } catch (e) { say(e.message, 'err'); } };
+  $('[data-a=save]', box).onclick = () => send({ description: $('.pd', box).value, invite: $('.pi', box).value });
+  $('[data-a=auto]', box).onclick = () => send({ invite: 'new' });
+  $('[data-a=remove]', box).onclick = async () => {
+    if (!confirm('Remove ' + $('h3', box).textContent + ' from the partners page?')) return;
+    try { await api('/api/partners/' + encodeURIComponent(id), { method: 'DELETE' }); loadPartners(); } catch (e) { say(e.message, 'err'); }
+  };
+}
+$('#paform').onsubmit = async e => {
+  e.preventDefault(); const st = $('#pastatus'); st.className = 'status'; st.textContent = 'Adding…';
+  try {
+    await api('/api/partners', { json: { server: $('#pa-id').value.trim(), description: $('#pa-desc').value, invite: $('#pa-inv').value.trim() } });
+    st.className = 'status ok'; st.textContent = 'Added.'; $('#paform').reset(); loadPartners();
+  } catch (err) { st.className = 'status err'; st.textContent = err.message; }
+};
+
+/* ---------- people (bot owners) ---------- */
+let pePlatform = 'yapin';
+$$('#peform [data-pl]').forEach(b => b.onclick = () => { pePlatform = b.dataset.pl; $$('#peform [data-pl]').forEach(x => x.setAttribute('aria-pressed', x === b)); });
+$('#peform').onsubmit = e => { e.preventDefault(); lookPerson($('#pe-id').value.trim()); };
+async function lookPerson(id) {
+  const pane = $('#pepane'); pane.innerHTML = '<div class="empty">Looking…</div>';
+  try {
+    const d = await api('/api/people/' + pePlatform + '/' + encodeURIComponent(id));
+    const rows = d.accounts.map(a => `<div class="rec"><header><h3>${esc(a.name)}</h3><code class="db">${esc(a.id)}</code>${a.auto_verify ? '<span class="badge">AUTO-VERIFY</span>' : ''}${a.hidden ? '<span class="badge">HIDDEN</span>' : ''}${a.profile ? `<a href="${esc(a.profile)}" target="_blank" rel="noopener noreferrer">profile</a>` : ''}</header>
+      <div class="inline"><button class="btn danger" data-rid="${esc(a.id)}" type="button">Unlink</button><span class="status" role="status"></span></div></div>`).join('');
+    const dis = (d.discord_ids && d.discord_ids.length ? d.discord_ids : (d.discord_id ? [d.discord_id] : []));
+    pane.innerHTML = `<div style="padding:12px;display:grid;gap:12px;align-content:start"><b>${esc(d.platform === 'discord' ? 'Discord' : 'Yapin’')} ID ${esc(d.id)}</b>
+      <div><b>Roblox accounts (${d.accounts.length}/${esc(d.max)})</b></div>${rows || '<div class="muted">None linked.</div>'}
+      <div><b>Discord links</b></div>${dis.map(x => `<div class="rec"><header><h3>${esc(x)}</h3></header><div class="inline"><button class="btn danger" data-did="${esc(x)}" type="button">Unlink</button><span class="status" role="status"></span></div></div>`).join('') || '<div class="muted">None linked.</div>'}</div>`;
+    $$('#pepane button[data-rid],#pepane button[data-did]').forEach(b => b.onclick = async () => {
+      const st = b.parentNode.querySelector('.status'), isD = b.dataset.did !== undefined;
+      if (!confirm('Unlink ' + (isD ? 'Discord ' + b.dataset.did : 'Roblox account ' + b.dataset.rid) + '?')) return;
+      try { await api('/api/people/' + d.platform + '/' + encodeURIComponent(d.id) + '/unlink', { json: isD ? { discord: true, discord_id: b.dataset.did } : { roblox_id: b.dataset.rid } }); lookPerson(d.id); }
+      catch (err) { st.className = 'status err'; st.textContent = err.message; }
+    });
+  } catch (e) { pane.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+/* ---------- status ---------- */
+const dur = s => { s = Math.floor(s); const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + 'd ' : '') + (h || d ? h + 'h ' : '') + m + 'm'; };
+async function loadStatus() {
+  const pane = $('#stpane'); pane.innerHTML = '<div class="empty">Checking…</div>';
+  try {
+    const d = await api('/api/status'), b = d.bot, a = d.api;
+    const commit = c => !c ? '' : (c.sha ? `<code>${esc(String(c.sha).slice(0, 7))}</code> ${esc(c.title || '')}` : '');
+    const line = (k, v) => `<tr><th>${k}</th><td class="wrap">${v}</td></tr>`;
+    pane.innerHTML = `<table><tbody>
+      ${line('Shapes API', !a.configured ? '<span class="badge">NOT SET UP</span>' : a.down ? '<span class="badge" style="color:var(--danger)">DOWN</span> Linking, Roblox verification and Last.fm are turned off until it answers.' : '<span class="badge">UP</span>' + (a.ms !== null ? ' ' + esc(a.ms) + ' ms' : ''))}
+      ${a.commit ? line('API version', commit(a.commit)) : ''}
+      ${line('Bot version', b.commit && b.commit.sha ? (b.commit.url ? `<a href="${esc(b.commit.url)}" target="_blank" rel="noopener noreferrer">${commit(b.commit)}</a>` : commit(b.commit)) : 'unknown')}
+      ${line('Running for', esc(dur(b.uptime_seconds)))}
+      ${line('Servers', esc(b.servers === null ? '?' : b.servers))}
+      ${line('Commands', esc(b.commands))}
+      ${line('Partners', esc(b.partners))}</tbody></table>`;
+    $('#stwhen').textContent = 'Checked ' + new Date(d.checked_at * 1000).toLocaleTimeString();
+  } catch (e) { pane.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+$('#strefresh').onclick = loadStatus;
 
 loadOverview().catch(e => { $('#serverlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
 setInterval(() => loadOverview().catch(() => {}), 60000);
