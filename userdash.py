@@ -352,7 +352,7 @@ def register(m):
             if not member:
                 return None
             return {"id": sid, "name": s.get("name") or sid, "icon": m._icon_of(s),
-                    "members": m.human_count(sid, m._first(s, "member_count", "members_count", "memberCount")),
+                    "members": m.member_stats(sid, m._first(s, "member_count", "members_count", "memberCount"))[0],
                     "manage": manage, "partner": bool(m.is_server_owner(sid, uid) and m.partnersDB.get(sid)), "counting": counting_brief(sid)}
         with ThreadPoolExecutor(max_workers=8) as pool:
             rows = [r for r in pool.map(one, servers) if r]
@@ -384,7 +384,7 @@ def register(m):
         counting["emojis"] = m.counting_emojis(counting)
         counting["last_name"] = (m.fetch_user(counting["lastcounter"]).get("username") if counting.get("lastcounter") else None)
         return {"server": {"id": sid, "name": server.get("name") or sid, "icon": m._icon_of(server),
-                           "members": m.human_count(sid, m._first(server, "member_count", "members_count", "memberCount"))},
+                           "members": m.member_stats(sid, m._first(server, "member_count", "members_count", "memberCount"))[0]},
                 "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
                 "owner": m.is_server_owner(sid, current_user()["id"]), "partner": bool(m.is_server_owner(sid, current_user()["id"]) and m.partnersDB.get(sid)),
                 "staff": False, "bot_owner": False}

@@ -1611,47 +1611,80 @@ def resolve_channel(server_id, token):
 _member_cache = {"at": 0, "value": 0}
 
 
-def human_count(sid, total=None):
-    """People in a server, bots left out. The API's member_count includes bots, so count from the member list (cached for
-    two minutes) and fall back to that total only when the list can't be read. Past 5,000 members the list is a sample, so
-    the bots in it are taken off the reported total instead."""
-    try:
-        members = cached(f"allmembers:{sid}", 120, lambda: _all_members(sid))
-    except Exception:
-        members = None
-    if members:
-        bots = sum(1 for p in members if p["bot"])
-        if len(members) < 5000:
-            return len(members) - bots
-        return max(0, int(total or len(members)) - bots)
-    return int(total) if total is not None else None
+_KNOWN_BOT = {}          # user id -> True/False, from looking the account up (a member record doesn't always say)
 
 
-def server_counts(sid, total=None):
-    """(total, people, bots) for a server. Total is what the API reports (bots included), people are counted from the member list."""
+_lookups_running = set()
+
+
+def _lookup_bots(members, sid="", cap=200):
+    """Members whose own record doesn't say "bot": the full account is asked for once (in the background, so a command never waits
+    on it) and remembered for good. What is already known is applied now, the rest shows up the next time the list refreshes."""
+    todo = [p["id"] for p in members if not p["bot"] and p["id"] not in _KNOWN_BOT][:cap]
+    if todo and sid not in _lookups_running:
+        _lookups_running.add(sid)
+
+        def work():
+            try:
+                with ThreadPoolExecutor(max_workers=6) as pool:
+                    for uid, flag in pool.map(lambda u: (u, YUser(u, data={**fetch_user(u), "id": u}).is_bot), todo):
+                        _KNOWN_BOT[uid] = bool(flag)
+            except Exception as e:
+                print(f"[members] bot lookup stopped: {e}")
+            finally:
+                _lookups_running.discard(sid)
+                _cache.pop(f"allmembers:{sid}", None)       # next count uses what was learned
+        threading.Thread(target=work, daemon=True).start()
+    for p in members:
+        if _KNOWN_BOT.get(p["id"]):
+            p["bot"] = True
+    return members
+
+
+def member_stats(sid, total=None):
+    """(members, people, bots) for a server. Members is everyone, bots included. When the member list can be read in full it is the
+    truth (the API's own count may leave bots out), otherwise the API's total is used and the bots seen in the list are taken off it."""
     try:
         total = int(total) if total is not None else None
     except (TypeError, ValueError):
         total = None
-    people = human_count(sid, total)
-    if total is None:
-        total = people
-    if people is None:
-        return total, None, None
-    return max(total, people), people, max(0, max(total, people) - people)
+    try:
+        members = cached(f"allmembers:{sid}", 120, lambda: _lookup_bots(_all_members(sid), sid))
+    except Exception:
+        members = None
+    if not members:
+        return total, (total if total is not None else None), None
+    bots = sum(1 for p in members if p["bot"])
+    everyone = max(len(members), total or 0) if len(members) < 5000 else max(total or 0, len(members))
+    return everyone, everyone - bots, bots
+
+
+def server_counts(sid, total=None):
+    """(members, people, bots); people and bots are None when the member list can't be read."""
+    members, people, bots = member_stats(sid, total)
+    return members, (None if bots is None else people), bots
+
+
+def human_count(sid, total=None):
+    """People in a server, bots left out (the total when the list can't be read)."""
+    return member_stats(sid, total)[1]
+
+
+def _total_of(server):
+    return _first(server, "member_count", "members_count", "memberCount")
+
+
+def server_counts_many(servers):
+    """{server id: (members, people, bots)} for a list of server dicts, looked up a few at a time."""
+    def one(s):
+        return str(s.get("id")), member_stats(s.get("id"), _total_of(s))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(pool.map(one, servers))
 
 
 def human_counts(servers):
-    """{server id: people} for a list of server dicts, looked up a few at a time."""
-    def one(s):
-        total = _first(s, "member_count", "members_count", "memberCount")
-        try:
-            total = int(total) if total is not None else None
-        except (TypeError, ValueError):
-            total = None
-        return str(s.get("id")), human_count(s.get("id"), total)
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        return dict(pool.map(one, servers))
+    """{server id: people} for a list of server dicts."""
+    return {sid: v[1] for sid, v in server_counts_many(servers).items()}
 
 
 def total_members():
@@ -2708,7 +2741,7 @@ def _server_event(kind, sid, name, data, total):
         members = _first(data, "member_count", "members_count", "memberCount")
         people = bots_n = None
     if members is not None:
-        text = f"**{members:,}** total" if isinstance(members, int) else str(members)
+        text = f"**{members:,}** members" if isinstance(members, int) else str(members)
         if people is not None:
             text += f"\n{people:,} people · {bots_n:,} bots"
         fields.append({"name": "Members", "value": text, "inline": True})
@@ -3476,7 +3509,7 @@ async def serverinfo(interaction: discord.Interaction):
     embed.add_field(name="Owner", value=f"<@{data['owner']}>" if data["owner"] else "Unknown", inline=True)
     embed.add_field(name="Server ID", value=f"`{sid}`", inline=True)
     embed.add_field(name="Members", inline=False,
-                    value=f"**{data['members']:,}** total (people and bots)\n**{data['humans']:,}** people · **{data['bots']:,}** bots")
+                    value=f"**{data['members']:,}** members" + (f"\n**{data['humans']:,}** people · **{data['bots']:,}** bots" if data["humans"] is not None else ""))
     embed.add_field(name="Channels", value=f"{data['channels']:,} total\n{data['text']:,} text · {data['voice']:,} voice\n{data['categories']:,} categories", inline=True)
     embed.add_field(name="Roles", value=f"{data['roles']:,}", inline=True)
     for label, value in data["extra"]:
@@ -3497,7 +3530,6 @@ def server_summary(sid):
     channels = bot.channels(sid)
     roles = bot.roles(sid)
     members = cached(f"allmembers:{sid}", 120, lambda: _all_members(sid))
-    bots = sum(1 for m in members if m["bot"])
     total = int(_first(info, "member_count", "members_count", "memberCount") or len(members))
     texts = sum(1 for c in channels if str(_first(c, "type", "kind") or "text") == "text")
     categories = {str(_first(c.get("category") or {}, "id") or c.get("category_id")) for c in channels if c.get("category") or c.get("category_id")}
@@ -7813,9 +7845,8 @@ def admin_logout():
 
 def _server_rows():
     servers = list(cached("servers", 15, bot.servers))
-    counts = human_counts(servers)
-    return [{"id": s.get("id"), "name": s.get("name") or str(s.get("id")), "members": counts.get(str(s.get("id")), "") if counts.get(str(s.get("id"))) is not None else ""}
-            for s in servers]
+    counts = server_counts_many(servers)
+    return [{"id": s.get("id"), "name": s.get("name") or str(s.get("id")), "members": (counts.get(str(s.get("id"))) or ("",))[0] or ""} for s in servers]
 
 
 @app.route("/admin", methods=["GET"])
@@ -7916,17 +7947,12 @@ def api_overview():
         return jsonify({"ready": False}), 503
     servers = []
     raw = list(cached("servers", 15, bot.servers))
-    counts = human_counts(raw)                    # people only: the API's own count includes bots
+    counts = server_counts_many(raw)
     for s in raw:
         sid = str(s.get("id"))
-        people = counts.get(sid)
-        try:
-            total = int(_first(s, "member_count", "members_count", "memberCount"))
-        except (TypeError, ValueError):
-            total = people
-        total = max(total, people) if total is not None and people is not None else total
-        servers.append({**dict(s), "id": sid, "name": s.get("name") or sid, "member_count": total, "people": people,
-                        "bots": (total - people) if total is not None and people is not None else None, "icon": _icon_of(s)})
+        members, people, bots = counts.get(sid) or (None, None, None)
+        servers.append({**dict(s), "id": sid, "name": s.get("name") or sid, "member_count": members, "people": people,
+                        "bots": bots, "icon": _icon_of(s)})
     return jsonify({
         "ready": True, "me": {**dict(bot.me or {}), "avatar": _avatar_of(dict(bot.me or {}))}, "uptime_seconds": int(time.time() - started_at),
         "storage": __import__("tables").backend_summary(), "commands": sorted(bot.commands), "servers": servers,
@@ -8571,6 +8597,7 @@ def api_status():
     return jsonify({
         "bot": {"uptime_seconds": int(time.time() - started_at), "servers": count, "commands": len(bot.tree.commands),
                 "partners": len(partnersDB.all()), "commit": commit_info()},
+        "bot_detection": {"known_accounts": len(_KNOWN_BOT), "bots_found": sum(1 for v in _KNOWN_BOT.values() if v), **_member_sample} if actor_is_owner() else None,
         "api": {"configured": api_ready(), "down": down, "ms": api_ms, "commit": api_commit_info() if api_ready() and not down else None},
         "checked_at": int(started)})
 
@@ -8942,6 +8969,7 @@ def countinglb():
     return {"Leaderboard": list(lb.items())}, 200
 
 
+_member_sample = {}
 _member_shape_logged = False
 
 
@@ -8958,6 +8986,7 @@ def _log_member_shape(page):
         show = lambda r: json.dumps({k: (v if not isinstance(v, (dict, list)) or len(str(v)) < 160 else "…") for k, v in (r or {}).items()}, default=str)[:700]
         print(f"[members] the bot's own record: {show(mine)}")
         print(f"[members] another record: {show(other)}")
+        _member_sample.update(mine=show(mine), other=show(other))
     except Exception as e:
         print(f"[members] couldn't describe a record: {e}")
 

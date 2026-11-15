@@ -848,7 +848,8 @@ async function loadStatus() {
       ${line('Running for', esc(dur(b.uptime_seconds)))}
       ${line('Servers', esc(b.servers === null ? '?' : b.servers))}
       ${line('Commands', esc(b.commands))}
-      ${line('Partners', esc(b.partners))}</tbody></table>`;
+      ${line('Partners', esc(b.partners))}
+      ${d.bot_detection ? line('Bot counts', esc(d.bot_detection.bots_found) + ' bots found among ' + esc(d.bot_detection.known_accounts) + ' accounts checked' + (d.bot_detection.mine ? '<details><summary>Sample member records</summary><pre style="white-space:pre-wrap;word-break:break-all;font-size:11px">' + esc(d.bot_detection.mine) + '\n' + esc(d.bot_detection.other || '') + '</pre></details>' : '')) : ''}</tbody></table>`;
     $('#stwhen').textContent = 'Checked ' + new Date(d.checked_at * 1000).toLocaleTimeString();
   } catch (e) { pane.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
