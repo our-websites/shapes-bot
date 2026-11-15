@@ -29,12 +29,13 @@
 <p class="note">Whenever you verify or are auto-verified, you get a message with the account that was used.</p>
 </main><script>
 const $ = s => document.querySelector(s), list = $('#list'), status = $('#status');
-const post = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json());
+const post = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json()).then(d => { if (d && d.success === false && (d.error || d.data)) { status.textContent = d.error || d.data; status.className = 'note err'; } return d; });
 const el = (t, a = {}, ...k) => { const e = document.createElement(t); for (const [x, y] of Object.entries(a)) x === 'class' ? e.className = y : e.setAttribute(x, y); e.append(...k.filter(Boolean)); return e; };
 async function load() {
   const r = await fetch('/me/roblox'); if (r.status === 401) { location.href = '/dashboard/login'; return; }
   const d = await r.json(); list.replaceChildren(); $('#max').textContent = d.max || 100;
   const dc = $('#discord'); dc.replaceChildren();
+  if (d.api_down) { $('#bulk').style.display = 'none'; list.append(el('p', { class: 'note err' }, d.error)); return; }
   if (d.discord_id) {
     const un = el('button', { class: 'danger' }, 'Unlink');
     un.onclick = async () => { if (confirm('Unlink your Discord account? Your Roblox accounts stay linked to Yapin’.')) { await post('/me/roblox/discord/unlink'); load(); } };

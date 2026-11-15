@@ -464,10 +464,10 @@ def init(m):
         res = api("POST", f"/internal/guild/yapin/{sid}/verify", {"user_id": uid, "roblox_id": None})
         if not res or not res.get("success"):
             if res is None:
-                return reply("Verification isn't available right now. Try again in a moment.")
+                return reply(m.API_DOWN_TEXT)
             link = start_link(uid, f"yapin:{sid}")
             if not link:
-                return reply("I couldn't make a Roblox sign-in link right now.")
+                return reply(m.API_DOWN_TEXT)
             return reply(f"Sign in with Roblox to verify (OAuth2, nothing goes in your bio). The link works for 10 minutes and only for you:\n{link}\n"
                          "When you finish I'll verify you here automatically.")
         acct = res.get("account") or {}
@@ -495,11 +495,11 @@ def init(m):
         person = await asyncio.to_thread(api, "GET", f"/internal/person/yapin/{uid}") or {}
         accts = person.get("accounts") or []
         if not person.get("success"):
-            return await say(interaction, "Verification isn't available right now. Try again in a moment.")
+            return await say(interaction, m.API_DOWN_TEXT)
         if low == "link" or (not accts and low not in ("accounts", "auto", "remove", "hide", "show")):
             link = await asyncio.to_thread(start_link, uid, f"yapin:{sid}" if sid else "")
             if not link:
-                return await say(interaction, "I couldn't make a Roblox sign-in link right now.")
+                return await say(interaction, m.API_DOWN_TEXT)
             return await say(interaction, f"Sign in with Roblox to verify (OAuth2, nothing goes in your bio). The link works for 10 minutes and only for you:\n{link}")
         if low == "accounts":
             lines = [f"{'⭐ ' if x['auto_verify'] else ''}{'🙈 ' if x.get('hidden') else ''}[{x['name']}]({x['profile']}) · `{x['id']}`" for x in accts]
@@ -523,7 +523,7 @@ def init(m):
                 shown = ", ".join(f"**{x['name']}**" for x in chosen)
             d = await asyncio.to_thread(api, "POST", f"/internal/person/yapin/{uid}/hide", body)
             if not d or not d.get("success"):
-                return await say(interaction, "Couldn't change that right now. Try again in a moment.")
+                return await say(interaction, m.API_DOWN_TEXT)
             return await say(interaction, (f"Hidden: {shown}. They no longer show in lookups, the API or `/robloxinfo`, but servers still see them when you verify."
                                            if low == "hide" else f"Visible again: {shown}."))
         if low == "auto":
@@ -594,7 +594,7 @@ def init(m):
             body["panel_title" if a == "title" else "panel_text"] = "" if value.lower() in ("off", "default", "") else value.strip()
         elif a == "stats":
             line = await asyncio.to_thread(stats_line, sid)
-            return await say(interaction, line or "Stats aren't available right now.")
+            return await say(interaction, line or m.API_DOWN_TEXT)
         elif a == "send":
             cfg = await asyncio.to_thread(cfg_of, sid)
             if not cfg:

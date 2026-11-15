@@ -626,7 +626,7 @@ def register(m):
         now = set(person["roles"]) | {role_id} if action == "add" else set(person["roles"]) - {role_id}
         return jsonify({"ok": True, "roles": sorted(now)})
 
-    # ------------------------------------------------------------------ their own embed colour
+    # ------------------------------------------------------------------ their own embed color
 
     # ---- Roblox accounts (the API keeps them; this is the page for linking, auto-verify and removing) ----
 
@@ -651,7 +651,7 @@ def register(m):
     def me_roblox():
         d = m.shapes_api("GET", f"/internal/person/yapin/{current_user()['id']}")
         if not d or not d.get("success"):
-            return jsonify({"accounts": [], "max": 100, "error": "The linking service isn't answering right now."})
+            return jsonify({"accounts": [], "max": 100, "api_down": True, "error": m.API_DOWN_TEXT})
         return jsonify({"accounts": d.get("accounts", []), "max": d.get("max", 100), "discord_id": d.get("discord_id") or None})
 
     @app.route("/me/roblox/discord/link", methods=["POST"])
@@ -662,14 +662,14 @@ def register(m):
             return jsonify({"success": False}), 400
         u = current_user()
         d = m.shapes_api("POST", "/internal/discord/start", {"user_id": u["id"], "name": u.get("name", "")})
-        return jsonify(d or {"success": False, "data": "The linking service isn't answering right now."})
+        return jsonify(d or {"success": False, "data": m.API_DOWN_TEXT})
 
     @app.route("/me/roblox/discord/unlink", methods=["POST"])
     @login_required
     def me_discord_unlink():
         if not _json_only():
             return jsonify({"success": False}), 400
-        return jsonify(m.shapes_api("DELETE", f"/internal/person/yapin/{current_user()['id']}/discord") or {"success": False})
+        return jsonify(m.shapes_api("DELETE", f"/internal/person/yapin/{current_user()['id']}/discord") or {"success": False, "data": m.API_DOWN_TEXT, "error": m.API_DOWN_TEXT})
 
     def _json_only():
         return request.is_json       # a cross-site form can't send JSON, so this doubles as a CSRF guard
@@ -681,7 +681,7 @@ def register(m):
             return jsonify({"success": False}), 400
         u = current_user()
         d = m.shapes_api("POST", "/internal/roblox/start", {"platform": "yapin", "user_id": u["id"], "name": u.get("name", "")})
-        return jsonify(d or {"success": False, "data": "The linking service isn't answering right now."})
+        return jsonify(d or {"success": False, "data": m.API_DOWN_TEXT})
 
     @app.route("/me/roblox/auto", methods=["POST"])
     @login_required
@@ -689,7 +689,7 @@ def register(m):
         if not _json_only():
             return jsonify({"success": False}), 400
         rid = (request.get_json(silent=True) or {}).get("roblox_id")
-        return jsonify(m.shapes_api("POST", f"/internal/person/yapin/{current_user()['id']}/auto", {"roblox_id": rid}) or {"success": False})
+        return jsonify(m.shapes_api("POST", f"/internal/person/yapin/{current_user()['id']}/auto", {"roblox_id": rid}) or {"success": False, "data": m.API_DOWN_TEXT, "error": m.API_DOWN_TEXT})
 
     @app.route("/me/roblox/remove", methods=["POST"])
     @login_required
@@ -697,7 +697,7 @@ def register(m):
         if not _json_only():
             return jsonify({"success": False}), 400
         rid = str((request.get_json(silent=True) or {}).get("roblox_id") or "")
-        return jsonify(m.shapes_api("DELETE", f"/internal/person/yapin/{current_user()['id']}/roblox/{urllib.parse.quote(rid, safe='')}") or {"success": False})
+        return jsonify(m.shapes_api("DELETE", f"/internal/person/yapin/{current_user()['id']}/roblox/{urllib.parse.quote(rid, safe='')}") or {"success": False, "data": m.API_DOWN_TEXT, "error": m.API_DOWN_TEXT})
 
     @app.route("/me/roblox/hide", methods=["POST"])
     @login_required
@@ -709,7 +709,7 @@ def register(m):
             body["all"] = True
         else:
             body["roblox_ids"] = [str(x) for x in (b.get("roblox_ids") or [])][:100]
-        return jsonify(m.shapes_api("POST", f"/internal/person/yapin/{current_user()['id']}/hide", body) or {"success": False})
+        return jsonify(m.shapes_api("POST", f"/internal/person/yapin/{current_user()['id']}/hide", body) or {"success": False, "data": m.API_DOWN_TEXT, "error": m.API_DOWN_TEXT})
 
     # ---- managing a server's Roblox verification (owner, administrators and Manage Server). Only counts are shown, never who. ----
 
@@ -739,6 +739,7 @@ def register(m):
                 "panel_title", "panel_text", "panel_channel_id", "panel_message_id", "last_sync_at")
         return jsonify({"server": view["server"], "channels": view["channels"], "roles": view["roles"],
                         "config": {k: cfg.get(k) for k in keep},
+                        "api_down": bool(m.api_down()),
                         "stats": {k: v for k, v in (stats or {}).items() if k != "success"} or None,
                         "last_sync": (m.rverifyDB.get(sid) or {}).get("last")})
 
@@ -767,7 +768,7 @@ def register(m):
         before = verify_config(sid)
         d = m.shapes_api("PUT", f"/internal/guild/yapin/{sid}/config", body)
         if not d or not d.get("success"):
-            return jsonify({"error": "The linking service isn't answering right now."}), 502
+            return jsonify({"error": m.API_DOWN_TEXT}), 502
         cfg = d.get("config") or {}
         if body.get("verified_role_id") == "create":
             m.rverify_ensure_role(sid, cfg)

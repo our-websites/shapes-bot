@@ -68,6 +68,7 @@ async function open(id) {
   sid = id; say('Loading…'); $('#body').style.display = 'none';
   const d = await call('/me/roblox/manage/' + encodeURIComponent(id));
   if (!d.ok) { say(d.error || 'Couldn’t load that server.', true); return; }
+  if (d.api_down) { say('The Shapes API is down right now, so Roblox verification settings are turned off for the moment. Try again in a few minutes.', true); return; }
   say(''); $('#body').style.display = '';
   const c = d.config || {};
   $('#group').value = c.group_id || ''; $('#nick').value = c.nickname_template || ''; $('#ptext').value = c.prompt_text || '';

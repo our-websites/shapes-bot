@@ -1457,21 +1457,36 @@ def api_ready():
     return bool(API_INTERNAL_TOKEN)
 
 
+API_DOWN_TEXT = "The Shapes API is down right now, so this is turned off for the moment. Try again in a few minutes."
+_api_state = {"down": False, "at": 0.0}
+
+
 def shapes_api(method, path, body=None, timeout=30):
     """Call the Shapes API on this machine. Returns its JSON (a dict) or None when it can't be reached.
-    A short timeout: it is on localhost, so if it doesn't answer quickly something is wrong."""
+    Remembers whether it answered, so features that need it can say "the API is down" instead of "not linked"."""
     if not api_ready():
         return None
     try:
-        #print(timeout)
-        r = _api_session.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=30)
+        r = _api_session.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=timeout)
+        if r.status_code >= 502:
+            raise requests.RequestException(f"HTTP {r.status_code}")
         data = r.json()
-        print(data)
-        print('Shapes API Is Responding.' if data['success'] == True else 'Shapes API Is Responding But Denying Your Requests.')
+        _api_state.update(down=False, at=time.time())
         return data if isinstance(data, dict) else None
     except (requests.RequestException, ValueError):
-        print("Shapes API Is Not Responding.")
+        if not _api_state["down"]:
+            print("Shapes API Is Not Responding.")
+        _api_state.update(down=True, at=time.time())
         return None
+
+
+def api_down():
+    """True when the Shapes API isn't answering (and the bot is set up to use it). Re-checked at most every 20 seconds."""
+    if not api_ready():
+        return False
+    if time.time() - _api_state["at"] > 20:
+        shapes_api("GET", "/internal/version", timeout=4)
+    return _api_state["down"]
 
 
 _ROBLOX_LINK_CACHE = {}
@@ -1507,7 +1522,7 @@ started_at = time.time()
 
 
 def ecolor(user_id):
-    """A user's saved embed colour, or blue."""
+    """A user's saved embed color, or blue."""
     return embedDB.get(f"{user_id}") or discord.Color.blue()
 
 
@@ -2643,7 +2658,7 @@ WELCOME_TEXT = ("Thanks for adding Shapes! Here's how to get going:\n"
                 "• **/counting** sets up a counting channel\n"
                 "• **/cmdlog** (server owner) logs the commands people run\n"
                 "• Manage me from the **dashboard**: autorole, automod, messages and more\n"
-                "Pick a colour for my embeds with **/settings**.")
+                "Pick a color for my embeds with **/settings**.")
 
 
 def welcome_server(sid, name, data=None):
@@ -3619,12 +3634,15 @@ async def lastfm(interaction: discord.Interaction, action: str = "", user: disco
             return
         action = ""
     action = action.lower()
+    if await asyncio.to_thread(api_down):
+        await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
+        return
     if action == "link":
         started = await asyncio.to_thread(shapes_api, "POST", "/internal/link/start",
                                           {"provider": "lastfm", "yapin_id": str(uid), "yapin_name": interaction.user.name})
         link = (started or {}).get("url")
         if not link:
-            reason = (started or {}).get("data") or "Couldn't reach the linking service. Try again in a moment."
+            reason = (started or {}).get("data") or API_DOWN_TEXT
             await interaction.response.send_message(str(reason), ephemeral=True)
             return
         view = discord.ui.View(timeout=LASTFM_LINK_TTL)
@@ -3828,6 +3846,9 @@ async def roblox2yapin(interaction: discord.Interaction, user: str):
     if found is None and not api_ready():
         await interaction.edit_original_response(embed=discord.Embed(title="Linking isn't set up on this bot yet", color=discord.Color.red()))
         return
+    if found is None and await asyncio.to_thread(api_down):
+        await interaction.edit_original_response(embed=discord.Embed(title="The Shapes API is down", description=API_DOWN_TEXT, color=discord.Color.red()))
+        return
     if found is None:
         await interaction.edit_original_response(embed=discord.Embed(
             title=f"No Yapin user found for {Username}",
@@ -3862,6 +3883,9 @@ async def yapin2roblox(interaction: discord.Interaction, user: discord.User):
 
     found = await asyncio.to_thread(roblox_of_yapin, userid)
     color = embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
+    if found is None and await asyncio.to_thread(api_down):
+        await interaction.edit_original_response(embed=discord.Embed(title="The Shapes API is down", description=API_DOWN_TEXT, color=discord.Color.red()))
+        return
     if found is None:
         text = "Linking isn't set up on this bot yet" if not api_ready() else f"No Roblox Profile found for {user.name}"
         await interaction.edit_original_response(embed=discord.Embed(
@@ -6456,10 +6480,13 @@ async def linkroblox(interaction: discord.Interaction, action: str = "link"):
     if not api_ready():
         await interaction.response.send_message("Linking isn't set up on this bot yet (the owner needs to connect it to the Shapes API).", ephemeral=True)
         return
+    if await asyncio.to_thread(api_down):
+        await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
+        return
     if action in ("unlink", "remove"):
         data = await asyncio.to_thread(shapes_api, "DELETE", f"/internal/links/{uid}/roblox")
         if data is None:
-            text = "Couldn't reach the linking service. Try again in a moment."
+            text = API_DOWN_TEXT
         else:
             text = "Unlinked your Roblox account." if data.get("removed") else "You didn't have a Roblox account linked."
         await interaction.response.send_message(text, ephemeral=True)
@@ -6467,7 +6494,7 @@ async def linkroblox(interaction: discord.Interaction, action: str = "link"):
     if action in ("hide", "show"):
         data = await asyncio.to_thread(shapes_api, "PATCH", f"/internal/links/{uid}/roblox", {"enabled": action == "show"})
         if data is None:
-            text = "Couldn't reach the linking service. Try again in a moment."
+            text = API_DOWN_TEXT
         elif not data.get("success"):
             text = "You have no linked Roblox account. Use `/linkroblox` first."
         else:
@@ -6478,7 +6505,7 @@ async def linkroblox(interaction: discord.Interaction, action: str = "link"):
     current = (links or {}).get("roblox")
     if action in ("status", "info"):
         if links is None:
-            text = "Couldn't reach the linking service. Try again in a moment."
+            text = API_DOWN_TEXT
         elif not current:
             text = "No Roblox account linked. Use `/linkroblox` to link one."
         else:
@@ -6488,7 +6515,7 @@ async def linkroblox(interaction: discord.Interaction, action: str = "link"):
         return
     started = await asyncio.to_thread(shapes_api, "POST", "/internal/link/start", {"provider": "roblox", "yapin_id": uid, "yapin_name": interaction.user.name})
     if not started or not started.get("url"):
-        reason = (started or {}).get("data") or "Couldn't reach the linking service. Try again in a moment."
+        reason = (started or {}).get("data") or API_DOWN_TEXT
         await interaction.response.send_message(str(reason), ephemeral=True)
         return
     embed = discord.Embed(title="Link your Roblox account", color=color, description=(
@@ -7817,7 +7844,7 @@ _AVATAR_COLORS = ("#6366f1", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d
 
 
 def default_avatar_url(uid, name=None):
-    """A picture for people with none: their initial on a colour picked from their id. Served by /avatar/<id>.svg."""
+    """A picture for people with none: their initial on a color picked from their id. Served by /avatar/<id>.svg."""
     q = urllib.parse.urlencode({"n": str(name or "")[:40]}) if name else ""
     return f"{PUBLIC_URL}/avatar/{urllib.parse.quote(str(uid), safe='')}.svg" + (f"?{q}" if q else "")
 
@@ -8031,8 +8058,8 @@ def _stamp_text(name, where=None):
 
 
 def resolve_color(choice=None, custom=None, user_id=None):
-    """The embed colour (an int) for a message sent as Shapes: choice is "mine" (their saved /settings colour, else blue),
-    a name from the colour list, "random", or "custom" with custom = "#rrggbb". Raises ValueError for anything else."""
+    """The embed color (an int) for a message sent as Shapes: choice is "mine" (their saved /settings color, else blue),
+    a name from the color list, "random", or "custom" with custom = "#rrggbb". Raises ValueError for anything else."""
     choice = str(choice or "mine").strip()
     if choice.lower() == "mine":
         saved = embedDB.get(f"{user_id}") if user_id else None
@@ -8042,12 +8069,12 @@ def resolve_color(choice=None, custom=None, user_id=None):
     if choice.lower() == "custom":
         found = re.fullmatch(r"#?([0-9a-fA-F]{6})", str(custom or "").strip())
         if not found:
-            raise ValueError("A custom colour looks like #5865f2.")
+            raise ValueError("A custom color looks like #5865f2.")
         return int(found.group(1), 16)
     for name, color in DiscordColors:
         if name.lower() == choice.lower():
             return color.value
-    raise ValueError("Pick a colour from the list, or use a custom one.")
+    raise ValueError("Pick a color from the list, or use a custom one.")
 
 
 def color_choices():
@@ -8068,7 +8095,7 @@ def _announcement_embed(title, text, image_url, footer=None, color=None):
 
 
 def _post_with_optional_image(channel_id, text, image_url, title=None, footer=None, color=None):
-    """Plain text when there is no image, title, colour or sender line; otherwise an embed. If the server refuses embeds, falls
+    """Plain text when there is no image, title, color or sender line; otherwise an embed. If the server refuses embeds, falls
     back to text with the image link and the sender line."""
     if not image_url and not title and not footer and color is None:
         return bot.send(channel_id, text)

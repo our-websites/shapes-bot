@@ -249,9 +249,9 @@ function homeView() {
     mySettings()];
 }
 
-// the colour Shapes uses for embeds you trigger, and a reusable picker for messages
+// the color Shapes uses for embeds you trigger, and a reusable picker for messages
 function colorPicker(initial = 'mine', withMine = true) {
-  const sel = h('select', {}, withMine ? h('option', { value: 'mine' }, 'My colour (from settings)') : null, BOOT.colors.map(c => h('option', { value: c.name }, c.name)), h('option', { value: 'random' }, 'Random'), h('option', { value: 'custom' }, 'Custom…'));
+  const sel = h('select', {}, withMine ? h('option', { value: 'mine' }, 'My color (from settings)') : null, BOOT.colors.map(c => h('option', { value: c.name }, c.name)), h('option', { value: 'random' }, 'Random'), h('option', { value: 'custom' }, 'Custom…'));
   const custom = h('input', { type: 'color', value: '#5865f2', hidden: true }), dot = h('span', { class: 'swatch' });
   const hexOf = () => sel.value === 'custom' ? custom.value : (BOOT.colors.find(c => c.name === sel.value) || {}).hex || (sel.value === 'mine' && BOOT.color != null ? '#' + BOOT.color.toString(16).padStart(6, '0') : '#3498db');
   const paint = () => { custom.hidden = sel.value !== 'custom'; dot.style.background = sel.value === 'random' ? 'conic-gradient(red,orange,yellow,green,blue,purple,red)' : hexOf(); };
@@ -261,9 +261,9 @@ function colorPicker(initial = 'mine', withMine = true) {
 
 function mySettings() {
   const [pick, value] = colorPicker(BOOT.color != null ? (BOOT.colors.find(c => parseInt(c.hex.slice(1), 16) === BOOT.color) || { name: 'custom' }).name : 'Blue', false);
-  const sv = h('button', { class: 'primary' }, 'Save colour'), st = h('div', { class: 'status' });
-  save(sv, st, async () => { const r = await api('/me/settings', value()); BOOT.color = parseInt(r.color.slice(1), 16); return 'Saved. Embeds from your commands and messages use this colour.'; });
-  return panel('Your embed colour', 'Used for the embeds Shapes shows you and for messages you send from here. Same as /settings.', field('Colour', pick, 'row'), h('div', { class: 'row' }, sv, st));
+  const sv = h('button', { class: 'primary' }, 'Save color'), st = h('div', { class: 'status' });
+  save(sv, st, async () => { const r = await api('/me/settings', value()); BOOT.color = parseInt(r.color.slice(1), 16); return 'Saved. Embeds from your commands and messages use this color.'; });
+  return panel('Your embed color', 'Used for the embeds Shapes shows you and for messages you send from here. Same as /settings.', field('Color', pick, 'row'), h('div', { class: 'row' }, sv, st));
 }
 
 // ---------------------------------------------------------------- small form helpers
@@ -427,7 +427,7 @@ function say() {
     msg.value = ''; return r.footer ? 'Sent. It shows: “' + r.footer + '”' : 'Sent (sender hidden).';
   });
   return [...head('Send as Shapes', 'Shapes posts your message in the channel. It always says who sent it and when' + (detail.staff ? ', unless you hide it.' : '.')),
-    panel('Message', null, field('Channel', ch, 'row'), field('Title', title, 'row'), field('Message', msg, 'row'), field('Image', img, 'row'), field('Embed colour', cp, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
+    panel('Message', null, field('Channel', ch, 'row'), field('Title', title, 'row'), field('Message', msg, 'row'), field('Image', img, 'row'), field('Embed color', cp, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
 }
 
 function dm() {
@@ -452,7 +452,7 @@ function dm() {
     }
   });
   return [...head('Message members', 'Shapes sends each person a DM. It says who sent it and which server it’s from. Server owners can message everyone; managers can pick up to 50.'),
-    panel('Recipients', null, allL ? h('div', { class: 'row' }, allL) : null, field('Find a member', q, 'row'), results, chips, field('Message', msg, 'row'), field('Embed colour', cp, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
+    panel('Recipients', null, allL ? h('div', { class: 'row' }, allL) : null, field('Find a member', q, 'row'), results, chips, field('Message', msg, 'row'), field('Embed color', cp, 'row'), hL ? h('div', { class: 'row' }, hL) : null, h('div', { class: 'row' }, sv, st))];
 }
 
 // ---------------------------------------------------------------- logs
