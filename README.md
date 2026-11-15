@@ -1,4 +1,4 @@
-# Discord Bot Code For shapes.lol
+# Discord Bot Code For Shapes
 
 One file: `main.py`. Features are cogs (classes in that file) and commands with a space are command groups.
 
@@ -29,3 +29,8 @@ Open the bot's web address and sign in with `ADMIN_KEY`. Servers (channels, memb
 ## Other
 - `/cmdlog` (server admins) logs commands to a channel through a webhook; `/botlog` (bot owners) logs every command and server add/remove. A webhook the bot already made in a channel is reused and shared between logs.
 - `/counting warnings:<0-50>` lets bot owners change how many warnings a server gets (default 3).
+
+## Discord events and sign-in
+- **Event webhook** (`POST /discord/webhook`): in the Developer Portal set *Webhook Events URL* to `https://YOUR-HOST/discord/webhook`, and put the app's public key in `DISCORD_PUBLIC_KEY`. Events (app authorized/removed, etc.) are posted to `webhook_url`.
+- **Sign in with Discord** (optional): set `DISCORD_CLIENT_ID` and `DISCORD_CLIENT_SECRET` and add `https://YOUR-HOST/login/discord/callback` as a redirect. Bot owners (see `OWNER_IDS`) can then use it instead of the admin key, and the Logs tab shows who did what.
+- If the Shapes API is down, Roblox and Last.fm commands say so instead of reporting "not linked".

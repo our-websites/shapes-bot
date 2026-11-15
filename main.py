@@ -28,6 +28,7 @@ import urllib.parse
 import hmac
 import random
 import secrets
+import types
 import hashlib
 import re
 import io
@@ -478,11 +479,15 @@ intents.guilds = True
 intents.message_content = True
 owner = "sl.ip"
 co_owner = "<@481295611417853982>"
-MainURL = "https://shapes.lol"
+SITE_URL = "https://shapes-yapper.oriaxen.com"                              # the Shapes website (also hosts the counting leaderboard)
+MainURL = (os.environ.get("PUBLIC_URL") or SITE_URL).rstrip("/")             # shown in footers
 searchengine = "621a38269031b4e89" # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
 # Secrets and settings, all from the environment (.env). See .env.example for the full list.
-PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY")
+PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY")      # verifies Discord's signed event webhooks (/discord/webhook)
+DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID") or ""          # "Sign in with Discord" on the dashboard
+DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET") or ""
+DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI") or ""    # must match one registered at discord.com/developers (…/login/discord/callback)
 APIBaseURL_Key = (os.environ.get("SHAPES_API_TOKEN") or os.environ.get("Shapes_API_Key") or "").strip()    # bearer token for the Shapes API's /internal routes
 APIBaseURL_Headers = {"Authorization": f"Bearer {APIBaseURL_Key}"}
 token = (os.environ.get("DISCORD_TOKEN") or "").strip()                    # the bot token
@@ -490,6 +495,15 @@ ADMIN_KEY = (os.environ.get("ADMIN_KEY") or "").strip()                    # pas
 GoogleAPIKey = (os.environ.get("GOOGLE_API_KEY") or "").strip()            # Google Custom Search key for /google
 ROBLOSECURITY = (os.environ.get("ROBLOSECURITY") or "").strip()            # a Roblox account's .ROBLOSECURITY cookie (presence, avatar renders, profile data)
 APIBaseURL = (os.environ.get("SHAPES_API_URL") or "http://localhost:1337").rstrip("/")     # the Shapes API
+API_DOWN_TEXT = "The Shapes API is down right now, so this is turned off for the moment. Try again in a few minutes."
+_api_state = {"down": False, "at": 0.0}
+
+
+def _api_mark(ok):
+    """Remember whether the Shapes API answered, so commands can say it's down instead of "not linked"."""
+    if not ok and not _api_state["down"]:
+        print("Shapes API Is Not Responding.")
+    _api_state.update(down=not ok, at=time.time())
 
 
 # last online cache
@@ -623,7 +637,7 @@ def log_action(kind, detail, server_id="", target=""):
     """Everything done from the dashboard is written down (shown under Logs)."""
     try:
         now = time.time()
-        actionsDB.set(f"{int(now * 1000)}-{os.urandom(2).hex()}", {"at": int(now), "actor_id": "admin", "actor": "Admin key", "kind": kind,
+        actionsDB.set(f"{int(now * 1000)}-{os.urandom(2).hex()}", {"at": int(now), "actor_id": str(session.get("admin_id") or "admin"), "actor": session.get("admin_name") or "Admin key", "kind": kind,
                                                                     "detail": str(detail)[:400], "server_id": str(server_id or ""), "target": str(target or "")})
         keys = sorted(actionsDB.items())
         for old in keys[:max(0, len(keys) - 2000)]:
@@ -659,7 +673,53 @@ def admin_login():
         else:
             _login_attempts.setdefault(ip, []).append(time.time())
             error = "That key isn't right."
-    return render_template_string(_web_file("login.html"), error=error)
+    return render_template_string(_web_file("login.html"), error=error, discord_oauth=bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET))
+
+
+def _oauth_redirect_uri():
+    if DISCORD_REDIRECT_URI:
+        return DISCORD_REDIRECT_URI
+    proto = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    return f"{proto}://{host}/login/discord/callback"
+
+
+@app.route("/login/discord")
+def admin_login_discord():
+    """Bot owners can sign in with their Discord account instead of the admin key."""
+    if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET):
+        return redirect(url_for("admin_login"))
+    session["oauth_state"] = secrets.token_urlsafe(24)
+    q = urllib.parse.urlencode({"client_id": DISCORD_CLIENT_ID, "response_type": "code", "scope": "identify", "prompt": "none",
+                                "redirect_uri": _oauth_redirect_uri(), "state": session["oauth_state"]})
+    return redirect(f"https://discord.com/oauth2/authorize?{q}")
+
+
+@app.route("/login/discord/callback")
+def admin_login_discord_callback():
+    def fail(msg):
+        return render_template_string(_web_file("login.html"), error=msg, discord_oauth=bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET)), 400
+    state = session.pop("oauth_state", None)
+    if request.args.get("error"):
+        return fail("Discord sign-in was cancelled.")
+    if not state or not hmac.compare_digest(state, request.args.get("state", "")) or not request.args.get("code"):
+        return fail("That sign-in link expired. Try again.")
+    try:
+        tok = requests.post("https://discord.com/api/v10/oauth2/token", data={
+            "client_id": DISCORD_CLIENT_ID, "client_secret": DISCORD_CLIENT_SECRET, "grant_type": "authorization_code",
+            "code": request.args["code"], "redirect_uri": _oauth_redirect_uri()}, timeout=15)
+        access = tok.json().get("access_token")
+        me = requests.get("https://discord.com/api/v10/users/@me", headers={"Authorization": f"Bearer {access}"}, timeout=15).json() if access else {}
+    except (requests.RequestException, ValueError):
+        return fail("Couldn't reach Discord. Try again in a moment.")
+    if not me.get("id"):
+        return fail("Discord didn't accept that sign-in. Check DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET and the redirect URI (" + _oauth_redirect_uri() + ").")
+    user = types.SimpleNamespace(id=me["id"], name=me.get("username", ""))
+    if not is_bot_owner(user):
+        return fail("This Discord account isn't a bot owner.")
+    session.clear()
+    session.update(admin=True, admin_id=str(me["id"]), admin_name=me.get("global_name") or me.get("username") or "Owner")
+    return redirect(url_for("dashboard"))
 
 
 @app.route("/logout")
@@ -687,7 +747,7 @@ def _dash_color(choice):
     if choice == "mine":
         choice = "Blue"
     if choice not in DASH_COLORS:
-        raise ValueError("That isn't one of the colours.")
+        raise ValueError("That isn't one of the colors.")
     return DASH_COLORS[choice]
 
 
@@ -1026,10 +1086,13 @@ def send_webhook():
     if not signature or not timestamp:
         return Response("missing signature", 401)
 
+    if not PUBLIC_KEY:
+        print("[events] DISCORD_PUBLIC_KEY isn't set, so Discord's event webhooks can't be verified.")
+        return Response("not configured", 503)
     try:
         verify_key = nacl.signing.VerifyKey(bytes.fromhex(PUBLIC_KEY))
         verify_key.verify(f'{timestamp}{body}'.encode(), bytes.fromhex(signature))
-    except nacl.exceptions.BadSignatureError:
+    except (nacl.exceptions.BadSignatureError, ValueError):
         return Response("invalid signature", 401)
 
     payload = request.json
@@ -1050,8 +1113,8 @@ def send_webhook():
 
         webhook = os.environ.get('webhook_url')
         if not webhook:
-            print("Webhook URL not set in environment")
-            return "webhook missing", 500
+            print("webhook_url isn't set, so this event isn't posted anywhere.")
+            return Response(status=204)      # still acknowledge it, or Discord disables the endpoint
 
         if event_type == "APPLICATION_AUTHORIZED":
             # User authorization
@@ -1172,11 +1235,32 @@ colors = lua.decode(colors_lua)
 bot = Shapes(command_prefix="/", intents=discord.Intents.all())
 
 # /roblox ... lives in one command group; the Roblox cog (below) adds the verification commands to it and the tree gets it when the cog loads.
+@bot.tree.error
+async def _tree_error(interaction, error):
+    if isinstance(error, app_commands.CheckFailure) and "Shapes API is down" in str(error):
+        return      # already answered with the "API is down" message
+    import traceback
+    print(f"[command error] {getattr(interaction.command, 'qualified_name', '?')}")
+    traceback.print_exception(type(error), error, error.__traceback__)
+
+
 roblox_group = app_commands.Group(
     name="roblox", description="Roblox lookups, verification, your linked accounts and group info",
     allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
     allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True))
 roblox_panel = app_commands.Group(name="panel", description="Set up Roblox verification for this server (server admins)", parent=roblox_group)
+
+
+async def _roblox_api_check(interaction):
+    """Everything under /roblox except `group` needs the Shapes API. If it's down, say so instead of running."""
+    if getattr(interaction.command, "name", "") == "group" or not await asyncio.to_thread(api_down):
+        return True
+    await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
+    raise app_commands.CheckFailure("Shapes API is down")
+
+
+roblox_group.interaction_check = _roblox_api_check
+roblox_panel.interaction_check = _roblox_api_check
 #tree = app_commands.CommandTree(bot)
 
 class TopGGIntegration:
@@ -1363,7 +1447,7 @@ async def update_guild_cache():
         cached_guilds = list(bot.guilds)
         print(f"[SYSTEM] Watching {len(cached_guilds)} Servers!")
         print(f"[SYSTEM] Watching {BotInfo.approximate_user_install_count} Users!")
-        await bot.change_presence(activity=discord.CustomActivity(name=f"🔗 shapes.lol/discord"))
+        await bot.change_presence(activity=discord.CustomActivity(name="🔗 /help"))
         await asyncio.sleep(2)
         #if len(bot.guilds) == 1:
             #print(bot.guilds[0].name)
@@ -1570,7 +1654,7 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     BotInfo = await bot.application_info()
     #print(BotInfo)
-    await bot.change_presence(activity=discord.CustomActivity(name=f"🔗 shapes.lol/discord"))
+    await bot.change_presence(activity=discord.CustomActivity(name="🔗 /help"))
     # Start the cache updater task
     Shapes(command_prefix="/", intents=discord.Intents.all())
     bot.loop.create_task(update_guild_cache())
@@ -1814,7 +1898,8 @@ async def discord2roblox(interaction: discord.Interaction, user: discord.User): 
     except requests.exceptions.RequestException as e:
         #print(f"Error fetching data for Discord ID: {userid}: {e}")
         failedembed3 = discord.Embed(
-            title=f"Error retrieving Roblox Profile from {user.name}",
+            title="The Shapes API is down",
+            description=API_DOWN_TEXT,
             color=discord.Color.red()
         )
         await interaction.edit_original_response(embed=failedembed3)
@@ -2117,11 +2202,11 @@ async def settings(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=SettingsView(), ephemeral=True)
 
 
-@bot.tree.command(name="status", description=f"Get the {MainURL} status")
+@bot.tree.command(name="status", description="Get the bot status")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"[shapes.lol Status Page](https://shapes.lol/status)")
+    await interaction.response.send_message(f"[Shapes Status](https://status.lecanact.me)")
 
 @bot.tree.command(name="stop", description="Stop the bot.")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -2364,7 +2449,8 @@ async def roblox2discord(interaction: discord.Interaction, user: str):
     except requests.exceptions.RequestException as e:
         #print(f"Error fetching data for ID {UserID}: {e}")
         failedembed2 = discord.Embed(
-            title=f"Error retrieving Discord User from {Username}",
+            title="The Shapes API is down",
+            description=API_DOWN_TEXT,
             color=discord.Color.red()
         )
         await interaction.edit_original_response(embed=failedembed2)
@@ -2411,7 +2497,8 @@ async def discord2roblox(interaction: discord.Interaction, user: discord.User):
     except requests.exceptions.RequestException as e:
         #print(f"Error fetching data for Discord ID: {userid}: {e}")
         failedembed3 = discord.Embed(
-            title=f"Error retrieving Roblox Profile from {user.name}",
+            title="The Shapes API is down",
+            description=API_DOWN_TEXT,
             color=discord.Color.red()
         )
         await interaction.edit_original_response(embed=failedembed3)
@@ -2491,7 +2578,7 @@ async def ai(interaction: discord.Interaction, *, prompt: str):
 @bot.tree.command(name="google", description="Search Something On Google.")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def google(interaction: discord.Interaction, query: str = "shapes.lol"):
+async def google(interaction: discord.Interaction, query: str = "Shapes"):
     await interaction.response.defer()
     
     thinkingembed = discord.Embed(
@@ -2956,7 +3043,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                             roblox_badges = badges_data
                     
                     rolimons_stats_url = f"https://api.rolimons.com/players/v1/playerinfo/{UserID}"
-                    async with session.get(rolimons_stats_url, headers={'User-Agent': 'shapes.lol'}) as response:
+                    async with session.get(rolimons_stats_url, headers={'User-Agent': 'Shapes (Discord bot)'}) as response:
                         if response.status == 200:
                             rolimons_stats_data = await response.json()
                             if rolimons_stats_data.get('success'):
@@ -3192,7 +3279,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 embed.set_thumbnail(url=avatar_image)
             
             embed.set_footer(
-                text=f"{current_status['text']} | Requested by {interaction.user.name} | https://shapes.lol",
+                text=f"{current_status['text']} | Requested by {interaction.user.name} | {MainURL}",
                 icon_url=current_status['icon_url']
             )
             
@@ -3870,7 +3957,7 @@ class HelpDropdown(discord.ui.Select):
                 "• /ping - Check bot latency and connection\n"
                 "• /invite - Get bot invite link\n"
                 "• /google - Search something on Google\n"
-                "• /status - Check shapes.lol status\n"
+                "• /status - Bot status\n"
                 "• /userinstalls - Get user installation count\n"
                 "• /servercount - Get server count\n"
                 "• /server info - Information about this server\n"
@@ -3916,7 +4003,7 @@ async def countingleaderboard(interaction: discord.Interaction):
     
     embed = discord.Embed(
         title="Counting Leaderboard",
-        description=f"[Click here to view the counting leaderboard](https://shapes.lol/counting/leaderboard/)",
+        description=f"[Click here to view the counting leaderboard]({SITE_URL}/counting/leaderboard/)",
         color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
     )
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
@@ -5619,7 +5706,7 @@ async def discordbanner(interaction: discord.Interaction, user: Optional[discord
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def linkroblox(interaction: discord.Interaction):
     embed = discord.Embed(
-        description=f"[Click here to link your Roblox account](https://api.shapes.lol/login?type=discord)",
+        description=f"[Click here to link your Roblox account]({(os.environ.get("API_PUBLIC_URL") or "https://api.shapes-yapper.oriaxen.com").rstrip("/")}/login?type=discord)",
         color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
     )
     await interaction.response.send_message(embed=embed, ephemeral=False)
@@ -6381,9 +6468,13 @@ def roblox_init(m):
             return None
         try:
             r = http.request(method, f"{m.APIBaseURL}{path}", json=body, headers=headers, timeout=30)
+            if r.status_code >= 502:
+                raise requests.RequestException(f"HTTP {r.status_code}")
             data = r.json()
+            _api_mark(True)
             return data if isinstance(data, dict) else None
         except (requests.RequestException, ValueError):
+            _api_mark(False)
             return None
 
     async def api(method, path, body=None):
@@ -6777,7 +6868,7 @@ def roblox_init(m):
         """(accounts list, error text). The API makes the person record on first contact, so no Yapin' account is needed."""
         person = await api("GET", f"/internal/person/{PLATFORM}/{interaction.user.id}") or {}
         if not person.get("success"):
-            return None, "Verification isn't available right now. Try again in a moment."
+            return None, API_DOWN_TEXT
         return person.get("accounts") or [], None
 
     def pick(accts, q):
@@ -7650,14 +7741,27 @@ class DMLogCog(commands.Cog, name="DM log"):
 LASTFM_LINK_TTL = 600
 
 
-def _shapes_call(method, path, body=None):
+def _shapes_call(method, path, body=None, timeout=15):
     """The Shapes API's JSON (a dict), or None when it can't be reached."""
     try:
-        r = requests.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=15)
+        r = requests.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=timeout)
+        if r.status_code >= 502:
+            raise requests.RequestException(f"HTTP {r.status_code}")
         data = r.json()
+        _api_mark(True)
         return data if isinstance(data, dict) else None
     except (requests.RequestException, ValueError):
+        _api_mark(False)
         return None
+
+
+def api_down():
+    """True when the Shapes API isn't answering (and this bot is set up to use it). Re-checked at most every 20 seconds."""
+    if not APIBaseURL_Key:
+        return False
+    if time.time() - _api_state["at"] > 20:
+        _shapes_call("GET", "/internal/version", timeout=4)
+    return _api_state["down"]
 
 
 def lastfm_name_of(user_id):
@@ -7684,17 +7788,21 @@ class LastfmCog(commands.Cog, name="Last.fm"):
 
     @lastfm.command(name="link", description="Link your Last.fm account")
     async def link(self, interaction: discord.Interaction):
+        if await asyncio.to_thread(api_down):
+            return await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
         started = await asyncio.to_thread(_shapes_call, "POST", "/internal/link/start",
                                           {"provider": "lastfm", "platform": "discord", "yapin_id": str(interaction.user.id), "yapin_name": interaction.user.name})
         url = (started or {}).get("url")
         if not url:
-            return await interaction.response.send_message(str((started or {}).get("data") or "Couldn't reach the linking service. Try again in a moment."), ephemeral=True)
+            return await interaction.response.send_message(str((started or {}).get("data") or API_DOWN_TEXT), ephemeral=True)
         view = discord.ui.View(timeout=LASTFM_LINK_TTL)
         view.add_item(discord.ui.Button(label="Authorize on Last.fm", style=discord.ButtonStyle.link, url=url))
         await interaction.response.send_message("Tap the button, approve access on Last.fm and you're linked. The link works for 10 minutes and only for you.", view=view, ephemeral=True)
 
     @lastfm.command(name="unlink", description="Unlink your Last.fm account")
     async def unlink(self, interaction: discord.Interaction):
+        if await asyncio.to_thread(api_down):
+            return await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
         had = await asyncio.to_thread(lastfm_name_of, interaction.user.id)
         await asyncio.to_thread(_shapes_call, "DELETE", f"/internal/links/{interaction.user.id}/lastfm?platform=discord")
         await interaction.response.send_message("Unlinked your Last.fm account." if had else "You had no Last.fm account linked.", ephemeral=True)
@@ -7703,6 +7811,8 @@ class LastfmCog(commands.Cog, name="Last.fm"):
     @app_commands.describe(user="Who to show (default: you)")
     async def user(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
+        if await asyncio.to_thread(api_down):
+            return await interaction.response.send_message(API_DOWN_TEXT, ephemeral=True)
         name = await asyncio.to_thread(lastfm_name_of, target.id)
         if not name:
             who = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"
