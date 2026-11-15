@@ -1442,7 +1442,7 @@ bot.tree = tree
 BOT = bot
 owner = "leandre"
 MainURL = "https://shapes-yapper.oriaxen.com"
-InviteURL = os.environ.get("YAPPER_INVITE_URL", "https://our-websites.github.io/shapes.lol/yapin?s=true")
+InviteURL = os.environ.get("YAPPER_INVITE_URL", MainURL)
 searchengine = "621a38269031b4e89"  # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
 APIBaseURL_Key = _secret("Shapes_API_Key")
@@ -2971,7 +2971,7 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="Utility", value=(
         "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI (/clearai deletes your history)\n• /github - GitHub user\n"
         "• /roll, /coinflip, /8ball, /choose, /calc - Dice, coins, answers, picks and maths\n• /cat, /dog, /fact - Pictures and facts\n"
-        "• /instagram - Instagram user\n• /status - shapes.lol status\n• /servercount, /userinstalls - Counts\n• /spookpfp - spook.bio"), inline=False)
+        "• /instagram - Instagram user\n• /status - Bot status\n• /servercount, /userinstalls - Counts\n• /spookpfp - spook.bio"), inline=False)
     embed.add_field(name="Yapper profile", value="• /yapinuser - Info about a user\n• /yapinavatar - Avatar\n• /yapinbanner - Banner", inline=False)
     embed.set_footer(text="Right-click context menus from the Discord bot are not available on Yapper; use the slash commands.")
     await interaction.response.send_message(embed=embed)
@@ -4480,7 +4480,7 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                             roblox_badges = badges_data
 
                     rolimons_stats_url = f"https://api.rolimons.com/players/v1/playerinfo/{UserID}"
-                    async with session.get(rolimons_stats_url, headers={'User-Agent': 'our-websites.github.io/shapes.lol/yapin'}) as response:
+                    async with session.get(rolimons_stats_url, headers={'User-Agent': 'Shapes (Yapin bot)'}) as response:
                         if response.status == 200:
                             rolimons_stats_data = await response.json()
                             if rolimons_stats_data.get('success'):
@@ -5938,7 +5938,7 @@ async def limiteds(interaction: discord.Interaction, username: str):
             value = 0
             try:
                 rolimons_url = f"https://api.rolimons.com/players/v1/playerinfo/{user_id}"
-                async with session.get(rolimons_url, headers={'User-Agent': 'shapes.lol'}) as response:
+                async with session.get(rolimons_url, headers={'User-Agent': 'Shapes (Yapin bot)'}) as response:
                     if response.status == 200:
                         rolimons_data = await response.json()
                         if rolimons_data.get('success'):
@@ -7679,7 +7679,7 @@ def rate_limited(limit=60, window=60):
 
 
 def _is_shapes_api_call():
-    """The Shapes API (same machine) presenting the internal token. It is how api.shapes.lol reads /mutuals for its keyed
+    """The Shapes API (same machine) presenting the internal token. It is how the Shapes API reads /mutuals for its keyed
     route; nothing that arrives through a proxy counts."""
     if not API_INTERNAL_TOKEN:
         return False

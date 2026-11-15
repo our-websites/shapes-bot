@@ -1,6 +1,6 @@
 # Shapes (Yapper bot)
 
-The shapes.lol bot, running on [Yapper](https://www.yapper.website/developers) with `yapper.py`.
+The Shapes bot, running on [Yapper](https://www.yapper.website/developers) with `yapper.py`.
 
 ## Run it
 
@@ -49,7 +49,7 @@ Profile lookups are cached for 60 seconds, so heavy use stays well under Last.fm
 The bot's web server now serves the public site (`/`, `/commands`, `/about`, `/counting/leaderboard/`) straight from the
 bot's own data, and a dashboard at `/dashboard`:
 
-- **Login with Yapin'** goes through the Shapes API (`api.shapes.lol` repo). Put `YAPIN_CLIENT_ID` / `YAPIN_CLIENT_SECRET` in the API's `.env`, register `${API PUBLIC_URL}/auth/yapin/callback` as the redirect, and list this site's host in the API's `YAPIN_RETURN_HOSTS`.
+- **Login with Yapin'** goes through the Shapes API (the Shapes API repo). Put `YAPIN_CLIENT_ID` / `YAPIN_CLIENT_SECRET` in the API's `.env`, register `${API PUBLIC_URL}/auth/yapin/callback` as the redirect, and list this site's host in the API's `YAPIN_RETURN_HOSTS`.
 - **My servers**: owners, administrators and people with a manage-server role can edit automod, counting (channel, emoji) and autorole.
 - **Other servers**: servers you're in with Shapes but can't manage (read-only counting stats).
 - **Admin** (only for `ADMIN_USER_IDS`): the bot-owner dashboard, also reachable at `/admin` (the `ADMIN_KEY` login still works).

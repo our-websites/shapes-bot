@@ -7,7 +7,7 @@ The dashboard lets anyone sign in with Yapin' and see the servers they share wit
 (owner, administrator, or a role with manage server) can change its automod, counting and autorole settings; everyone else
 gets a read-only list. The bot-owner admin dashboard (/admin) shows up as a tab only for ids in ADMIN_USER_IDS.
 
-Sign-in goes through the Shapes API (the api.shapes.lol repo) running on this machine: it does the OAuth dance with Yapin
+Sign-in goes through the Shapes API (the Shapes API repo) running on this machine: it does the OAuth dance with Yapin
 and hands the bot a one-time ticket over localhost, so the bot never sees the client secret or a code.
 """
 import base64
