@@ -685,20 +685,30 @@ def _oauth_redirect_uri():
     return f"{proto}://{host}/login/discord/callback"
 
 
-@app.route("/login/discord")
-def admin_login_discord():
-    """Bot owners can sign in with their Discord account instead of the admin key."""
-    if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET):
-        return redirect(url_for("admin_login"))
+def oauth_start(kind):
+    """Send the person to Discord to sign in. kind: "admin" (bot owners, dashboard) or "user" (anyone, /dashboard)."""
     session["oauth_state"] = secrets.token_urlsafe(24)
+    session["oauth_kind"] = kind
     q = urllib.parse.urlencode({"client_id": DISCORD_CLIENT_ID, "response_type": "code", "scope": "identify", "prompt": "none",
                                 "redirect_uri": _oauth_redirect_uri(), "state": session["oauth_state"]})
     return redirect(f"https://discord.com/oauth2/authorize?{q}")
 
 
+@app.route("/login/discord")
+def admin_login_discord():
+    """Bot owners can sign in with their Discord account instead of the admin key."""
+    if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET):
+        return redirect(url_for("admin_login"))
+    return oauth_start("admin")
+
+
 @app.route("/login/discord/callback")
 def admin_login_discord_callback():
+    kind = session.pop("oauth_kind", "admin")
+
     def fail(msg):
+        if kind == "user":
+            return redirect("/dashboard?login_error=1")
         return render_template_string(_web_file("login.html"), error=msg, discord_oauth=bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET)), 400
     state = session.pop("oauth_state", None)
     if request.args.get("error"):
@@ -715,6 +725,11 @@ def admin_login_discord_callback():
         return fail("Couldn't reach Discord. Try again in a moment.")
     if not me.get("id"):
         return fail("Discord didn't accept that sign-in. Check DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET and the redirect URI (" + _oauth_redirect_uri() + ").")
+    if kind == "user":
+        avatar = f"https://cdn.discordapp.com/avatars/{me['id']}/{me['avatar']}.png?size=64" if me.get("avatar") else None
+        session.clear()
+        session["duser"] = {"id": str(me["id"]), "name": me.get("global_name") or me.get("username") or "You", "avatar": avatar}
+        return redirect("/dashboard")
     user = types.SimpleNamespace(id=me["id"], name=me.get("username", ""))
     if not is_bot_owner(user):
         return fail("This Discord account isn't a bot owner.")
@@ -729,7 +744,6 @@ def admin_logout():
     return redirect(url_for("admin_login"))
 
 
-@app.route("/", methods=["GET"])
 @app.route("/admin", methods=["GET"])
 @admin_required
 def dashboard():
@@ -1115,8 +1129,7 @@ def shutdown():
     func()
     return 'Server shutting down...'  
     
-@app.route('/commands', methods=['GET'])
-def send_commands():
+def commands_payload():
     commands = {}
     commands['Commands'] = {}
     for cmd in list(bot.tree.walk_commands()) + list(bot.tree.get_commands(type=discord.AppCommandType.user)) + list(bot.tree.get_commands(type=discord.AppCommandType.message)):
@@ -1139,8 +1152,14 @@ def send_commands():
         
         commands['Commands'][cmd.qualified_name] = cmd_data
     commands['success'] = True
-    return jsonify(commands), 200
-    
+    return commands
+
+
+def command_entries():
+    """Every command as {name, description, options, type}."""
+    return list(commands_payload()["Commands"].values())
+
+
 @app.route('/count/commands', methods=['GET'])
 def get_command_count():
     return {'Commands': str(sum(1 for c in bot.tree.walk_commands() if not isinstance(c, discord.app_commands.Group)))}, 200
@@ -1820,22 +1839,25 @@ def get_user_count():
     else:
         return {"Users":"Unknown"}, 503
 
+def leaderboard_rows():
+    """Counting servers, best first: [{serverName, currentnumber, highestnumber}]."""
+    lb = []
+    for server in countingDB.all():
+        data = counting_get(server)
+        guild = bot.get_guild(int(server)) if str(server).isdigit() else None
+        if data.get("banned", False) == True:
+            print(f'{guild.name if guild else "Unknown"} Is Banned From Counting.')
+            continue
+        if data["enabled"] == True and guild is not None:
+            lb.append({"id": str(server), "serverName": guild.name, "currentnumber": data["number"], "highestnumber": data["highestnumber"]})
+    return sorted(lb, key=lambda r: r["highestnumber"], reverse=True)
+
+
 @app.route('/clb', methods=["GET"])
 def countinglb():
     if bot.is_ready():
-        lb = {}
-        for server in countingDB.all():
-            data = counting_get(server)
-            if data.get("banned", False) == True:
-                print(f'{bot.get_guild(int(server)).name if bot.get_guild(int(server)) else "Unknown"} Is Banned From Counting.')
-                continue
-            if data["enabled"] == True:
-                server_name = bot.get_guild(int(server)).name if bot.get_guild(int(server)) else None
-                if server_name == None:
-                    continue
-                lb[f"{server}"] = {"currentnumber": data['number'],"highestnumber": data['highestnumber'], "serverName": server_name}
-        FullLB = sorted(lb.items(), key=lambda x: x[1]['highestnumber'], reverse=True)
-        return {"Leaderboard":FullLB}, 200
+        FullLB = [(r["id"], {"currentnumber": r["currentnumber"], "highestnumber": r["highestnumber"], "serverName": r["serverName"]}) for r in leaderboard_rows()]
+        return {"Leaderboard": FullLB}, 200
     else:
         return jsonify("Bot is still starting"), 503
 
@@ -8178,6 +8200,13 @@ def run_bot():
         print("DISCORD_TOKEN is not set. Copy .env.example to .env and fill it in.")
         os._exit(1)
     bot.run(token)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import siteweb
+import webdash
+siteweb.register(sys.modules[__name__])
+webdash.register(sys.modules[__name__])
+
+
 # === Run Bot + Flask Webserver ===
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 13455))

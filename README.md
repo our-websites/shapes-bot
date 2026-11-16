@@ -33,4 +33,6 @@ Open the bot's web address and sign in with `ADMIN_KEY`. Servers (channels, memb
 ## Discord events and sign-in
 - **Event webhook** (`POST /discord/webhook`): in the Developer Portal set *Webhook Events URL* to `https://YOUR-HOST/discord/webhook`, and put the app's public key in `DISCORD_PUBLIC_KEY`. Events (app authorized/removed, etc.) are posted to `webhook_url`.
 - **Sign in with Discord** (optional): set `DISCORD_CLIENT_ID` and `DISCORD_CLIENT_SECRET` and add `https://YOUR-HOST/login/discord/callback` as a redirect. Bot owners (see `OWNER_IDS`) can then use it instead of the admin key, and the Logs tab shows who did what.
+- **Website**: `/` is the landing page (with Counting, Commands, About, Support). Members sign in at `/dashboard` with the same Discord login to manage counting in servers they run (Manage Server or Administrator) and their linked Roblox accounts. The admin dashboard is at `/admin`.
+- Optional website settings: `YAPIN_SITE_URL` (link to the Yapin' version, default `https://shapes-yapper.oriaxen.com`), `BOT_INVITE_URL`, `SUPPORT_URL`.
 - If the Shapes API is down, Roblox and Last.fm commands say so instead of reporting "not linked".

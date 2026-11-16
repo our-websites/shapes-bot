@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Dashboard · Shapes</title>
+<style>
+  :root { color-scheme: dark; --bg:#050505; --panel:#0d0d0f; --ink:#fff; --muted:#9b9b9f; --line:rgba(160,160,170,.25);
+    --accent:#6366f1; --danger:#f2877f; --ok:#6fcf8d; --field:#08080a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:inherit; }
+  header { display:flex; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header .brand { font-weight:700; text-decoration:none; margin-right:auto; }
+  header .who { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:14px; }
+  header img { width:24px; height:24px; border-radius:50%; }
+  main { max-width:860px; margin:0 auto; padding:20px 16px 48px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .tabs { display:flex; gap:6px; margin-bottom:18px; }
+  .tab, .btn { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:8px; padding:8px 14px; text-decoration:none; display:inline-block; }
+  .tab.on, .btn.primary { background:var(--accent); border-color:transparent; font-weight:600; }
+  .btn.danger { color:var(--danger); }
+  .btn.sm { padding:5px 10px; font-size:13px; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .list { display:grid; gap:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .row .grow { flex:1; min-width:0; }
+  .ico { width:40px; height:40px; border-radius:50%; background:var(--field); object-fit:cover; flex:none; display:grid; place-items:center; color:var(--muted); font-weight:700; }
+  .muted { color:var(--muted); font-size:13px; }
+  .name { font-weight:600; overflow-wrap:anywhere; }
+  select { font:inherit; color:inherit; background:var(--field); border:1px solid var(--line); border-radius:8px; padding:8px 10px; max-width:100%; }
+  label.chk { display:flex; align-items:center; gap:8px; margin:12px 0; }
+  .msg { margin:0 0 14px; padding:9px 12px; border-radius:8px; border:1px solid var(--line); }
+  .msg.err { border-color:rgba(242,135,127,.4); background:rgba(242,135,127,.08); color:var(--danger); }
+  .msg.ok { border-color:rgba(111,207,141,.4); background:rgba(111,207,141,.08); color:var(--ok); }
+  .center { text-align:center; padding:60px 0; }
+  footer { text-align:center; color:var(--muted); font-size:12px; padding:20px; }
+  .stats { display:flex; gap:20px; margin:10px 0; flex-wrap:wrap; }
+  .stats b { display:block; font-size:18px; }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">Shapes</a>
+  <div class="who" id="who"></div>
+</header>
+<main id="app"></main>
+<footer id="foot"></footer>
+<script>
+const BOOT = __BOOT__;
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let tab = "servers", flash = null;
+
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers: body ? {"Content-Type": "application/json"} : {}, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin"});
+  let d = {}; try { d = await r.json(); } catch (e) {}
+  if (r.status === 401) { location.href = "/dashboard"; throw new Error("login"); }
+  if (!r.ok) { const e = new Error(d.error || "Something went wrong (" + r.status + ")."); e.api_down = d.api_down; throw e; }
+  return d;
+}
+const note = (kind, text) => { flash = {kind, text}; };
+const flashHtml = () => { const f = flash; flash = null; return f ? `<p class="msg ${f.kind}">${esc(f.text)}</p>` : ""; };
+
+let target = null;
+function shell(inner) { (target || $("app")).innerHTML = inner; }
+
+function landing() {
+  shell(`<div class="center"><h1>Shapes dashboard</h1><p class="sub">Sign in with Discord to manage your servers and linked Roblox accounts.</p>
+    ${BOOT.error ? '<p class="msg err">Sign-in didn\'t go through. Try again.</p>' : ""}
+    ${BOOT.oauth ? '<a class="btn primary" href="/dashboard/login">Sign in with Discord</a>' : '<p class="msg err">Sign-in isn\'t set up on this bot yet.</p>'}</div>`);
+}
+
+async function servers() {
+  shell(`<p class="muted">Loading…</p>`);
+  try {
+    const d = await api("GET", "/me/servers");
+    const add = `<a class="btn sm" href="${esc(BOOT.invite)}">Add Shapes to a server</a>`;
+    if (!d.servers.length) return shell(`${flashHtml()}<p class="sub">You don't manage any servers that have Shapes yet. You need Manage Server or Administrator.</p>${add}`);
+    shell(`${flashHtml()}<div class="list">${d.servers.map(s => `<div class="card row">
+      ${s.icon ? `<img class="ico" src="${esc(s.icon)}" alt="">` : `<div class="ico">${esc(s.name[0] || "?")}</div>`}
+      <div class="grow"><div class="name">${esc(s.name)}</div><div class="muted">${s.members.toLocaleString()} members</div></div>
+      <button class="btn sm" data-sid="${esc(s.id)}">Manage</button></div>`).join("")}</div><p style="margin-top:14px">${add}</p>`);
+    document.querySelectorAll("[data-sid]").forEach(b => b.onclick = () => server(b.dataset.sid));
+  } catch (e) { shell(`<p class="msg err">${esc(e.message)}</p>`); }
+}
+
+async function server(sid) {
+  shell(`<p class="muted">Loading…</p>`);
+  try {
+    const s = await api("GET", "/me/servers/" + sid), c = s.counting;
+    shell(`${flashHtml()}<p><button class="btn sm" id="back">← Servers</button></p><h1>${esc(s.name)}</h1>
+      <div class="card"><div class="name">Counting</div>
+        <div class="stats"><div><b>${c.number}</b><span class="muted">current number</span></div><div><b>${c.highest}</b><span class="muted">highest</span></div></div>
+        ${c.banned ? '<p class="msg err">Counting is turned off for this server by the bot\'s owners.</p>' : `
+        <label class="chk"><input type="checkbox" id="en" ${c.enabled ? "checked" : ""}> Counting is on</label>
+        <label class="muted" for="ch">Counting channel</label><br>
+        <select id="ch"><option value="">Choose a channel…</option>${s.channels.map(x => `<option value="${esc(x.id)}" ${x.id === c.channel ? "selected" : ""}>#${esc(x.name)}</option>`).join("")}</select>
+        <p><button class="btn primary" id="save">Save</button></p>`}
+      </div>`);
+    $("back").onclick = servers;
+    if ($("save")) $("save").onclick = async () => {
+      $("save").disabled = true;
+      try {
+        const body = {enabled: $("en").checked}; if ($("ch").value) body.channel = $("ch").value;
+        await api("POST", `/me/servers/${sid}/counting`, body); note("ok", "Saved.");
+      } catch (e) { note("err", e.message); }
+      server(sid);
+    };
+  } catch (e) { shell(`<p><button class="btn sm" id="back">← Servers</button></p><p class="msg err">${esc(e.message)}</p>`); $("back").onclick = servers; }
+}
+
+async function roblox() {
+  shell(`<p class="muted">Loading…</p>`);
+  try {
+    const d = await api("GET", "/me/roblox");
+    shell(`${flashHtml()}<p class="sub">Roblox accounts linked to your Discord. The Shapes API keeps these.</p><div class="list">
+      ${d.accounts.length ? d.accounts.map(a => `<div class="card row">
+        ${a.avatar ? `<img class="ico" src="${esc(a.avatar)}" alt="">` : `<div class="ico">R</div>`}
+        <div class="grow"><div class="name"><a href="${esc(a.profile)}" target="_blank" rel="noopener">${esc(a.display_name || a.name)}</a> <span class="muted">@${esc(a.name)}</span></div>
+          <div class="muted">${a.auto_verify ? "Auto-verify · " : ""}${a.hidden ? "Hidden" : "Visible"}</div></div>
+        <button class="btn sm" data-act="auto" data-id="${esc(a.id)}" data-on="${a.auto_verify ? 1 : 0}">${a.auto_verify ? "Stop auto-verify" : "Use for auto-verify"}</button>
+        <button class="btn sm" data-act="hide" data-id="${esc(a.id)}" data-on="${a.hidden ? 1 : 0}">${a.hidden ? "Show" : "Hide"}</button>
+        <button class="btn sm danger" data-act="remove" data-id="${esc(a.id)}">Remove</button></div>`).join("")
+        : `<div class="card muted">No Roblox accounts linked yet.</div>`}</div>
+      <p style="margin-top:14px"><button class="btn primary" id="link" ${d.accounts.length >= d.max ? "disabled" : ""}>Link a Roblox account</button></p>`);
+    $("link").onclick = async () => { try { const r = await api("POST", "/me/roblox/link", {}); if (r.url) location.href = r.url; } catch (e) { note("err", e.message); roblox(); } };
+    document.querySelectorAll("[data-act]").forEach(b => b.onclick = async () => {
+      const id = b.dataset.id, on = b.dataset.on === "1";
+      try {
+        if (b.dataset.act === "remove") { if (!confirm("Remove this Roblox account from your Discord?")) return; await api("POST", "/me/roblox/remove", {roblox_id: id}); }
+        else if (b.dataset.act === "auto") await api("POST", "/me/roblox/auto", {roblox_id: on ? null : id});
+        else await api("POST", "/me/roblox/hide", {roblox_id: id, hidden: !on});
+      } catch (e) { note("err", e.message); }
+      roblox();
+    });
+  } catch (e) { shell(`<p class="msg err">${esc(e.message)}</p>`); }
+}
+
+function render() {
+  target = null;
+  if (!BOOT.user) return landing();
+  shell(`<h1>Dashboard</h1><div class="tabs"><button class="tab ${tab === "servers" ? "on" : ""}" id="t1">Servers</button><button class="tab ${tab === "roblox" ? "on" : ""}" id="t2">Roblox</button></div><div id="pane"></div>`);
+  $("t1").onclick = () => { tab = "servers"; render(); };
+  $("t2").onclick = () => { tab = "roblox"; render(); };
+  target = $("pane");
+  (tab === "servers" ? servers : roblox)();
+}
+
+if (BOOT.user) {
+  $("who").innerHTML = `${BOOT.user.avatar ? `<img src="${esc(BOOT.user.avatar)}" alt="">` : ""}<span>${esc(BOOT.user.name)}</span><a href="/dashboard/logout">Sign out</a>`;
+}
+$("foot").innerHTML = BOOT.commit && BOOT.commit.sha ? `Version ${esc(BOOT.commit.sha)}` : "";
+render();
+</script>
+</body>
+</html>
