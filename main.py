@@ -1551,6 +1551,21 @@ def IsInteger(s):
     except ValueError:
         return False  # Conversion failed, it is not an integer
 
+COUNTING_DEFAULTS = {"channel": None, "number": 0, "enabled": False, "warnings": 0, "lastcounter": None, "highestnumber": 0, "banned": False}
+
+
+def counting_get(guild_id):
+    """A server's counting settings with every key present. The database leaves out anything that is empty (a channel nobody picked,
+    nobody counting yet), which used to crash with KeyError: 'channel'. Ids always come back as numbers."""
+    data = {**COUNTING_DEFAULTS, **dict(countingDB.get(str(guild_id)) or {})}
+    for key in ("channel", "lastcounter"):
+        try:
+            data[key] = int(data[key]) if data[key] not in (None, "") else None
+        except (TypeError, ValueError):
+            data[key] = None
+    return data
+
+
 # === Bot Events ===
 @bot.event
 async def on_message(message):
@@ -1561,8 +1576,7 @@ async def on_message(message):
 
     if message.guild:
         server = message.guild
-        countingjson = countingDB.get(server.id)
-        counting_data = countingjson
+        counting_data = counting_get(server.id)
         enabled = counting_data['enabled']
         number = counting_data['number']
         channel = counting_data['channel']
@@ -1694,8 +1708,8 @@ async def on_message_delete(message):
 
     if message.guild:
         server = message.guild
-        counting = countingDB.get(f"{server.id}")
-        if counting:
+        counting = counting_get(server.id)
+        if counting["enabled"]:
             if message.author.id == counting['lastcounter'] and message.channel.id == counting['channel'] and IsInteger(message.content):
                 nextnumber = counting['number'] + 1
                 await message.channel.send(f"{message.author.mention} deleted their message containing the last number. The next number is {nextnumber}")
@@ -1707,8 +1721,8 @@ async def on_message_edit(before, after):
 
     if before.guild:
         server = before.guild
-        counting = countingDB.get(f"{server.id}")
-        if counting:
+        counting = counting_get(server.id)
+        if counting["enabled"]:
             if before.author.id == counting['lastcounter'] and before.channel.id == counting['channel'] and IsInteger(before.content):
                 nextnumber = counting['number'] + 1
                 await before.channel.send(f"{before.author.mention} edited their message containing the last number. The next number is {nextnumber}")
@@ -1811,7 +1825,7 @@ def countinglb():
     if bot.is_ready():
         lb = {}
         for server in countingDB.all():
-            data = countingDB.get(f"{server}")
+            data = counting_get(server)
             if data.get("banned", False) == True:
                 print(f'{bot.get_guild(int(server)).name if bot.get_guild(int(server)) else "Unknown"} Is Banned From Counting.')
                 continue
@@ -2319,62 +2333,48 @@ async def counting(interaction: discord.Interaction, warnings: typing.Optional[a
     if warnings is not None:      # bot owners only: how many warnings before the count is ruined (0 = ruined on the first mistake)
         if not is_bot_owner(interaction.user):
             return await interaction.response.send_message("Only the bot owners can change the warnings amount.", ephemeral=True)
-        data = countingDB.get(server.id) or {"channel": None, "number": 0, "enabled": False, "warnings": 0, "lastcounter": None, "highestnumber": 0}
+        data = counting_get(server.id)
         data["max_warnings"] = int(warnings)
         countingDB.set(server.id, data)
         countingDB.save()
         return await interaction.response.send_message(f"Counting here now allows **{warnings}** warning{'s' if warnings != 1 else ''} before the count is ruined.", ephemeral=True)
-    print(server.id)
-    counting_json = countingDB.get(server.id)
-    countingData = counting_json
-    print(countingData)
-    if not countingData:
-        countingDB.set(server.id, {"channel":None,"number":0,"enabled":False,"warnings":0,"lastcounter":None,"highestnumber":0})
-        countingDB.save()
-        counting_json = countingDB.get(server.id)
-        countingData = counting_json
-    print(countingData)
-    print(countingData['channel'])
-    print(countingData['number'])
-    print(countingData['enabled'])
-    print(countingData['warnings'])
-    print(countingData['lastcounter'])
-    channels = server.channels
-    channel_options = []
-    ccount = 0
-    for channel in channels:
-        ccount = ccount + 1
-        if isinstance(channel, discord.TextChannel) and ccount != 25:
-            channel_options.append(discord.SelectOption(label=channel.name, value=str(channel.id)))
+    countingData = counting_get(server.id)
+    text_channels = [c for c in server.channels if isinstance(c, discord.TextChannel)]
+    mine = server.get_channel(countingData["channel"]) if countingData["channel"] else None
+    shown = ([mine] if mine else []) + [c for c in text_channels if c != mine]
+    channel_options = [discord.SelectOption(label=c.name[:100], value=str(c.id), default=(c == mine)) for c in shown[:25]]
+    if not channel_options:
+        return await interaction.response.send_message("This server has no text channels for counting.", ephemeral=True)
     class CountingView(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=None)
 
         @discord.ui.button(label="Toggle Counting", style=discord.ButtonStyle.primary, custom_id="toggle_counting", emoji="🔢")
         async def toggle_counting(self, interaction: discord.Interaction, button: discord.ui.Button):
-            counting_json = countingDB.get(server.id)
-            countingData = counting_json
+            countingData = counting_get(server.id)
             current_setting = countingData['enabled']
             if current_setting:
                 countingData['enabled'] = False
                 countingDB.set(server.id, countingData)
+                countingDB.save()
                 await interaction.response.send_message("Counting disabled.", ephemeral=True)
             else:
                 countingData['enabled'] = True
                 countingDB.set(server.id, countingData)
+                countingDB.save()
                 await interaction.response.send_message("Counting enabled.", ephemeral=True)
 
         @discord.ui.select(placeholder="Select Counting Channel", options=channel_options, custom_id="select_channel")
         async def select_channel(self, interaction: discord.Interaction, select: discord.ui.Select):
             selected_channel_id = int(select.values[0])
-            counting_json = countingDB.get(server.id)
-            countingData = counting_json
+            countingData = counting_get(server.id)
             countingData['channel'] = selected_channel_id
             countingDB.set(server.id, countingData)
+            countingDB.save()
             await interaction.response.send_message(f"Counting channel set to <#{selected_channel_id}>.", ephemeral=True)
     embed = discord.Embed(
         title="Counting Settings",
-        description=f"**Current Settings:**\n- Counting Enabled: `{countingData['enabled']}`\n- Counting Channel: `<#{countingData['channel']}>`\n- Current Number: `{countingData['number']}`\n- Highest Number: `{countingData.get('highestnumber', 0)}`\n- Warnings: `{countingData['warnings']}/{counting_limit(countingData)}`\n- Last Counter: `{countingData['lastcounter']}`",
+        description=f"**Current Settings:**\n- Counting Enabled: `{countingData['enabled']}`\n- Counting Channel: {f"<#{countingData['channel']}>" if countingData['channel'] else "`none yet`"}\n- Current Number: `{countingData['number']}`\n- Highest Number: `{countingData.get('highestnumber', 0)}`\n- Warnings: `{countingData['warnings']}/{counting_limit(countingData)}`\n- Last Counter: `{countingData['lastcounter']}`",
         color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
     )
     embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
@@ -8183,4 +8183,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 13455))
     threading.Thread(target=run_bot).start()
     print(f"Starting Flask on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False)
