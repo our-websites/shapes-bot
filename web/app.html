@@ -606,7 +606,19 @@ async function loadTargets() {
 function countPicks() { const n = $$('#anntargets .pick:checked').length; $('#anncount').textContent = n + ' of ' + targets.length + ' selected'; }
 $('#anntargets').onchange = countPicks;
 $('#annall').onchange = e => { $$('#anntargets .pick:not(:disabled)').forEach(c => c.checked = e.target.checked); countPicks(); };
-$('#annimg').oninput = () => { const u = $('#annimg').value.trim(), p = $('#annprev'); if (/^https:\/\//.test(u)) { p.src = u; p.style.display = 'block'; p.onerror = () => p.style.display = 'none'; } else p.style.display = 'none'; };
+$('#annimg').oninput = () => {
+  const raw = $('#annimg').value.trim(), p = $('#annprev');
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('invalid');
+    p.src = parsed.href;
+    p.style.display = 'block';
+    p.onerror = () => p.style.display = 'none';
+  } catch {
+    p.style.display = 'none';
+    p.removeAttribute('src');
+  }
+};
 $('#annform').onsubmit = async e => {
   e.preventDefault();
   const st = $('#annstatus'); st.className = 'status'; st.textContent = '';
