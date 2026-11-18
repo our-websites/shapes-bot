@@ -1,4 +1,4 @@
-yapper.py>=1.8.0
+yapper.py>=1.8.4
 python-dotenv
 flask
 flask-cors
