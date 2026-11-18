@@ -1438,6 +1438,7 @@ DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "
 
 # === Yapper bot ===
 bot = yapper.Bot()
+bot.load_extension("yapper.telemetry") # Shapes is apart of the official yapper.py telemetry program!
 bot.tree = tree
 BOT = bot
 owner = "leandre"
