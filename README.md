@@ -1,6 +1,8 @@
 # Discord Bot Code For Shapes
 
-One file: `main.py`. Features are cogs (classes in that file) and commands with a space are command groups.
+`main.py` holds the bot, the data, shared helpers and the web server. **No commands live in it:** every command is in its own topic file in `cogs/` (general, owner, counting, server_tools, ai, profiles, roblox_lookup, roblox, vortex, lastfm, fun, command_logs, dm_log). Commands with a space are command groups.
+
+**Adding a command:** make `cogs/<topic>.py` (or add to one). Start it with `m = sys.modules.get("main") or sys.modules["__main__"]`, bind what you need from `main.py` (`bot = m.bot`, `embedDB = m.embedDB`, ...), decorate with `@bot.tree.command(...)`, and list it in the file's `_COMMANDS` so it unloads cleanly. Every file in `cogs/` loads on start (A to Z; files starting with `_` are skipped). While debugging, `await bot.reload_extension("cogs.fun")` reloads one file without a restart.
 
 ## Setup
 1. `pip install -r requirements.txt`
