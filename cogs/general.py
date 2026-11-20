@@ -1,5 +1,6 @@
 """Cog: everyday commands: /help, /ping, /invite, /status, /settings, server and install counts."""
 import sys
+import procstats
 from discord import app_commands
 from discord.ext import commands
 import asyncio
@@ -113,29 +114,34 @@ async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"[Shapes Status](https://status.lecanact.me)")
 
 
-@bot.tree.command(name="ping", description="Check the bot's latency.")
+def _quality(ms):
+    return "Great" if ms < 100 else "Good" if ms < 200 else "Average" if ms < 400 else "Poor"
+
+
+def _ping_line(ms):
+    return "Ping: not available" if ms is None else f"Ping: `{ms:.0f}ms` ({_quality(ms)})"
+
+
+def _ping_embed(user, fleet, api_ms):
+    """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each."""
+    embed = discord.Embed(title="Shapes status", color=embedDB.get(f"{user.id}") if embedDB.get(f"{user.id}") else discord.Color.blue())
+    embed.add_field(name="Discord bot (this one)", value=f"{_ping_line(m.bot_latency_ms())}\n{procstats.describe(procstats.snapshot())}", inline=False)
+    api = fleet.get("api")
+    api_text = "Not responding" if not api else f"{_ping_line(api_ms)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
+    embed.add_field(name="Shapes API", value=api_text, inline=False)
+    other = fleet.get("yapin")
+    embed.add_field(name="Yapin' bot", value="Not responding" if not other else f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}", inline=False)
+    embed.set_footer(text=f"Requested By {user.name} | {MainURL}")
+    return embed
+
+
+@bot.tree.command(name="ping", description="Ping, uptime, memory and CPU for this bot, the API and the Yapin' bot.")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ping(interaction: discord.Interaction):
-    latency = bot.latency * 1000
-    connection = "Good" if latency < 200 else "Average" if latency < 400 else "Poor"
-    embed = discord.Embed(
-        title="Bot Server Stats"
-        , description=f"Latency: `{latency:.2f}ms` ({connection} Connection)"
-        , color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
-    )
-    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-    await interaction.response.send_message(embed=embed)
-    await asyncio.sleep(2)
-    updatedlatency = bot.latency * 1000
-    updatedconnection = "Good" if updatedlatency < 200 else "Average" if updatedlatency < 400 else "Poor"
-    embed = discord.Embed(
-        title="Bot Server Stats"
-        , description=f"OriginalLatency: `{latency:.2f}ms` ({connection} Connection)\nEditLatency: `{updatedlatency:.2f}ms` ({updatedconnection} Connection)"
-        , color=embedDB.get(f"{interaction.user.id}") if embedDB.get(f"{interaction.user.id}") else discord.Color.blue()
-    )
-    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-    await interaction.edit_original_response(embed=embed, content=None)
+    await interaction.response.defer()
+    fleet, api_ms = await asyncio.to_thread(m.fleet_stats)
+    await interaction.followup.send(embed=_ping_embed(interaction.user, fleet, api_ms))
 
 
 @bot.tree.command(name="invite", description="Get the bot's invite link.")

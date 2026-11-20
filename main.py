@@ -2123,6 +2123,38 @@ def api_down():
     return _api_state["down"]
 
 
+# --- /ping data: how this bot, the API and the Yapin' bot are doing ---------------------------------------------
+import procstats
+
+
+def bot_latency_ms():
+    """The Discord gateway latency in ms, or None while the bot isn't connected."""
+    try:
+        v = bot.latency
+        return None if v != v else v * 1000          # nan before the first heartbeat
+    except Exception:
+        return None
+
+
+@app.route("/internal/stats")
+def internal_stats():
+    """For the Shapes API (same machine, shared token): this bot's uptime, memory, CPU and ping."""
+    header = request.headers.get("Authorization", "")
+    if not APIBaseURL_Key or not (header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip(), APIBaseURL_Key)):
+        return jsonify({"success": False, "data": "Not allowed"}), 403
+    return jsonify({"success": True, "platform": "discord", "latency_ms": bot_latency_ms(), **procstats.snapshot()})
+
+
+def fleet_stats():
+    """({api, yapin, discord}, ms the API took to answer). Each is None when it isn't answering."""
+    start = time.perf_counter()
+    got = _shapes_call("GET", "/internal/stats", timeout=10)
+    rtt = (time.perf_counter() - start) * 1000
+    if not got or not got.get("success"):
+        return {"api": None, "yapin": None, "discord": None}, None
+    return got, rtt
+
+
 # --- fun/utility command helpers (no Discord/Yapin' types, so both bots share the same text) ---
 
 

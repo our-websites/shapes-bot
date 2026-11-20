@@ -38,3 +38,7 @@ Open the bot's web address and sign in with `ADMIN_KEY`. Servers (channels, memb
 - **Website**: `/` is the landing page (with Counting, Commands, About, Support). Members sign in at `/dashboard` with the same Discord login to manage counting in servers they run (Manage Server or Administrator) and their linked Roblox accounts. The admin dashboard is at `/admin`.
 - Optional website settings: `YAPIN_SITE_URL` (link to the Yapin' version, default `https://shapes-yapper.oriaxen.com`), `BOT_INVITE_URL`, `SUPPORT_URL`.
 - If the Shapes API is down, Roblox and Last.fm commands say so instead of reporting "not linked".
+
+## /ping
+
+`/ping` shows ping, uptime, memory and CPU for this bot, the Shapes API and the Yapin' bot. The bot asks the API (`/internal/stats`), and the API asks both bots for theirs (their own `/internal/stats`, with the shared `SHAPES_API_TOKEN` / `INTERNAL_TOKEN`), so `DISCORD_BOT_URL` and `YAPIN_BOT_URL` must be set on the API. `procstats.py` is the same file in all three repos.
