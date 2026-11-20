@@ -113,7 +113,7 @@ async def restart(interaction: discord.Interaction):
             sys.stderr.flush()
         except Exception:
             pass
-        argv = [sys.executable] + sys.argv
+        argv = list(getattr(sys, "orig_argv", None) or [sys.executable] + sys.argv)   # keeps flags like -u, or the panel's console goes quiet
         try:
             os.closerange(3, 1024)      # nothing (sockets, files) should leak into the new process
             os.execv(sys.executable, argv)

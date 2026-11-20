@@ -4,6 +4,8 @@ import asyncio
 import time
 import yapper
 
+import procstats
+
 m = sys.modules.get("main") or sys.modules["__main__"]   # this bot's main.py: shared helpers, data and the bot itself
 DiscordColors = m.DiscordColors
 InviteURL = m.InviteURL
@@ -109,32 +111,33 @@ async def invite(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-def _latency_ms():
-    """Round trip to the API on a warm (reused) connection, so it measures the network and not the TLS handshake."""
-    bot.api("GET", "/me", retries=0)
-    start = time.perf_counter()
-    bot.api("GET", "/me", retries=0)
-    return (time.perf_counter() - start) * 1000
-
-
 def _quality(ms):
     return "Great" if ms < 100 else "Good" if ms < 200 else "Average" if ms < 400 else "Poor"
 
 
-@bot.tree.command(name="ping", description="Check the bot's latency.")
+def _ping_line(ms):
+    return "Ping: not available" if ms is None else f"Ping: `{ms:.0f}ms` ({_quality(ms)})"
+
+
+def _ping_embed(user, mine, fleet, api_ms):
+    """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each."""
+    embed = discord.Embed(title="Shapes status", color=ecolor(user.id))
+    embed.add_field(name="Yapin' bot (this one)", value=f"{_ping_line(mine)}\n{procstats.describe(procstats.snapshot())}", inline=False)
+    api = fleet.get("api")
+    api_text = "Not responding" if not api else f"Ping: `{api_ms:.0f}ms` ({_quality(api_ms)})\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
+    embed.add_field(name="Shapes API", value=api_text, inline=False)
+    other = fleet.get("discord")
+    embed.add_field(name="Discord bot", value="Not responding" if not other else f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}", inline=False)
+    embed.set_footer(text=f"Requested By {user.name} | {MainURL}")
+    return embed
+
+
+@bot.tree.command(name="ping", description="Ping, uptime, memory and CPU for this bot, the API and the Discord bot.")
 async def ping(interaction: discord.Interaction):
-    latency = _latency_ms()
-    embed = discord.Embed(title="Server Stats", description=f"Latency: `{latency:.2f}ms` ({_quality(latency)} Connection)",
-                          color=ecolor(interaction.user.id))
-    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-    await interaction.response.send_message(embed=embed)
-    await asyncio.sleep(2)
-    updated = _latency_ms()
-    embed = discord.Embed(
-        title="Server Stats", color=ecolor(interaction.user.id),
-        description=f"OriginalLatency: `{latency:.2f}ms` ({_quality(latency)} Connection)\nEditLatency: `{updated:.2f}ms` ({_quality(updated)} Connection)")
-    embed.set_footer(text=f"Requested By {interaction.user.name} | {MainURL}")
-    await interaction.edit_original_response(embed=embed, content=None)
+    await interaction.response.defer()
+    mine = await asyncio.to_thread(m.measure_latency)
+    fleet, api_ms = await asyncio.to_thread(m.fleet_stats)
+    await interaction.followup.send(embed=_ping_embed(interaction.user, mine, fleet, api_ms))
 
 
 class General(yapper.Cog):

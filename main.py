@@ -3804,6 +3804,41 @@ def api_partner(sid):
     return jsonify({"ok": True, "partner": _partner_view(sid)})
 
 
+# --- /ping data: how this bot, the API and the Discord bot are doing ------------------------------------------
+import procstats
+_latency = {"ms": None, "at": 0.0}
+
+
+def measure_latency(max_age=0):
+    """Round trip to the API on a warm (reused) connection, in ms, so it measures the network and not the TLS handshake.
+    Remembered for max_age seconds so /internal/stats doesn't hit the API every time."""
+    if _latency["ms"] is not None and time.time() - _latency["at"] < max_age:
+        return _latency["ms"]
+    shapes_api("GET", "/me", timeout=8)
+    start = time.perf_counter()
+    got = shapes_api("GET", "/me", timeout=8)
+    _latency.update(ms=(time.perf_counter() - start) * 1000 if got is not None else None, at=time.time())
+    return _latency["ms"]
+
+
+@app.route("/internal/stats")
+def internal_stats():
+    """For the Shapes API (same machine, shared token): this bot's uptime, memory, CPU and ping."""
+    if not _is_shapes_api_call():
+        return jsonify({"success": False, "data": "Not allowed"}), 403
+    return jsonify({"success": True, "platform": "yapin", "latency_ms": measure_latency(30), **procstats.snapshot()})
+
+
+def fleet_stats():
+    """{api, yapin, discord} from the Shapes API (each None when it isn't answering) plus the API's round trip in ms."""
+    start = time.perf_counter()
+    got = shapes_api("GET", "/internal/stats", timeout=10)
+    rtt = (time.perf_counter() - start) * 1000
+    if not got or not got.get("success"):
+        return {"api": None, "yapin": None, "discord": None}, None
+    return got, rtt
+
+
 @app.route("/api/status")
 @admin_required
 def api_status():
