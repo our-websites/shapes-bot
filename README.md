@@ -1,6 +1,8 @@
-# Shapes (Yapper bot)
+# Shapes (Yapin' bot)
 
-The Shapes bot, running on [Yapper](https://www.yapper.website/developers) with `yapper.py`.
+[![Shapes#3676](https://yapper-py.rustdactyl.tech/badge/5e872d4a-1892-43ce-aaae-40ecd7acd768.svg)](https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768)
+
+The Shapes bot, running on [Yapin'](https://www.yapper.website/developers) with `yapper.py`.
 
 ## Run it
 
