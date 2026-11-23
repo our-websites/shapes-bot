@@ -119,15 +119,21 @@ def _ping_line(ms):
     return "Ping: not available" if ms is None else f"Ping: `{ms:.0f}ms` ({_quality(ms)})"
 
 
-def _ping_embed(user, mine, fleet, api_ms):
-    """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each."""
+def _ping_embed(user, mine, fleet):
+    """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each. A part that doesn't answer says why."""
+    problems = fleet.get("problems") or {}
     embed = discord.Embed(title="Shapes status", color=ecolor(user.id))
     embed.add_field(name="Yapin' bot (this one)", value=f"{_ping_line(mine)}\n{procstats.describe(procstats.snapshot())}", inline=False)
     api = fleet.get("api")
-    api_text = "Not responding" if not api else f"Ping: `{api_ms:.0f}ms` ({_quality(api_ms)})\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
+    api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(mine)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
     embed.add_field(name="Shapes API", value=api_text, inline=False)
     other = fleet.get("discord")
-    embed.add_field(name="Discord bot", value="Not responding" if not other else f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}", inline=False)
+    if other:
+        link = other.get("roundtrip_ms")
+        other_text = f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}" + (f"\nAPI link: `{link:.0f}ms`" if link else "")
+    else:
+        other_text = f"Not responding. {problems.get('discord', 'The API has no answer from it.')}"
+    embed.add_field(name="Discord bot", value=other_text, inline=False)
     embed.set_footer(text=f"Requested By {user.name} | {MainURL}")
     return embed
 
@@ -136,8 +142,9 @@ def _ping_embed(user, mine, fleet, api_ms):
 async def ping(interaction: discord.Interaction):
     await interaction.response.defer()
     mine = await asyncio.to_thread(m.measure_latency)
-    fleet, api_ms = await asyncio.to_thread(m.fleet_stats)
-    await interaction.followup.send(embed=_ping_embed(interaction.user, mine, fleet, api_ms))
+    fleet = await asyncio.to_thread(m.fleet_stats)
+    await interaction.followup.send(embed=_ping_embed(interaction.user, mine, fleet))
+
 
 
 class General(yapper.Cog):

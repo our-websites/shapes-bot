@@ -3811,7 +3811,7 @@ _latency = {"ms": None, "at": 0.0}
 
 def measure_latency(max_age=0):
     """Round trip to the API on a warm (reused) connection, in ms, so it measures the network and not the TLS handshake.
-    Remembered for max_age seconds so /internal/stats doesn't hit the API every time."""
+    Remembered for max_age seconds."""
     if _latency["ms"] is not None and time.time() - _latency["at"] < max_age:
         return _latency["ms"]
     shapes_api("GET", "/me", timeout=8)
@@ -3821,22 +3821,30 @@ def measure_latency(max_age=0):
     return _latency["ms"]
 
 
+def cached_latency():
+    """The last measured ping to the API without waiting. /internal/stats uses this: it is called BY the API, so it must not call
+    the API back and wait (that is how the API's 'Yapin' bot' line used to time out)."""
+    if time.time() - _latency["at"] > 30:
+        _latency["at"] = time.time()                           # one refresh at a time
+        threading.Thread(target=lambda: measure_latency(0), daemon=True).start()
+    return _latency["ms"]
+
+
 @app.route("/internal/stats")
 def internal_stats():
-    """For the Shapes API (same machine, shared token): this bot's uptime, memory, CPU and ping."""
+    """For the Shapes API (shared token): this bot's uptime, memory, CPU and ping."""
     if not _is_shapes_api_call():
         return jsonify({"success": False, "data": "Not allowed"}), 403
-    return jsonify({"success": True, "platform": "yapin", "latency_ms": measure_latency(30), **procstats.snapshot()})
+    return jsonify({"success": True, "platform": "yapin", "latency_ms": cached_latency(), **procstats.snapshot()})
 
 
 def fleet_stats():
-    """{api, yapin, discord} from the Shapes API (each None when it isn't answering) plus the API's round trip in ms."""
-    start = time.perf_counter()
-    got = shapes_api("GET", "/internal/stats", timeout=10)
-    rtt = (time.perf_counter() - start) * 1000
+    """{api, yapin, discord, problems} from the Shapes API (a part that isn't answering is None and problems says why)."""
+    got = shapes_api("GET", "/internal/stats", timeout=20)
     if not got or not got.get("success"):
-        return {"api": None, "yapin": None, "discord": None}, None
-    return got, rtt
+        why = "The Shapes API isn't answering (or hasn't been redeployed with /internal/stats)."
+        return {"api": None, "yapin": None, "discord": None, "problems": {"api": why}}
+    return got
 
 
 @app.route("/api/status")
