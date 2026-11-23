@@ -2145,14 +2145,22 @@ def internal_stats():
     return jsonify({"success": True, "platform": "discord", "latency_ms": bot_latency_ms(), **procstats.snapshot()})
 
 
-def fleet_stats():
-    """({api, yapin, discord}, ms the API took to answer). Each is None when it isn't answering."""
+def api_ping_ms():
+    """Round trip to the API on a warm connection, in ms (None when it doesn't answer)."""
+    if _shapes_call("GET", "/internal/version", timeout=8) is None:
+        return None
     start = time.perf_counter()
-    got = _shapes_call("GET", "/internal/stats", timeout=10)
-    rtt = (time.perf_counter() - start) * 1000
+    got = _shapes_call("GET", "/internal/version", timeout=8)
+    return (time.perf_counter() - start) * 1000 if got is not None else None
+
+
+def fleet_stats():
+    """({api, yapin, discord, problems}, the API's ping in ms). A part that doesn't answer is None and problems says why."""
+    ping = api_ping_ms()
+    got = _shapes_call("GET", "/internal/stats", timeout=20)
     if not got or not got.get("success"):
-        return {"api": None, "yapin": None, "discord": None}, None
-    return got, rtt
+        return {"api": None, "yapin": None, "discord": None, "problems": {"api": "The Shapes API isn't answering (or hasn't been redeployed with /internal/stats)."}}, None
+    return got, ping
 
 
 # --- fun/utility command helpers (no Discord/Yapin' types, so both bots share the same text) ---

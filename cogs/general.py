@@ -123,14 +123,20 @@ def _ping_line(ms):
 
 
 def _ping_embed(user, fleet, api_ms):
-    """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each."""
+    """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each. A part that doesn't answer says why."""
+    problems = fleet.get("problems") or {}
     embed = discord.Embed(title="Shapes status", color=embedDB.get(f"{user.id}") if embedDB.get(f"{user.id}") else discord.Color.blue())
     embed.add_field(name="Discord bot (this one)", value=f"{_ping_line(m.bot_latency_ms())}\n{procstats.describe(procstats.snapshot())}", inline=False)
     api = fleet.get("api")
-    api_text = "Not responding" if not api else f"{_ping_line(api_ms)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
+    api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(api_ms)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
     embed.add_field(name="Shapes API", value=api_text, inline=False)
     other = fleet.get("yapin")
-    embed.add_field(name="Yapin' bot", value="Not responding" if not other else f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}", inline=False)
+    if other:
+        link = other.get("roundtrip_ms")
+        other_text = f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}" + (f"\nAPI link: `{link:.0f}ms`" if link else "")
+    else:
+        other_text = f"Not responding. {problems.get('yapin', 'The API has no answer from it.')}"
+    embed.add_field(name="Yapin' bot", value=other_text, inline=False)
     embed.set_footer(text=f"Requested By {user.name} | {MainURL}")
     return embed
 
