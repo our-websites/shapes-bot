@@ -3814,9 +3814,9 @@ def measure_latency(max_age=0):
     Remembered for max_age seconds."""
     if _latency["ms"] is not None and time.time() - _latency["at"] < max_age:
         return _latency["ms"]
-    shapes_api("GET", "/me", timeout=8)
+    shapes_api("GET", "/internal/version", timeout=8)
     start = time.perf_counter()
-    got = shapes_api("GET", "/me", timeout=8)
+    got = shapes_api("GET", "/internal/version", timeout=8)
     _latency.update(ms=(time.perf_counter() - start) * 1000 if got is not None else None, at=time.time())
     return _latency["ms"]
 
