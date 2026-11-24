@@ -3838,8 +3838,27 @@ def internal_stats():
     return jsonify({"success": True, "platform": "yapin", "latency_ms": cached_latency(), **procstats.snapshot()})
 
 
+def send_heartbeat():
+    """Tell the API how this bot is doing (the API shows it in /ping on either bot)."""
+    return shapes_api("POST", "/internal/heartbeat/yapin", {**procstats.snapshot(), "latency_ms": cached_latency()}, timeout=8)
+
+
+def _heartbeat_loop():
+    time.sleep(15)
+    while True:
+        try:
+            send_heartbeat()
+        except Exception as e:
+            print(f"heartbeat failed: {e}")
+        time.sleep(30)
+
+
+threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
+
+
 def fleet_stats():
     """{api, yapin, discord, problems} from the Shapes API (a part that isn't answering is None and problems says why)."""
+    send_heartbeat()                     # so this bot's own numbers are fresh in the API
     got = shapes_api("GET", "/internal/stats", timeout=20)
     if not got or not got.get("success"):
         why = "The Shapes API isn't answering (or hasn't been redeployed with /internal/stats)."
