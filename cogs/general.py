@@ -133,7 +133,7 @@ def _ping_embed(user, fleet, api_ms):
     other = fleet.get("yapin")
     if other:
         link = other.get("roundtrip_ms")
-        other_text = f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}" + (f"\nAPI link: `{link:.0f}ms`" if link else "")
+        other_text = f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}" + (f"\nAPI link: `{link:.0f}ms`" if link else "") + (f"\nReported `{other['age']}s` ago" if other.get("age") else "")
     else:
         other_text = f"Not responding. {problems.get('yapin', 'The API has no answer from it.')}"
     embed.add_field(name="Yapin' bot", value=other_text, inline=False)

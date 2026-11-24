@@ -2145,17 +2145,41 @@ def internal_stats():
     return jsonify({"success": True, "platform": "discord", "latency_ms": bot_latency_ms(), **procstats.snapshot()})
 
 
+_ping_session = requests.Session()      # kept open, so the timing below is the network and not a new TLS handshake
+
+
 def api_ping_ms():
     """Round trip to the API on a warm connection, in ms (None when it doesn't answer)."""
-    if _shapes_call("GET", "/internal/version", timeout=8) is None:
+    try:
+        for i in range(2):
+            start = time.perf_counter()
+            _ping_session.get(f"{APIBaseURL}/internal/version", headers=APIBaseURL_Headers, timeout=8)
+        return (time.perf_counter() - start) * 1000
+    except requests.RequestException:
         return None
-    start = time.perf_counter()
-    got = _shapes_call("GET", "/internal/version", timeout=8)
-    return (time.perf_counter() - start) * 1000 if got is not None else None
+
+
+def send_heartbeat():
+    """Tell the API how this bot is doing (the API shows it in /ping on either bot)."""
+    return _shapes_call("POST", "/internal/heartbeat/discord", {**procstats.snapshot(), "latency_ms": bot_latency_ms()}, timeout=8)
+
+
+def _heartbeat_loop():
+    time.sleep(20)
+    while True:
+        try:
+            send_heartbeat()
+        except Exception as e:
+            print(f"heartbeat failed: {e}")
+        time.sleep(30)
+
+
+threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
 
 
 def fleet_stats():
     """({api, yapin, discord, problems}, the API's ping in ms). A part that doesn't answer is None and problems says why."""
+    send_heartbeat()                     # so this bot's own numbers are fresh in the API
     ping = api_ping_ms()
     got = _shapes_call("GET", "/internal/stats", timeout=20)
     if not got or not got.get("success"):
