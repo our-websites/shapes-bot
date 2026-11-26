@@ -95,3 +95,9 @@ OAuth2 through the Shapes API (no bio text). `/robloxverify` (verify here, `link
 ## Cogs
 
 Features live in `cogs/`, one topic per file, loaded at start with `bot.load_extensions("cogs")`. A cog file has a `yapper.Cog` class and a `setup(bot)`; `bot.core` is this file's module, for the shared helpers (`bot.core.cached`, the tables, `shapes_api`). **No commands live in `main.py`**: general, owner, counting, server_tools, fun, ai, lastfm, yapin_users, roblox_lookup, vortex and roblox are each a file in `cogs/`. To add a command, make or extend a cog file: start it with `m = sys.modules.get("main") or sys.modules["__main__"]`, bind what you need (`bot = m.bot`, ...) and decorate with `@bot.tree.command(...)`. `cogs/roblox.py` has the verification commands, the Verify button, join and ready listeners. Yapin' has no command groups yet, so command names stay flat (`/robloxverify`, `/robloxpanel`).
+
+## Moderation and utility commands
+
+- **Moderation** (`cogs/moderation.py`): `/kick` `/ban` `/unban` `/timeout` `/untimeout` `/purge` `/slowmode` `/lock` `/unlock` `/nick` `/warn` `/warnings` `/clearwarnings`. The person needs the matching permission (admins and the server owner always can); only the server owner can act on an admin, and nobody can act on the owner, themselves or the bot. If the bot's own role is too low, Yapin' refuses and the command says so.
+- **Utility** (`cogs/utility.py`): `/userinfo` `/roleinfo` `/membercount` `/poll` `/remind` (reminders survive restarts; ones that came due while the bot was off go out at start).
+- **API ping:** `/ping` shows how long this server takes to reach the Shapes API: the fastest of a few warm requests to the API's empty `/internal/ping`, timed until the answer starts. Each bot reports its own figure, so the other bot's section shows its own server's ping.

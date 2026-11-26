@@ -1426,6 +1426,7 @@ embedDB = Table("embed")
 usersDB = Table("users")
 autoroleDB = Table("autorole")
 welcomeCfgDB = Table("welcome")     # server id -> its member welcome settings
+warnsDB = Table("warns")                # "server:user" -> that person's warnings in that server
 botstateDB = Table("botstate")        # small facts about the bot itself (when it was last running)
 AI_DB = Table("ai")
 automodDB = Table("automod")
@@ -2230,6 +2231,8 @@ def purge_server_data(sid):
         db.remove(sid)
     for key in [k for k in cmdlogDB.items() if k.startswith(f"{sid}:")]:
         cmdlogDB.remove(key)
+    for key in [k for k in warnsDB.items() if k.startswith(f"{sid}:")]:
+        warnsDB.remove(key)
     for key, row in list(actionsDB.items().items()):
         if isinstance(row, dict) and str(row.get("server_id")) == sid:
             actionsDB.remove(key)
@@ -3902,13 +3905,19 @@ _latency = {"ms": None, "at": 0.0}
 
 
 def measure_latency(max_age=0):
-    """Round trip to the Shapes API on a warm (reused) connection, in ms (None when it doesn't answer)."""
+    """How long THIS server takes to reach the Shapes API, in ms: the fastest of a few requests on a warm connection, timed only until
+    the API starts answering (None when it doesn't answer). Uses whichever address (IP or public https) works."""
     if _latency["ms"] is not None and time.time() - _latency["at"] < max_age:
         return _latency["ms"]
-    shapes_api("GET", "/internal/version", timeout=8)
-    start = time.perf_counter()
-    got = shapes_api("GET", "/internal/version", timeout=8)
-    _latency.update(ms=(time.perf_counter() - start) * 1000 if got is not None else None, at=time.time())
+    ms = api_link.ping(_api_session)
+    _latency.update(ms=ms, at=time.time())
+    return ms
+
+
+def cached_api_ping():
+    """measure_latency() for the heartbeat: a recent value, refreshed here in the background (it is never measured on a command's time)."""
+    if time.time() - _latency["at"] > 25:
+        measure_latency()
     return _latency["ms"]
 
 
@@ -3942,12 +3951,12 @@ def internal_stats():
     """For the Shapes API (shared token): this bot's uptime, memory, CPU and ping."""
     if not _is_shapes_api_call():
         return jsonify({"success": False, "data": "Not allowed"}), 403
-    return jsonify({"success": True, "platform": "yapin", "latency_ms": cached_platform_latency(), **procstats.snapshot()})
+    return jsonify({"success": True, "platform": "yapin", "latency_ms": cached_platform_latency(), "api_ms": _latency["ms"], **procstats.snapshot()})
 
 
 def send_heartbeat():
     """Tell the API how this bot is doing (the API shows it in /ping on either bot)."""
-    return shapes_api("POST", "/internal/heartbeat/yapin", {**procstats.snapshot(), "latency_ms": cached_platform_latency()}, timeout=8)
+    return shapes_api("POST", "/internal/heartbeat/yapin", {**procstats.snapshot(), "latency_ms": cached_platform_latency(), "api_ms": cached_api_ping()}, timeout=8)
 
 
 def _heartbeat_loop():

@@ -54,3 +54,19 @@ class Link:
         if last is not None:
             return last
         raise err or requests.ConnectionError("no address configured")
+
+    def ping(self, session=None, samples=3, timeout=8, path="/internal/ping"):
+        """How long this server takes to reach the API, in ms: the fastest of a few requests on a warm connection, timed only until the
+        API's answer starts to arrive (the body, JSON and any work in this program aren't counted). Any HTTP answer counts, even an
+        error page: it still travelled the whole way. None when no address answers."""
+        best = None
+        for _ in range(max(1, samples) + 1):                    # the first request only opens the connection
+            try:
+                r = self.request("GET", path, session=session, timeout=timeout)
+            except requests.RequestException:
+                return None
+            ms = r.elapsed.total_seconds() * 1000
+            best = ms if best is None or ms < best else best
+            if _ == 0:
+                best = None                                      # drop the connection-setup sample
+        return best

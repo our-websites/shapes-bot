@@ -99,6 +99,10 @@ async def help_command(interaction: discord.Interaction):
         "• /ping - Latency\n• /invite - Invite link\n• /search - Search The Web\n• /ai - Chat with an AI (/clearai deletes your history)\n• /github - GitHub user\n"
         "• /roll, /coinflip, /8ball, /choose, /calc - Dice, coins, answers, picks and maths\n• /cat, /dog, /fact - Pictures and facts\n"
         "• /instagram - Instagram user\n• /status - Bot status\n• /servercount, /userinstalls - Counts\n• /spookpfp - spook.bio"), inline=False)
+    embed.add_field(name="Moderation", value=(
+        "• /kick, /ban, /unban - Remove members\n• /timeout, /untimeout - Mute someone for a while\n• /warn, /warnings, /clearwarnings - Warnings on record\n"
+        "• /purge - Delete recent messages\n• /slowmode, /lock, /unlock - Control a channel\n• /nick - Change a nickname\n• /welcome - Welcome new members (admins)"), inline=False)
+    embed.add_field(name="Server tools", value="• /userinfo, /roleinfo, /membercount - Info about people, roles and the server\n• /poll - Start a poll\n• /remind - Remind yourself later", inline=False)
     embed.add_field(name="Yapper profile", value="• /yapinuser - Info about a user\n• /yapinavatar - Avatar\n• /yapinbanner - Banner", inline=False)
     embed.set_footer(text="Right-click context menus from the Discord bot are not available on Yapper; use the slash commands.")
     await interaction.response.send_message(embed=embed)
@@ -132,12 +136,15 @@ def _ping_embed(user, plat, api_ms, fleet=None, edit_ms=None):
         embed.add_field(name="Shapes API and Discord bot", value="Checking...", inline=False)
     else:
         api = fleet.get("api")
-        api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(api_ms)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
+        api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(api_ms).replace('Ping:', 'Ping from the Yapin\' bot\'s server:', 1)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
         embed.add_field(name="Shapes API", value=api_text, inline=False)
         other = fleet.get("discord")
         if other:
             lat = other.get("latency_ms")
-            other_text = "Discord ping: " + ("not available" if lat is None else f"`{lat:.0f}ms` ({_quality(lat)})") + f"\n{procstats.describe(other)}"
+            other_text = "Discord ping: " + ("not available" if lat is None else f"`{lat:.0f}ms` ({_quality(lat)})")
+            if other.get("api_ms") is not None:
+                other_text += f"\nPing to the API from its server: `{other['api_ms']:.0f}ms` ({_quality(other['api_ms'])})"
+            other_text += f"\n{procstats.describe(other)}"
             other_text += f"\nReported `{other['age']}s` ago" if other.get("age") else ""
         else:
             other_text = f"Not responding. {problems.get('discord', 'The API has no answer from it.')}"
