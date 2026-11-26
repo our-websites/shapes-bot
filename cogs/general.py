@@ -180,6 +180,7 @@ class HelpDropdown(discord.ui.Select):
             discord.SelectOption(label="Counting Commands", description="Counting game and settings"),
             discord.SelectOption(label="User Settings", description="Personal bot settings"),
             discord.SelectOption(label="Roblox Commands", description="Roblox user and item information"),
+            discord.SelectOption(label="Moderation Commands", description="Kick, ban, timeout, purge, warnings"),
             discord.SelectOption(label="Utility Commands", description="General utility commands"),
             discord.SelectOption(label="Fun Commands", description="Dice, coins, picks, maths and pictures"),
             discord.SelectOption(label="Context Menu Commands", description="Right-click context commands")
@@ -200,6 +201,14 @@ class HelpDropdown(discord.ui.Select):
             embed.add_field(name="Commands", value=
                 "• /settings - Customize your personal bot settings", inline=False)
                 
+        elif category == "Moderation Commands":
+            embed = discord.Embed(title="Moderation Commands", color=embed_color)
+            embed.add_field(name="Commands", value=
+                "• /kick, /ban, /unban - Remove members\n• /timeout, /untimeout - Mute someone for a while\n"
+                "• /warn, /warnings, /clearwarnings - Keep a record of warnings\n• /purge - Delete recent messages\n"
+                "• /slowmode, /lock, /unlock - Control a channel\n• /nick - Change a nickname\n"
+                "• /welcome ... - Welcome messages for new members, /autorole - a role for new members", inline=False)
+
         elif category == "Fun Commands":
             embed = discord.Embed(title="Fun Commands", color=embed_color)
             embed.add_field(name="Commands", value=
@@ -230,6 +239,8 @@ class HelpDropdown(discord.ui.Select):
             embed = discord.Embed(title="Utility Commands", color=embed_color)
             embed.add_field(name="Commands", value=
                 "• /ping - Check bot latency and connection\n"
+                "• /userinfo, /roleinfo, /membercount - Information about people, roles and the server\n"
+                "• /poll - Start a poll\n• /remind - Remind yourself of something later\n"
                 "• /invite - Get bot invite link\n"
                 "• /google - Search something on Google\n"
                 "• /status - Bot status\n"

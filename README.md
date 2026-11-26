@@ -1,6 +1,6 @@
 # Discord Bot Code For Shapes
 
-`main.py` holds the bot, the data, shared helpers and the web server. **No commands live in it:** every command is in its own topic file in `cogs/` (general, owner, counting, server_tools, ai, profiles, roblox_lookup, roblox, vortex, lastfm, fun, command_logs, dm_log). Commands with a space are command groups.
+`main.py` holds the bot, the data, shared helpers and the web server. **No commands live in it:** every command is in its own topic file in `cogs/` (general, owner, counting, server_tools, ai, profiles, roblox_lookup, roblox, vortex, lastfm, fun, command_logs, dm_log, moderation, utility, welcome). Commands with a space are command groups.
 
 **Adding a command:** make `cogs/<topic>.py` (or add to one). Start it with `m = sys.modules.get("main") or sys.modules["__main__"]`, bind what you need from `main.py` (`bot = m.bot`, `embedDB = m.embedDB`, ...), decorate with `@bot.tree.command(...)`, and list it in the file's `_COMMANDS` so it unloads cleanly. Every file in `cogs/` loads on start (A to Z; files starting with `_` are skipped). While debugging, `await bot.reload_extension("cogs.fun")` reloads one file without a restart.
 
@@ -42,3 +42,10 @@ Open the bot's web address and sign in with `ADMIN_KEY`. Servers (channels, memb
 ## /ping
 
 `SHAPES_API_URL` is cleaned up (a pasted `NAME=` prefix is ignored) and every API call retries `SHAPES_API_FALLBACK_URL` when the first address fails. `/ping` shows the Discord ping and the edit ping, plus ping, uptime, memory and CPU for this bot, the Shapes API and the Yapin' bot. The bot asks the API (`/internal/stats`), and the API asks both bots for theirs (their own `/internal/stats`, with the shared `SHAPES_API_TOKEN` / `INTERNAL_TOKEN`), so `DISCORD_BOT_URL` and `YAPIN_BOT_URL` must be set on the API. `procstats.py` is the same file in all three repos.
+
+## Moderation, welcome and utility
+
+- **Moderation** (`cogs/moderation.py`): `/kick` `/ban` `/unban` `/timeout` `/untimeout` `/purge` `/slowmode` `/lock` `/unlock` `/nick` `/warn` `/warnings` `/clearwarnings`. Each needs the matching Discord permission (and the bot needs it too); role order is checked so nobody can act on someone above them or above the bot.
+- **Welcome** (`cogs/welcome.py`): `/welcome status|channel|message|dm|style|toggle|test`. Placeholders `{user}` `{name}` `{server}` `{count}` `{id}`.
+- **Start-up catch-up**: the bot saves a "last running" time every 30 seconds. After a restart, members who joined while it was down get the autorole, the welcome message and Roblox auto-verify (up to 7 days back, 6 hours when unknown, 20 welcomes per server).
+- **Utility** (`cogs/utility.py`): `/userinfo` `/roleinfo` `/membercount` `/poll` `/remind` (reminders survive restarts).

@@ -372,8 +372,10 @@ def roblox_init(m):
 
     async def scheduler():
         """Backup sync: a server is due when 24 hours of real time have passed since its last sync (UTC epoch seconds)."""
+        first = True
         while True:
-            await asyncio.sleep(CHECK_EVERY)
+            await asyncio.sleep(20 if first else CHECK_EVERY)      # the first look is right after start, so a sync missed during downtime isn't delayed
+            first = False
             try:
                 for cfg in ((await api("GET", f"/internal/guilds/{PLATFORM}")) or {}).get("guilds", []):
                     if time.time() - int(cfg.get("last_sync_at") or 0) >= SYNC_EVERY:
@@ -425,6 +427,7 @@ def roblox_init(m):
             except discord.HTTPException as e:
                 print(f"[verify] couldn't DM the prompt to {uid}: {e}")
     bot.add_listener(on_member_join, "on_member_join")
+    m.rverify_join = on_member_join
 
     def verified_notice():
         if not token or not hmac.compare_digest(request.headers.get("Authorization", "").removeprefix("Bearer ").strip(), token):

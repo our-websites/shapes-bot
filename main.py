@@ -1324,6 +1324,12 @@ bot = Shapes(command_prefix="/", intents=discord.Intents.all())
 async def _tree_error(interaction, error):
     if isinstance(error, app_commands.CheckFailure) and "Shapes API is down" in str(error):
         return      # already answered with the "API is down" message
+    if isinstance(error, (app_commands.MissingPermissions, app_commands.BotMissingPermissions)):
+        who = "You need" if isinstance(error, app_commands.MissingPermissions) else "I need"
+        text = f"❌ {who} the **{', '.join(p.replace('_', ' ') for p in error.missing_permissions)}** permission for that."
+        send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+        await send(embed=discord.Embed(description=text, color=discord.Color.red()), ephemeral=True)
+        return
     import traceback
     print(f"[command error] {getattr(interaction.command, 'qualified_name', '?')}")
     traceback.print_exception(type(error), error, error.__traceback__)
