@@ -347,8 +347,10 @@ def init(m):
 
     def scheduler():
         """Backup sync: a server is due when 24 hours of real time have passed since its last sync (UTC epoch seconds)."""
+        first = True
         while True:
-            time.sleep(CHECK_EVERY)
+            time.sleep(20 if first else CHECK_EVERY)       # the first look is right after start, so a sync missed during downtime isn't delayed
+            first = False
             try:
                 for cfg in (api("GET", "/internal/guilds/yapin") or {}).get("guilds", []):
                     last = int(cfg.get("last_sync_at") or 0)
@@ -652,6 +654,7 @@ def init(m):
                 pass
         threading.Thread(target=job, daemon=True).start()
 
+    m.rverify_join = on_join
     m.rverify_sync = sync_guild
     m.rverify_ensure_role = ensure_verified_role
     m.rverify_stats = lambda sid: api("GET", f"/internal/guild/yapin/{sid}/stats")

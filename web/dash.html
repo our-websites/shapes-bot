@@ -183,7 +183,7 @@ function loginPage() {
 
 // ---------------------------------------------------------------- state: which server (if any) and which section
 let listing = null, current = null, section = 'overview', detail = null;
-const SECTIONS = [['overview', '🏠  Overview'], ['counting', '🔢  Counting'], ['autorole', '🎭  Autorole'], ['roles', '🏷️  Give roles'], ['automod', '🛡️  Automod'], ['say', '📣  Send as Shapes'], ['dm', '✉️  Message members'], ['cmdlog', '📜  Command log'], ['activity', '🕘  Activity log'], ['partner', '🤝  Partner info']];
+const SECTIONS = [['overview', '🏠  Overview'], ['counting', '🔢  Counting'], ['autorole', '🎭  Autorole'], ['welcome', '👋  Welcome'], ['roles', '🏷️  Give roles'], ['automod', '🛡️  Automod'], ['say', '📣  Send as Shapes'], ['dm', '✉️  Message members'], ['cmdlog', '📜  Command log'], ['activity', '🕘  Activity log'], ['partner', '🤝  Partner info']];
 const PUBLIC_SECTIONS = [['overview', '🏠  Overview'], ['leaderboard', '🔢  Counting']];
 
 function pip(label, child, onclick, current, extra = '') {
@@ -290,7 +290,7 @@ const head = (title, about) => [h('h1', {}, title), about ? h('p', { class: 'sub
 
 async function buildSection() {
   if (section === 'overview') return overview();
-  return ({ counting, autorole, roles, automod, say, dm, cmdlog, activity, partner, leaderboard })[section]();
+  return ({ counting, autorole, welcome, roles, automod, say, dm, cmdlog, activity, partner, leaderboard })[section]();
 }
 
 async function overview() {
@@ -382,6 +382,18 @@ function autorole() {
   save(sv, st, async () => { await api('/me/servers/' + sid() + '/autorole', { enabled: en.checked, role_id: role.value, include_bots: bots.checked, exempt_users: ex.value.split(/[\s,]+/).filter(Boolean) }); detail = null; });
   return [...head('Autorole', 'A role new members get when they join. Exempt people never get it.'), panel('Settings', null,
     h('div', { class: 'row' }, enL, bL, field('Role', role)), field('Exempt user ids', ex, 'row'), h('div', { class: 'row' }, sv, st))];
+}
+
+function welcome() {
+  const w = detail.welcome;
+  const [enL, en] = check('Welcome new members', w.enabled), [embL, emb] = check('Send as an embed', w.embed), [dmL, dm] = check('Also send a DM', w.dm), [bL, bots] = check('Welcome bots too', w.include_bots);
+  const chan = select(chans(), w.channel, 'No channel'), title = h('input', { value: w.title || '', placeholder: 'Embed title' });
+  const msg = h('textarea', {}, w.message || ''), dmMsg = h('textarea', {}, w.dm_message || '');
+  const sv = h('button', { class: 'primary' }, 'Save welcome'), st = h('div', { class: 'status' });
+  save(sv, st, async () => { await api('/me/servers/' + sid() + '/welcome', { enabled: en.checked, channel: chan.value, message: msg.value, embed: emb.checked, title: title.value, dm: dm.checked, dm_message: dmMsg.value, include_bots: bots.checked }); detail = null; });
+  return [...head('Welcome', 'Greet people when they join. Use {user} (mention), {name}, {server}, {count} and {id} in the text. Members who joined while the bot was offline are welcomed when it starts again.'), panel('Settings', null,
+    h('div', { class: 'row' }, enL, embL, dmL, bL), h('div', { class: 'row' }, field('Channel', chan), field('Embed title', title)),
+    field('Channel message', msg, 'row'), field('DM message', dmMsg, 'row'), h('div', { class: 'row' }, sv, st))];
 }
 
 function automod() {

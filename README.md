@@ -21,7 +21,7 @@ channels, recent messages, and to send messages as the bot. `/commands`, `/botin
 Data lives in Cloudflare D1 (`tables.py`), which is free for this bot's size: create a D1 database (Workers & Pages -> D1),
 then set `CLOUDFLARE_API_TOKEN` (permission: D1 Edit), `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_D1_DATABASE_ID`.
 Each store is its own real table (`bot_counting`, `bot_embed`, `bot_users`, `bot_autorole`, `bot_ai`, `bot_automod`, `bot_audit`,
-`bot_cmdlog`, `bot_cmdlog_config`, `bot_actions`, `bot_dms`, `bot_partners`, `bot_holds`, `bot_welcomed`, `bot_rverify`), created
+`bot_cmdlog`, `bot_cmdlog_config`, `bot_actions`, `bot_dms`, `bot_partners`, `bot_holds`, `bot_welcomed`, `bot_welcome`, `bot_rverify`), created
 automatically, with typed columns and an `extra_json` column that keeps anything that has no column, so nothing is dropped.
 Without the variables the bot falls back to local `.json` files. To copy old pickledb data across, run `python migrate_pickledb.py`.
 
@@ -77,6 +77,9 @@ If it is down, the bot does the Yapin' OAuth2 itself at `/dashboard/oauth/login`
 
 ## When Shapes is added or removed
 
+- **Member welcome:** `/welcome` (or the dashboard's Welcome section) sets a channel message and/or a DM for new members. Placeholders: `{user}` `{name}` `{server}` `{count}` `{id}`. `/welcome test` sends one to you.
+- **Start-up catch-up:** `cogs/catchup.py` saves a "last running" time every 30 seconds. After a restart it gives the autorole, sends the welcome and runs Roblox auto-verify for anyone who joined while the bot was down (up to 7 days back, 6 hours when unknown). The Roblox scheduler also checks overdue syncs right after start.
+- **API address:** `SHAPES_API_URL` is cleaned up (a pasted `BOT_URL=` prefix is ignored) and, if the first address fails (no connection, 403, 5xx), the bot retries `SHAPES_API_FALLBACK_URL` (default `https://api.shapes-yapper.oriaxen.com`).
 - **Welcome:** the first time Shapes joins a server it posts a short welcome in the first channel it can write to and DMs the owner. It never welcomes the same server twice.
 - **30 day data hold:** when Shapes is removed from a server its data (counting, autorole, automod, command log) is *held*, not deleted. Adding Shapes back, or the server showing up in the list again, cancels the hold. After 30 days the data is deleted, but only after re-checking that the server is really gone, and never while the server list looks wrong (empty or suddenly much shorter), so an API hiccup can't cost anyone their data. A removal is only believed after the server is missing from 5 checks in a row.
 - yapper.py 1.8.0 has `server_add` and `server_remove` events, so the server log reacts at once; the server list is still checked every minute as a backup.

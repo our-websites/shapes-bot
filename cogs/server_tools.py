@@ -1,4 +1,4 @@
-"""Cog: server management: /cmdlog, /autorole, /automod, /serverinfo."""
+"""Cog: server management: /cmdlog, /autorole, /welcome, /automod, /serverinfo."""
 import sys
 import automod
 import yapper
@@ -14,6 +14,9 @@ discord = m.discord
 ecolor = m.ecolor
 get_automod = m.get_automod
 get_autorole = m.get_autorole
+get_welcome = m.get_welcome
+save_welcome = m.save_welcome
+send_welcome = m.send_welcome
 get_cmdlog = m.get_cmdlog
 is_admin = m.is_admin
 is_server_owner = m.is_server_owner
@@ -409,6 +412,69 @@ async def serverinfo(interaction: discord.Interaction):
         embed.set_image(url=data["icon"])      # Yapin gives servers no banner, so the picture is shown large instead
     embed.set_footer(text=f"Requested by {interaction.user.name} | {MainURL}")
     await interaction.response.send_message(embed=embed)
+
+
+def _welcome_embed(cfg, note=None):
+    embed = discord.Embed(title="Welcome messages", color=0x6366F1)
+    where = f"in <#{cfg['channel']}>" if cfg["channel"] else "(no channel chosen)"
+    embed.description = (f"✅ {note}\n\n" if note else "") + f"Welcoming is **{'on' if cfg['enabled'] else 'off'}** {where}."
+    embed.add_field(name="Message", value=(cfg["message"] or "Not set")[:1000], inline=False)
+    embed.add_field(name="DM", value=("On: " + cfg["dm_message"][:300]) if cfg["dm"] else "Off", inline=False)
+    embed.add_field(name="Style", value=("Embed" if cfg["embed"] else "Plain text") + (", bots included" if cfg["include_bots"] else ", bots skipped"), inline=False)
+    embed.set_footer(text="/welcome channel #c · message <text> · dm <text|off> · embed <on|off> · bots <on|off> · on · off · test. Use {user} {name} {server} {count}")
+    return embed
+
+
+@bot.tree.command(name="welcome", description="Welcome new members: /welcome channel #c | message <text> | dm <text|off> | on | off | test")
+async def welcome(interaction: discord.Interaction, action: str = "status", *, rest: str = ""):
+    if not await need_admin(interaction):
+        return
+    sid = str(interaction.guild_id)
+    cfg = get_welcome(sid)
+    word, rest = action.lower().strip(), rest.strip()
+    note = None
+
+    async def say(text):
+        await interaction.response.send_message(text, ephemeral=True)
+
+    if word in ("status", "", "panel"):
+        pass
+    elif word in ("channel", "in"):
+        channel = resolve_channel(sid, rest)
+        if not channel:
+            return await say("I couldn't find that channel. Usage: `/welcome channel #welcome`")
+        cfg["channel"], note = str(channel["id"]), f"Welcome messages go to <#{channel['id']}>."
+    elif word in ("message", "text", "msg"):
+        if not rest:
+            return await say("Usage: `/welcome message Welcome {user} to {server}!` ({user} {name} {server} {count} {id})")
+        cfg["message"], note = rest[:1500], "Message saved."
+    elif word == "title":
+        cfg["title"], note = rest[:100], "Title saved."
+    elif word == "dm":
+        if rest.lower() in ("off", "disable"):
+            cfg["dm"], note = False, "DM welcome is off."
+        elif rest.lower() in ("", "on"):
+            cfg["dm"], note = True, "DM welcome is on."
+        else:
+            cfg["dm"], cfg["dm_message"], note = True, rest[:1500], "DM welcome is on."
+    elif word in ("embed", "bots"):
+        if rest.lower() not in ("on", "off", "true", "false"):
+            return await say(f"Usage: `/welcome {word} on` or `/welcome {word} off`")
+        cfg["embed" if word == "embed" else "include_bots"] = rest.lower() in ("on", "true")
+        note = "Saved."
+    elif word in ("on", "enable"):
+        if not (cfg["channel"] or cfg["dm"]):
+            return await say("Pick a channel first: `/welcome channel #welcome`")
+        cfg["enabled"], note = True, "Welcoming is on."
+    elif word in ("off", "disable"):
+        cfg["enabled"], note = False, "Welcoming is off."
+    elif word == "test":
+        result = send_welcome(sid, str(interaction.user.id), force=True)
+        return await say(f"Sent a test welcome ({result})." if result else "Nothing was sent. Set a channel and message first.")
+    else:
+        return await say("Usage: `/welcome` (status) | `channel #c` | `message <text>` | `title <text>` | `dm <text|off>` | `embed on|off` | `bots on|off` | `on` | `off` | `test`")
+    cfg = save_welcome(sid, cfg)
+    await interaction.response.send_message(embed=_welcome_embed(cfg, note), ephemeral=True)
 
 
 class ServerTools(yapper.Cog):

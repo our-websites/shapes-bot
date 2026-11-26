@@ -119,32 +119,43 @@ def _ping_line(ms):
     return "Ping: not available" if ms is None else f"Ping: `{ms:.0f}ms` ({_quality(ms)})"
 
 
-def _ping_embed(user, mine, fleet):
-    """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each. A part that doesn't answer says why."""
-    problems = fleet.get("problems") or {}
+def _ping_embed(user, plat, api_ms, fleet=None, edit_ms=None):
+    """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each. A part that doesn't answer says why.
+    fleet=None is the first, quick version (before the API has answered)."""
+    problems = (fleet or {}).get("problems") or {}
     embed = discord.Embed(title="Shapes status", color=ecolor(user.id))
-    embed.add_field(name="Yapin' bot (this one)", value=f"{_ping_line(mine)}\n{procstats.describe(procstats.snapshot())}", inline=False)
-    api = fleet.get("api")
-    api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(mine)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
-    embed.add_field(name="Shapes API", value=api_text, inline=False)
-    other = fleet.get("discord")
-    if other:
-        link = other.get("roundtrip_ms")
-        other_text = f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}" + (f"\nAPI link: `{link:.0f}ms`" if link else "") + (f"\nReported `{other['age']}s` ago" if other.get("age") else "")
+    here = f"Yapin' ping: " + ("not available" if plat is None else f"`{plat:.0f}ms` ({_quality(plat)})")
+    if edit_ms is not None:
+        here += f"\nEdit ping: `{edit_ms:.0f}ms` ({_quality(edit_ms)})"
+    embed.add_field(name="Yapin' bot (this one)", value=f"{here}\n{procstats.describe(procstats.snapshot())}", inline=False)
+    if fleet is None:
+        embed.add_field(name="Shapes API and Discord bot", value="Checking...", inline=False)
     else:
-        other_text = f"Not responding. {problems.get('discord', 'The API has no answer from it.')}"
-    embed.add_field(name="Discord bot", value=other_text, inline=False)
+        api = fleet.get("api")
+        api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(api_ms)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
+        embed.add_field(name="Shapes API", value=api_text, inline=False)
+        other = fleet.get("discord")
+        if other:
+            lat = other.get("latency_ms")
+            other_text = "Discord ping: " + ("not available" if lat is None else f"`{lat:.0f}ms` ({_quality(lat)})") + f"\n{procstats.describe(other)}"
+            other_text += f"\nReported `{other['age']}s` ago" if other.get("age") else ""
+        else:
+            other_text = f"Not responding. {problems.get('discord', 'The API has no answer from it.')}"
+        embed.add_field(name="Discord bot", value=other_text, inline=False)
     embed.set_footer(text=f"Requested By {user.name} | {MainURL}")
     return embed
 
 
 @bot.tree.command(name="ping", description="Ping, uptime, memory and CPU for this bot, the API and the Discord bot.")
 async def ping(interaction: discord.Interaction):
-    await interaction.response.defer()
-    mine = await asyncio.to_thread(m.measure_latency)
+    plat = await asyncio.to_thread(m.platform_latency)
+    await interaction.response.send_message(embed=_ping_embed(interaction.user, plat, None))
+    api_ms = await asyncio.to_thread(m.measure_latency)
     fleet = await asyncio.to_thread(m.fleet_stats)
-    await interaction.followup.send(embed=_ping_embed(interaction.user, mine, fleet))
-
+    await interaction.edit_original_response(embed=_ping_embed(interaction.user, plat, api_ms, fleet), content=None)
+    await asyncio.sleep(1)
+    edit = await asyncio.to_thread(m.platform_latency)
+    await interaction.edit_original_response(embed=_ping_embed(interaction.user, plat, api_ms, fleet, edit), content=None)
 
 
 class General(yapper.Cog):

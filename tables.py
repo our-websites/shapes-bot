@@ -61,6 +61,8 @@ SPECS = {
                                                    ("added_by", "text"), ("added_at", "int"), ("icon", "text")]),
     "holds": Spec("bot_holds", "server_id", [("name", "text"), ("since", "int"), ("delete_after", "int")]),
     "welcomed": Spec("bot_welcomed", "server_id", [("at", "int"), ("name", "text")]),
+    "welcome": Spec("bot_welcome", "server_id", [("enabled", "bool"), ("channel", "text"), ("message", "text"), ("embed", "bool"), ("title", "text"),
+                                                 ("dm", "bool"), ("dm_message", "text"), ("include_bots", "bool")]),
     "rverify": Spec("bot_rverify", "server_id", [("roles", "json")]),
 }
 # A name with no spec (a store added later, or one found in the old kv table) still works: it lives in bot_misc.

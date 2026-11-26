@@ -1425,6 +1425,8 @@ countingDB = Table("counting")
 embedDB = Table("embed")
 usersDB = Table("users")
 autoroleDB = Table("autorole")
+welcomeCfgDB = Table("welcome")     # server id -> its member welcome settings
+botstateDB = Table("botstate")        # small facts about the bot itself (when it was last running)
 AI_DB = Table("ai")
 automodDB = Table("automod")
 auditDB = Table("audit")     # who changed what from the dashboard
@@ -1438,7 +1440,8 @@ DATABASES = {"embedDB": embedDB, "countingDB": countingDB, "usersDB": usersDB, "
 
 # === Yapper bot ===
 bot = yapper.Bot()
-bot.load_extension("yapper.telemetry") # Shapes is apart of the official yapper.py telemetry program!
+from yapper import telemetry
+telemetry.enable(bot, interval=300)   # Shapes is apart of the official yapper.py telemetry program! (reports every 5 minutes)
 bot.tree = tree
 BOT = bot
 owner = "leandre"
@@ -1447,7 +1450,11 @@ InviteURL = os.environ.get("YAPPER_INVITE_URL", MainURL)
 searchengine = "621a38269031b4e89"  # PLEASE USE YOUR OWN SEARCH ENGINE ID FROM https://cse.google.com/
 
 APIBaseURL_Key = _secret("Shapes_API_Key")
-APIBaseURL = os.environ.get("SHAPES_API_URL", "http://localhost:1337").rstrip("/")
+import apiurl
+APIBaseURL = apiurl.clean_url(os.environ.get("SHAPES_API_URL"), "http://localhost:1337")
+# If the address above fails (or answers 403), the API is tried on its public address too.
+APIFallbackURL = apiurl.clean_url(os.environ.get("SHAPES_API_FALLBACK_URL"), "https://api.shapes-yapper.oriaxen.com")
+api_link = apiurl.Link(APIBaseURL, APIFallbackURL)
 # The token for the API's /internal routes (its INTERNAL_TOKEN). The older Shapes_API_Key secret still works.
 API_INTERNAL_TOKEN = os.environ.get("SHAPES_API_TOKEN", "").strip() or APIBaseURL_Key
 APIBaseURL_Headers = {"Authorization": f"Bearer {API_INTERNAL_TOKEN}"}
@@ -1468,7 +1475,7 @@ def shapes_api(method, path, body=None, timeout=30):
     if not api_ready():
         return None
     try:
-        r = _api_session.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=timeout)
+        r = api_link.request(method, path, session=_api_session, json=body, headers=APIBaseURL_Headers, timeout=timeout)
         if r.status_code >= 502:
             raise requests.RequestException(f"HTTP {r.status_code}")
         data = r.json()
@@ -2219,7 +2226,7 @@ def cancel_data_hold(sid, name=None, why="it was added back"):
 def purge_server_data(sid):
     """Delete everything stored for one server (settings, counting, logs). Per-person data is never touched here."""
     sid = str(sid)
-    for db in (countingDB, autoroleDB, automodDB, cmdlogcfgDB, holdsDB, welcomedDB):
+    for db in (countingDB, autoroleDB, automodDB, cmdlogcfgDB, holdsDB, welcomedDB, welcomeCfgDB):
         db.remove(sid)
     for key in [k for k in cmdlogDB.items() if k.startswith(f"{sid}:")]:
         cmdlogDB.remove(key)
@@ -2394,6 +2401,87 @@ def autorole_applies(cfg, server_id, user_id):
     if not cfg["include_bots"]:
         return not YUser(user_id, data=fetch_user(user_id) or {}).is_bot
     return True
+
+
+# --- Member welcome: a message (and/or a DM) when someone joins ---
+
+WELCOME_DEFAULT = {"enabled": False, "channel": "", "message": "Welcome to **{server}**, {user}! You are member #{count}.", "embed": True,
+                   "title": "Welcome!", "dm": False, "dm_message": "Welcome to {server}, {name}! Have a great time.", "include_bots": False}
+
+
+def get_welcome(server_id):
+    cfg = {**WELCOME_DEFAULT, **{k: v for k, v in (welcomeCfgDB.get(str(server_id)) or {}).items() if v is not None}}
+    cfg["channel"] = str(cfg.get("channel") or "")
+    return cfg
+
+
+def save_welcome(server_id, cfg):
+    cfg = {**WELCOME_DEFAULT, **cfg}
+    out = {"enabled": bool(cfg["enabled"]), "channel": str(cfg["channel"] or ""), "message": str(cfg["message"] or "")[:1500],
+           "embed": bool(cfg["embed"]), "title": str(cfg["title"] or "")[:100], "dm": bool(cfg["dm"]),
+           "dm_message": str(cfg["dm_message"] or "")[:1500], "include_bots": bool(cfg["include_bots"])}
+    welcomeCfgDB.set(str(server_id), out)
+    return out
+
+
+def _vwelcome(v):
+    """Checks a welcome settings dict from the dashboard; returns the cleaned dict or raises ValueError."""
+    if not isinstance(v, dict):
+        raise ValueError("Welcome needs an object of settings.")
+    out = {"enabled": bool(v.get("enabled")), "channel": str(v.get("channel") or "").strip(), "message": str(v.get("message") or "").strip(),
+           "embed": bool(v.get("embed", True)), "title": str(v.get("title") or "").strip(), "dm": bool(v.get("dm")),
+           "dm_message": str(v.get("dm_message") or "").strip(), "include_bots": bool(v.get("include_bots"))}
+    if len(out["message"]) > 1500 or len(out["dm_message"]) > 1500 or len(out["title"]) > 100:
+        raise ValueError("The message is too long (1500 characters at most, 100 for the title).")
+    if out["enabled"] and not out["channel"] and not out["dm"]:
+        raise ValueError("Pick a welcome channel (or turn on the DM) before switching the welcome on.")
+    if out["enabled"] and out["channel"] and not out["message"]:
+        raise ValueError("Write the welcome message first.")
+    return out
+
+
+def render_welcome(text, uid, name, server_name, count):
+    """{user} mentions them, {name} is their name, {server} the server's name, {count} the member number."""
+    return (str(text).replace("{user}", f"<@{uid}>").replace("{name}", str(name)).replace("{server}", str(server_name))
+            .replace("{count}", str(count or "?")).replace("{id}", str(uid)))
+
+
+def send_welcome(sid, uid, force=False):
+    """Welcome one member in the server's welcome channel and/or by DM. Returns what was sent ("channel", "dm", both, or "").
+    force=True (the test button) ignores the on/off switch and the bot skip."""
+    cfg = get_welcome(sid)
+    if not (cfg["enabled"] or force):
+        return ""
+    user = YUser(uid, data=fetch_user(uid) or {})
+    if user.is_bot and not (cfg["include_bots"] or force):
+        return ""
+    try:
+        info = dict(cached(f"server:{sid}", 30, lambda: bot.server(sid)))
+        server_name = info.get("name") or "the server"
+        count = _total_of(info)
+    except Exception:
+        server_name, count = "the server", None
+    sent = []
+    if cfg["channel"] and cfg["message"]:
+        text = render_welcome(cfg["message"], uid, user.display_name, server_name, count)
+        try:
+            if cfg["embed"]:
+                emb = {"description": text, "color": 0x6366F1}
+                if cfg["title"]:
+                    emb["title"] = render_welcome(cfg["title"], uid, user.display_name, server_name, count)[:256]
+                bot.send(cfg["channel"], f"<@{uid}>", embeds=[emb])
+            else:
+                bot.send(cfg["channel"], text)
+            sent.append("channel")
+        except Exception as e:
+            print(f"[welcome] couldn't post in {cfg['channel']}: {type(e).__name__}: {e}")
+    if cfg["dm"] and cfg["dm_message"]:
+        try:
+            bot.send(bot.dm(uid), render_welcome(cfg["dm_message"], uid, user.display_name, server_name, count))
+            sent.append("dm")
+        except Exception as e:
+            print(f"[welcome] couldn't DM {uid}: {type(e).__name__}: {e}")
+    return "+".join(sent)
 
 
 # ====================================================================================================
@@ -2828,6 +2916,10 @@ def on_member_join(ev):
             bot.add_role(ev.server_id, ev.user_id, cfg["role_id"])
     except Exception as e:
         print(f"[autorole] {type(e).__name__}: {e}")
+    try:
+        send_welcome(ev.server_id, ev.user_id)
+    except Exception as e:
+        print(f"[welcome] {type(e).__name__}: {e}")
 
 
 @bot.on("test")
@@ -3810,8 +3902,7 @@ _latency = {"ms": None, "at": 0.0}
 
 
 def measure_latency(max_age=0):
-    """Round trip to the API on a warm (reused) connection, in ms, so it measures the network and not the TLS handshake.
-    Remembered for max_age seconds."""
+    """Round trip to the Shapes API on a warm (reused) connection, in ms (None when it doesn't answer)."""
     if _latency["ms"] is not None and time.time() - _latency["at"] < max_age:
         return _latency["ms"]
     shapes_api("GET", "/internal/version", timeout=8)
@@ -3821,13 +3912,29 @@ def measure_latency(max_age=0):
     return _latency["ms"]
 
 
-def cached_latency():
-    """The last measured ping to the API without waiting. /internal/stats uses this: it is called BY the API, so it must not call
-    the API back and wait (that is how the API's 'Yapin' bot' line used to time out)."""
-    if time.time() - _latency["at"] > 30:
-        _latency["at"] = time.time()                           # one refresh at a time
-        threading.Thread(target=lambda: measure_latency(0), daemon=True).start()
-    return _latency["ms"]
+_platform = {"ms": None, "at": 0}
+
+
+def platform_latency(max_age=0):
+    """Round trip to Yapin' itself (the platform this bot runs on) on a warm connection, in ms (None when it doesn't answer)."""
+    if _platform["ms"] is not None and time.time() - _platform["at"] < max_age:
+        return _platform["ms"]
+    try:
+        bot.api("GET", "/me", retries=0)
+        start = time.perf_counter()
+        bot.api("GET", "/me", retries=0)
+        _platform.update(ms=(time.perf_counter() - start) * 1000, at=time.time())
+    except Exception:
+        _platform.update(ms=None, at=time.time())
+    return _platform["ms"]
+
+
+def cached_platform_latency():
+    """The last measured ping to Yapin' without waiting (for /internal/stats and the heartbeat)."""
+    if time.time() - _platform["at"] > 30:
+        _platform["at"] = time.time()                          # one refresh at a time
+        threading.Thread(target=lambda: platform_latency(0), daemon=True).start()
+    return _platform["ms"]
 
 
 @app.route("/internal/stats")
@@ -3835,12 +3942,12 @@ def internal_stats():
     """For the Shapes API (shared token): this bot's uptime, memory, CPU and ping."""
     if not _is_shapes_api_call():
         return jsonify({"success": False, "data": "Not allowed"}), 403
-    return jsonify({"success": True, "platform": "yapin", "latency_ms": cached_latency(), **procstats.snapshot()})
+    return jsonify({"success": True, "platform": "yapin", "latency_ms": cached_platform_latency(), **procstats.snapshot()})
 
 
 def send_heartbeat():
     """Tell the API how this bot is doing (the API shows it in /ping on either bot)."""
-    return shapes_api("POST", "/internal/heartbeat/yapin", {**procstats.snapshot(), "latency_ms": cached_latency()}, timeout=8)
+    return shapes_api("POST", "/internal/heartbeat/yapin", {**procstats.snapshot(), "latency_ms": cached_platform_latency()}, timeout=8)
 
 
 def _heartbeat_loop():

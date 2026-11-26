@@ -385,7 +385,7 @@ def register(m):
         counting["last_name"] = (m.fetch_user(counting["lastcounter"]).get("username") if counting.get("lastcounter") else None)
         return {"server": {"id": sid, "name": server.get("name") or sid, "icon": m._icon_of(server),
                            "members": m.member_stats(sid, m._first(server, "member_count", "members_count", "memberCount"))[0]},
-                "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "counting": counting,
+                "channels": text, "roles": roles, "automod": m.get_automod(sid), "autorole": m.get_autorole(sid), "welcome": m.get_welcome(sid), "counting": counting,
                 "owner": m.is_server_owner(sid, current_user()["id"]), "partner": bool(m.is_server_owner(sid, current_user()["id"]) and m.partnersDB.get(sid)),
                 "staff": False, "bot_owner": False}
 
@@ -442,6 +442,19 @@ def register(m):
         before = m.autoroleDB.get(sid)
         out = m.save_autorole(sid, value)
         audit(sid, "autorole", before, out)
+        return jsonify(out)
+
+    @app.route("/me/servers/<sid>/welcome", methods=["POST"])
+    @login_required
+    def me_welcome(sid):
+        require_manage(sid)
+        try:
+            value = m._vwelcome(request.get_json(silent=True) or {})
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        before = m.welcomeCfgDB.get(sid)
+        out = m.save_welcome(sid, value)
+        audit(sid, "welcome", before, out)
         return jsonify(out)
 
     @app.route("/me/servers/<sid>/counting", methods=["POST"])
