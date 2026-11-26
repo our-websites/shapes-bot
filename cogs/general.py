@@ -136,12 +136,12 @@ def _ping_embed(user, fleet, api_ms, edit_ms=None):
         embed.set_footer(text=f"Requested By {user.name} | {MainURL}")
         return embed
     api = fleet.get("api")
-    api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(api_ms)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
+    api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(api_ms).replace('Ping:', 'Ping from the Discord bot\'s server:', 1)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
     embed.add_field(name="Shapes API", value=api_text, inline=False)
     other = fleet.get("yapin")
     if other:
-        link = other.get("roundtrip_ms")
-        other_text = f"{_ping_line(other.get('latency_ms'))}\n{procstats.describe(other)}" + (f"\nAPI link: `{link:.0f}ms`" if link else "") + (f"\nReported `{other['age']}s` ago" if other.get("age") else "")
+        link = other.get("api_ms")
+        other_text = f"{_ping_line(other.get('latency_ms')).replace('Ping:', 'Yapin ping:', 1)}\n" + (f"Ping to the API from its server: `{link:.0f}ms` ({_quality(link)})\n" if link is not None else "") + f"{procstats.describe(other)}" + (f"\nReported `{other['age']}s` ago" if other.get("age") else "")
     else:
         other_text = f"Not responding. {problems.get('yapin', 'The API has no answer from it.')}"
     embed.add_field(name="Yapin' bot", value=other_text, inline=False)

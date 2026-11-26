@@ -2151,26 +2151,28 @@ def internal_stats():
     header = request.headers.get("Authorization", "")
     if not APIBaseURL_Key or not (header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip(), APIBaseURL_Key)):
         return jsonify({"success": False, "data": "Not allowed"}), 403
-    return jsonify({"success": True, "platform": "discord", "latency_ms": bot_latency_ms(), **procstats.snapshot()})
+    return jsonify({"success": True, "platform": "discord", "latency_ms": bot_latency_ms(), "api_ms": _api_ping["ms"], **procstats.snapshot()})
 
 
 _ping_session = requests.Session()      # kept open, so the timing below is the network and not a new TLS handshake
 
 
-def api_ping_ms():
-    """Round trip to the API on a warm connection, in ms (None when no address answers). Uses the fallback address if the first fails."""
-    try:
-        for i in range(2):
-            start = time.perf_counter()
-            api_link.request("GET", "/internal/version", session=_ping_session, headers=APIBaseURL_Headers, timeout=8)
-        return (time.perf_counter() - start) * 1000
-    except requests.RequestException:
-        return None
+_api_ping = {"ms": None, "at": 0.0}
+
+
+def api_ping_ms(max_age=0):
+    """How long THIS server takes to reach the API, in ms: the fastest of a few requests on a warm connection, timed only until the API
+    starts answering (None when no address answers). Uses the fallback address if the first fails."""
+    if _api_ping["ms"] is not None and time.time() - _api_ping["at"] < max_age:
+        return _api_ping["ms"]
+    ms = api_link.ping(_ping_session)
+    _api_ping.update(ms=ms, at=time.time())
+    return ms
 
 
 def send_heartbeat():
     """Tell the API how this bot is doing (the API shows it in /ping on either bot)."""
-    return _shapes_call("POST", "/internal/heartbeat/discord", {**procstats.snapshot(), "latency_ms": bot_latency_ms()}, timeout=8)
+    return _shapes_call("POST", "/internal/heartbeat/discord", {**procstats.snapshot(), "latency_ms": bot_latency_ms(), "api_ms": api_ping_ms(max_age=25)}, timeout=8)
 
 
 def _heartbeat_loop():
@@ -2190,10 +2192,7 @@ def fleet_stats():
     """({api, yapin, discord, problems}, the API's ping in ms). A part that doesn't answer is None and problems says why."""
     send_heartbeat()                     # so this bot's own numbers are fresh in the API
     ping = api_ping_ms()
-    start = time.perf_counter()
     got = _shapes_call("GET", "/internal/stats", timeout=20)
-    if ping is None and got:
-        ping = (time.perf_counter() - start) * 1000      # the ping probe failed but the stats call worked: its time is the ping
     if not got or not got.get("success"):
         return {"api": None, "yapin": None, "discord": None, "problems": {"api": "The Shapes API isn't answering" + (f" ({api_link.last_error})" if api_link.last_error else "") + " (or hasn't been redeployed with /internal/stats)."}}, None
     return got, ping
