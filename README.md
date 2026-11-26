@@ -41,4 +41,4 @@ Open the bot's web address and sign in with `ADMIN_KEY`. Servers (channels, memb
 
 ## /ping
 
-`/ping` shows ping, uptime, memory and CPU for this bot, the Shapes API and the Yapin' bot. The bot asks the API (`/internal/stats`), and the API asks both bots for theirs (their own `/internal/stats`, with the shared `SHAPES_API_TOKEN` / `INTERNAL_TOKEN`), so `DISCORD_BOT_URL` and `YAPIN_BOT_URL` must be set on the API. `procstats.py` is the same file in all three repos.
+`SHAPES_API_URL` is cleaned up (a pasted `NAME=` prefix is ignored) and every API call retries `SHAPES_API_FALLBACK_URL` when the first address fails. `/ping` shows the Discord ping and the edit ping, plus ping, uptime, memory and CPU for this bot, the Shapes API and the Yapin' bot. The bot asks the API (`/internal/stats`), and the API asks both bots for theirs (their own `/internal/stats`, with the shared `SHAPES_API_TOKEN` / `INTERNAL_TOKEN`), so `DISCORD_BOT_URL` and `YAPIN_BOT_URL` must be set on the API. `procstats.py` is the same file in all three repos.

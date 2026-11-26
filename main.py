@@ -494,7 +494,10 @@ token = (os.environ.get("DISCORD_TOKEN") or "").strip()                    # the
 ADMIN_KEY = (os.environ.get("ADMIN_KEY") or "").strip()                    # password for the /login admin page (empty = the page can't be unlocked)
 GoogleAPIKey = (os.environ.get("GOOGLE_API_KEY") or "").strip()            # Google Custom Search key for /google
 ROBLOSECURITY = (os.environ.get("ROBLOSECURITY") or "").strip()            # a Roblox account's .ROBLOSECURITY cookie (presence, avatar renders, profile data)
-APIBaseURL = (os.environ.get("SHAPES_API_URL") or "http://localhost:1337").rstrip("/")     # the Shapes API
+import apiurl
+APIBaseURL = apiurl.clean_url(os.environ.get("SHAPES_API_URL"), "http://localhost:1337")     # the Shapes API (a pasted "NAME=" prefix is ignored)
+APIFallbackURL = apiurl.clean_url(os.environ.get("SHAPES_API_FALLBACK_URL"), "https://api.shapes-yapper.oriaxen.com")   # tried when the first address fails
+api_link = apiurl.Link(APIBaseURL, APIFallbackURL)
 API_DOWN_TEXT = "The Shapes API is down right now, so this is turned off for the moment. Try again in a few minutes."
 _api_state = {"down": False, "at": 0.0}
 
@@ -2103,7 +2106,7 @@ def log_dm(direction, user, text, source=None):
 def _shapes_call(method, path, body=None, timeout=15):
     """The Shapes API's JSON (a dict), or None when it can't be reached."""
     try:
-        r = requests.request(method, f"{APIBaseURL}{path}", json=body, headers=APIBaseURL_Headers, timeout=timeout)
+        r = api_link.request(method, path, json=body, headers=APIBaseURL_Headers, timeout=timeout)
         if r.status_code >= 502:
             raise requests.RequestException(f"HTTP {r.status_code}")
         data = r.json()
@@ -2149,11 +2152,11 @@ _ping_session = requests.Session()      # kept open, so the timing below is the 
 
 
 def api_ping_ms():
-    """Round trip to the API on a warm connection, in ms (None when it doesn't answer)."""
+    """Round trip to the API on a warm connection, in ms (None when no address answers). Uses the fallback address if the first fails."""
     try:
         for i in range(2):
             start = time.perf_counter()
-            _ping_session.get(f"{APIBaseURL}/internal/version", headers=APIBaseURL_Headers, timeout=8)
+            api_link.request("GET", "/internal/version", session=_ping_session, headers=APIBaseURL_Headers, timeout=8)
         return (time.perf_counter() - start) * 1000
     except requests.RequestException:
         return None
@@ -2181,9 +2184,12 @@ def fleet_stats():
     """({api, yapin, discord, problems}, the API's ping in ms). A part that doesn't answer is None and problems says why."""
     send_heartbeat()                     # so this bot's own numbers are fresh in the API
     ping = api_ping_ms()
+    start = time.perf_counter()
     got = _shapes_call("GET", "/internal/stats", timeout=20)
+    if ping is None and got:
+        ping = (time.perf_counter() - start) * 1000      # the ping probe failed but the stats call worked: its time is the ping
     if not got or not got.get("success"):
-        return {"api": None, "yapin": None, "discord": None, "problems": {"api": "The Shapes API isn't answering (or hasn't been redeployed with /internal/stats)."}}, None
+        return {"api": None, "yapin": None, "discord": None, "problems": {"api": "The Shapes API isn't answering" + (f" ({api_link.last_error})" if api_link.last_error else "") + " (or hasn't been redeployed with /internal/stats)."}}, None
     return got, ping
 
 

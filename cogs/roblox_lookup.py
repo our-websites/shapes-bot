@@ -93,10 +93,10 @@ async def roblox2discord(interaction: discord.Interaction, user: str):
         await interaction.edit_original_response(embed=failedembed8)
         return
 
-    url = f"{APIBaseURL}/r2d/{UserID}"
+    url = f"/r2d/{UserID}"
 
     try:
-        response = requests.get(url, headers=APIBaseURL_Headers)
+        response = m.api_link.request("GET", url, headers=APIBaseURL_Headers, timeout=30)
         response.raise_for_status()
         APIData = response.json()
         print(APIData)
@@ -143,10 +143,10 @@ async def discord2roblox(interaction: discord.Interaction, user: discord.User):
 
     await interaction.followup.send(embed=loading)
 
-    url = f"{APIBaseURL}/d2r/{userid}"
+    url = f"/d2r/{userid}"
 
     try:
-        response = requests.get(url, headers=APIBaseURL_Headers)
+        response = m.api_link.request("GET", url, headers=APIBaseURL_Headers, timeout=30)
         response.raise_for_status()
         APIData = response.json()
         print(APIData)
@@ -648,9 +648,9 @@ async def robloxinfo(interaction: discord.Interaction, user: str = "Roblox"):
                 except Exception as e:
                     print(f"Error fetching terminated user data: {e}")
 
-            url = f"{APIBaseURL}/r2d/{UserID}"
+            url = f"/r2d/{UserID}"
             try:
-                response = requests.get(url, headers={"Authorization": f"Bearer {APIBaseURL_Key}"})
+                response = m.api_link.request("GET", url, headers={"Authorization": f"Bearer {APIBaseURL_Key}"}, timeout=30)
                 response.raise_for_status()
                 Data = response.json()
                 
@@ -3047,10 +3047,10 @@ async def discord2roblox(interaction: discord.Interaction, user: discord.User): 
 
     await interaction.followup.send(embed=loading)
 
-    url = f"{APIBaseURL}/d2r/{userid}"
+    url = f"/d2r/{userid}"
 
     try:
-        response = requests.get(url, headers=APIBaseURL_Headers)
+        response = m.api_link.request("GET", url, headers=APIBaseURL_Headers, timeout=30)
         response.raise_for_status()
         APIData = response.json()
         print(APIData)

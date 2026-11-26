@@ -125,7 +125,7 @@ def roblox_init(m):
         if not token:
             return None
         try:
-            r = http.request(method, f"{m.APIBaseURL}{path}", json=body, headers=headers, timeout=30)
+            r = m.api_link.request(method, path, session=http, json=body, headers=headers, timeout=30)
             if r.status_code >= 502:
                 raise requests.RequestException(f"HTTP {r.status_code}")
             data = r.json()

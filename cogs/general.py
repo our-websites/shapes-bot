@@ -4,6 +4,7 @@ import procstats
 from discord import app_commands
 from discord.ext import commands
 import asyncio
+import time
 import discord
 
 m = sys.modules.get("main") or sys.modules["__main__"]   # this bot's main.py: shared helpers, data and the bot itself
@@ -122,11 +123,18 @@ def _ping_line(ms):
     return "Ping: not available" if ms is None else f"Ping: `{ms:.0f}ms` ({_quality(ms)})"
 
 
-def _ping_embed(user, fleet, api_ms):
+def _ping_embed(user, fleet, api_ms, edit_ms=None):
     """This bot, the API and the bot on the other platform: ping, uptime, memory and CPU for each. A part that doesn't answer says why."""
-    problems = fleet.get("problems") or {}
+    problems = (fleet or {}).get("problems") or {}
     embed = discord.Embed(title="Shapes status", color=embedDB.get(f"{user.id}") if embedDB.get(f"{user.id}") else discord.Color.blue())
-    embed.add_field(name="Discord bot (this one)", value=f"{_ping_line(m.bot_latency_ms())}\n{procstats.describe(procstats.snapshot())}", inline=False)
+    here = _ping_line(m.bot_latency_ms()).replace("Ping:", "Discord ping:", 1)
+    if edit_ms is not None:
+        here += "\n" + _ping_line(edit_ms).replace("Ping:", "Edit ping:", 1)
+    embed.add_field(name="Discord bot (this one)", value=f"{here}\n{procstats.describe(procstats.snapshot())}", inline=False)
+    if fleet is None:
+        embed.add_field(name="Shapes API and Yapin' bot", value="Checking...", inline=False)
+        embed.set_footer(text=f"Requested By {user.name} | {MainURL}")
+        return embed
     api = fleet.get("api")
     api_text = f"Not responding. {problems.get('api', '')}".strip() if not api else f"{_ping_line(api_ms)}\n{procstats.describe(api)}" + (f"\nVersion: `{api['version']}`" if api.get("version") else "")
     embed.add_field(name="Shapes API", value=api_text, inline=False)
@@ -145,9 +153,12 @@ def _ping_embed(user, fleet, api_ms):
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ping(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await interaction.response.send_message(embed=_ping_embed(interaction.user, None, None))        # quick first answer with the Discord ping
     fleet, api_ms = await asyncio.to_thread(m.fleet_stats)
-    await interaction.followup.send(embed=_ping_embed(interaction.user, fleet, api_ms))
+    start = time.perf_counter()
+    await interaction.edit_original_response(embed=_ping_embed(interaction.user, fleet, api_ms))
+    edit_ms = (time.perf_counter() - start) * 1000                                                    # how long an edit takes to reach Discord
+    await interaction.edit_original_response(embed=_ping_embed(interaction.user, fleet, api_ms, edit_ms))
 
 
 @bot.tree.command(name="invite", description="Get the bot's invite link.")
