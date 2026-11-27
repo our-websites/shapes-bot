@@ -1529,24 +1529,30 @@ async def update_db():
             os._exit(0)
 
 
-# === Background task to update cached guilds every 2 seconds ===
+# === Background task: keeps the cached server list fresh and logs the counts only at start and when they change ===
 async def update_guild_cache():
-    global cached_guilds
+    global cached_guilds, BotInfo
+    last_counts = None
+    presence_at = info_at = 0.0
     while True:
-        #await bot.tree.sync()
-        #BotInfo = await bot.application_info()
         cached_guilds = list(bot.guilds)
-        print(f"[SYSTEM] Watching {len(cached_guilds)} Servers!")
-        print(f"[SYSTEM] Watching {BotInfo.approximate_user_install_count} Users!")
-        await bot.change_presence(activity=discord.CustomActivity(name="🔗 /help"))
-        await asyncio.sleep(2)
-        #if len(bot.guilds) == 1:
-            #print(bot.guilds[0].name)
-            #await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=bot.guilds[0].name))
-        #else:
-            #print(f"Watching {len(bot.guilds)} Servers")
-            #await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"{len(bot.guilds)} servers"))
-
+        if time.time() - info_at > 600:              # the install count Discord reports changes slowly: look again every 10 minutes
+            try:
+                BotInfo = await bot.application_info()
+            except Exception as e:
+                print(f"[SYSTEM] Couldn't refresh the install count: {type(e).__name__}: {e}")
+            info_at = time.time()
+        counts = (len(cached_guilds), BotInfo.approximate_user_install_count)
+        if counts != last_counts:
+            print(f"[SYSTEM] Watching {counts[0]} Servers!")
+            print(f"[SYSTEM] Watching {counts[1]} Users!")
+            last_counts = counts
+        if time.time() - presence_at > 600:          # the status only needs setting now and then (Discord keeps it)
+            try:
+                await bot.change_presence(activity=discord.CustomActivity(name="🔗 /help"))
+                presence_at = time.time()
+            except Exception as e:
+                print(f"[SYSTEM] Couldn't set the status: {type(e).__name__}: {e}")
         await asyncio.sleep(30)
 
 COUNTING_DEFAULT_WARNINGS = 3

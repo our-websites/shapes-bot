@@ -38,6 +38,9 @@
   .msg.ok { border-color:rgba(111,207,141,.4); background:rgba(111,207,141,.08); color:var(--ok); }
   .center { text-align:center; padding:60px 0; }
   footer { text-align:center; color:var(--muted); font-size:12px; padding:20px; }
+  textarea, input[type=text] { font:inherit; color:inherit; background:var(--field); border:1px solid var(--line); border-radius:8px; padding:8px 10px; width:100%; }
+  textarea { min-height:70px; resize:vertical; }
+  .card + .card { margin-top:12px; }
   .stats { display:flex; gap:20px; margin:10px 0; flex-wrap:wrap; }
   .stats b { display:block; font-size:18px; }
 </style>
@@ -91,7 +94,7 @@ async function servers() {
 async function server(sid) {
   shell(`<p class="muted">Loading…</p>`);
   try {
-    const s = await api("GET", "/me/servers/" + sid), c = s.counting;
+    const s = await api("GET", "/me/servers/" + sid), c = s.counting, w = s.welcome;
     shell(`${flashHtml()}<p><button class="btn sm" id="back">← Servers</button></p><h1>${esc(s.name)}</h1>
       <div class="card"><div class="name">Counting</div>
         <div class="stats"><div><b>${c.number}</b><span class="muted">current number</span></div><div><b>${c.highest}</b><span class="muted">highest</span></div></div>
@@ -100,6 +103,25 @@ async function server(sid) {
         <label class="muted" for="ch">Counting channel</label><br>
         <select id="ch"><option value="">Choose a channel…</option>${s.channels.map(x => `<option value="${esc(x.id)}" ${x.id === c.channel ? "selected" : ""}>#${esc(x.name)}</option>`).join("")}</select>
         <p><button class="btn primary" id="save">Save</button></p>`}
+      </div>
+      <div class="card"><div class="name">Autorole</div>
+        <p class="muted">Give every new member a role. People who joined while the bot was offline get it when it starts again.</p>
+        <label class="chk"><input type="checkbox" id="aen" ${s.autorole.enabled ? "checked" : ""}> Autorole is on</label>
+        <select id="arole"><option value="">Choose a role…</option>${s.roles.map(x => `<option value="${esc(x.id)}" ${x.id === s.autorole.role ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+        <p><button class="btn primary" id="asave">Save</button></p>
+      </div>
+      <div class="card"><div class="name">Welcome</div>
+        <p class="muted">Greet new members. Use {user} (mention), {name}, {server}, {count} and {id} in the text.</p>
+        <label class="chk"><input type="checkbox" id="wen" ${w.enabled ? "checked" : ""}> Welcoming is on</label>
+        <label class="chk"><input type="checkbox" id="wemb" ${w.embed ? "checked" : ""}> Send as an embed</label>
+        <label class="chk"><input type="checkbox" id="wbots" ${w.include_bots ? "checked" : ""}> Welcome bots too</label>
+        <label class="muted" for="wch">Welcome channel</label><br>
+        <select id="wch"><option value="">No channel</option>${s.channels.map(x => `<option value="${esc(x.id)}" ${x.id === w.channel ? "selected" : ""}>#${esc(x.name)}</option>`).join("")}</select>
+        <p><label class="muted" for="wtitle">Embed title</label><input type="text" id="wtitle" maxlength="100" value="${esc(w.title)}"></p>
+        <p><label class="muted" for="wmsg">Channel message</label><textarea id="wmsg" maxlength="1500">${esc(w.message)}</textarea></p>
+        <label class="chk"><input type="checkbox" id="wdm" ${w.dm ? "checked" : ""}> Also send a DM</label>
+        <p><label class="muted" for="wdmmsg">DM message</label><textarea id="wdmmsg" maxlength="1500">${esc(w.dm_message)}</textarea></p>
+        <p><button class="btn primary" id="wsave">Save</button></p>
       </div>`);
     $("back").onclick = servers;
     if ($("save")) $("save").onclick = async () => {
@@ -107,6 +129,20 @@ async function server(sid) {
       try {
         const body = {enabled: $("en").checked}; if ($("ch").value) body.channel = $("ch").value;
         await api("POST", `/me/servers/${sid}/counting`, body); note("ok", "Saved.");
+      } catch (e) { note("err", e.message); }
+      server(sid);
+    };
+    $("asave").onclick = async () => {
+      $("asave").disabled = true;
+      try { await api("POST", `/me/servers/${sid}/autorole`, {enabled: $("aen").checked, role: $("arole").value}); note("ok", "Autorole saved."); } catch (e) { note("err", e.message); }
+      server(sid);
+    };
+    $("wsave").onclick = async () => {
+      $("wsave").disabled = true;
+      try {
+        await api("POST", `/me/servers/${sid}/welcome`, {enabled: $("wen").checked, embed: $("wemb").checked, include_bots: $("wbots").checked, channel: $("wch").value,
+          title: $("wtitle").value, message: $("wmsg").value, dm: $("wdm").checked, dm_message: $("wdmmsg").value});
+        note("ok", "Welcome saved.");
       } catch (e) { note("err", e.message); }
       server(sid);
     };

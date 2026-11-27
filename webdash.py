@@ -1,4 +1,6 @@
 """The member dashboard: sign in with Discord, then manage the servers you run (counting) and your own Roblox accounts."""
+import asyncio
+import sys
 import urllib.parse
 
 import discord
@@ -81,16 +83,48 @@ def register(m):
     @app.route("/me/servers")
     @need_login
     def me_servers():
-        """The servers (with Shapes in them) this person runs."""
+        """The servers (with Shapes in them) this person runs. Members Discord hasn't cached are fetched all at once, not one server at a time."""
         uid = int(user()["id"])
-        out = []
-        for g in list(bot.guilds):
+        guilds = list(bot.guilds)
+        allowed, missing = [], []
+        for g in guilds:
+            if g.owner_id == uid:
+                allowed.append(g)
+            elif g.get_member(uid) is not None:
+                if any(getattr(g.get_member(uid).guild_permissions, p) for p in MANAGE):
+                    allowed.append(g)
+            else:
+                missing.append(g)
+
+        async def lookup():
+            async def one(g):
+                try:
+                    return g, await g.fetch_member(uid)
+                except Exception:
+                    return g, None
+            return await asyncio.gather(*(one(g) for g in missing))
+
+        if missing:
             try:
-                if can_manage(g, uid):
-                    out.append({"id": str(g.id), "name": g.name, "icon": icon_of(g), "members": g.member_count or 0})
+                for g, member in m.dash_run(lookup(), timeout=20):
+                    if member is not None and any(getattr(member.guild_permissions, p) for p in MANAGE):
+                        allowed.append(g)
             except Exception:
-                continue
+                pass
+        out = [{"id": str(g.id), "name": g.name, "icon": icon_of(g), "members": g.member_count or 0} for g in allowed]
         return jsonify({"servers": sorted(out, key=lambda s: s["name"].lower())})
+
+    def welcome_module():
+        mod = sys.modules.get("cogs.welcome")
+        if mod is None:
+            abort(503)
+        return mod
+
+    def assignable_roles(g):
+        """Roles the bot is allowed to hand out: not @everyone, not bot-managed, below the bot's own top role."""
+        top = g.me.top_role if g.me else None
+        return [{"id": str(r.id), "name": r.name} for r in sorted(g.roles, key=lambda r: -r.position)
+                if not r.is_default() and not r.managed and (top is None or r < top)]
 
     @app.route("/me/servers/<sid>")
     @need_login
@@ -98,9 +132,50 @@ def register(m):
         g = managed_guild(sid)
         c = m.counting_get(g.id)
         chans = [{"id": str(ch.id), "name": ch.name} for ch in g.channels if isinstance(ch, discord.TextChannel)]
+        auto = m.autoroleDB.get(str(g.id)) or {}
         return jsonify({"id": str(g.id), "name": g.name, "icon": icon_of(g), "members": g.member_count or 0, "channels": chans,
+                        "roles": assignable_roles(g),
+                        "autorole": {"enabled": bool(auto.get("enabled")), "role": str(auto.get("role_id") or "")},
+                        "welcome": welcome_module().get_cfg(g.id),
                         "counting": {"enabled": bool(c["enabled"]), "channel": str(c["channel"]) if c["channel"] else "", "number": c["number"],
                                      "highest": c["highestnumber"], "warnings": c["warnings"], "banned": bool(c.get("banned"))}})
+
+    @app.route("/me/servers/<sid>/autorole", methods=["POST"])
+    @need_login
+    def me_autorole(sid):
+        g = managed_guild(sid)
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled"))
+        role = g.get_role(int(body["role"])) if str(body.get("role") or "").isdigit() else None
+        if enabled and role is None:
+            return jsonify({"error": "Pick the role new members should get."}), 400
+        if role is not None and (role.is_default() or role.managed or (g.me and role >= g.me.top_role)):
+            return jsonify({"error": "I can't hand out that role: pick one that sits below my highest role."}), 400
+        m.autoroleDB.set(str(g.id), {"role_id": role.id if role else (m.autoroleDB.get(str(g.id)) or {}).get("role_id"), "enabled": enabled})
+        m.autoroleDB.save()
+        return jsonify({"ok": True})
+
+    @app.route("/me/servers/<sid>/welcome", methods=["POST"])
+    @need_login
+    def me_welcome(sid):
+        g = managed_guild(sid)
+        body = request.get_json(silent=True) or {}
+        w = welcome_module()
+        cfg = {"enabled": bool(body.get("enabled")), "embed": bool(body.get("embed", True)), "dm": bool(body.get("dm")), "include_bots": bool(body.get("include_bots")),
+               "channel": str(body.get("channel") or ""), "message": str(body.get("message") or "").strip(), "title": str(body.get("title") or "").strip(),
+               "dm_message": str(body.get("dm_message") or "").strip()}
+        if len(cfg["message"]) > 1500 or len(cfg["dm_message"]) > 1500 or len(cfg["title"]) > 100:
+            return jsonify({"error": "The message is too long (1500 characters at most, 100 for the title)."}), 400
+        if cfg["channel"]:
+            ch = g.get_channel(int(cfg["channel"])) if cfg["channel"].isdigit() else None
+            if not isinstance(ch, discord.TextChannel):
+                return jsonify({"error": "Pick a text channel from this server."}), 400
+        if cfg["enabled"] and not (cfg["channel"] or cfg["dm"]):
+            return jsonify({"error": "Pick a welcome channel (or turn on the DM) before switching welcoming on."}), 400
+        if cfg["enabled"] and cfg["channel"] and not cfg["message"]:
+            return jsonify({"error": "Write the welcome message first."}), 400
+        w.save_cfg(g.id, cfg)
+        return jsonify({"ok": True})
 
     @app.route("/me/servers/<sid>/counting", methods=["POST"])
     @need_login
