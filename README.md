@@ -47,5 +47,5 @@ Open the bot's web address and sign in with `ADMIN_KEY`. Servers (channels, memb
 
 - **Moderation** (`cogs/moderation.py`): `/kick` `/ban` `/unban` `/timeout` `/untimeout` `/purge` `/slowmode` `/lock` `/unlock` `/nick` `/warn` `/warnings` `/clearwarnings`. Each needs the matching Discord permission (and the bot needs it too); role order is checked so nobody can act on someone above them or above the bot.
 - **Welcome** (`cogs/welcome.py`): `/welcome status|channel|message|dm|style|toggle|test`. Placeholders `{user}` `{name}` `{server}` `{count}` `{id}`.
-- **Start-up catch-up**: the bot saves a "last running" time every 30 seconds. After a restart, members who joined while it was down get the autorole, the welcome message and Roblox auto-verify (up to 7 days back, 6 hours when unknown, 20 welcomes per server).
+- **Start-up catch-up**: the bot saves a "last running" time every 2 minutes (and on every join). After a restart, members who joined while it was down get the autorole, the welcome message and Roblox auto-verify (up to 7 days back, 6 hours when unknown, 20 welcomes per server).
 - **Utility** (`cogs/utility.py`): `/userinfo` `/roleinfo` `/membercount` `/poll` `/remind` (reminders survive restarts).

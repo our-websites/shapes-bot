@@ -19,7 +19,7 @@ DEFAULT = {"enabled": False, "channel": "", "message": "Welcome to **{server}**,
 UNKNOWN_WINDOW = 6 * 3600        # no "last running" time saved yet: look at people who joined in the last 6 hours
 MAX_WINDOW = 7 * 86400
 WELCOME_CAP = 20                 # welcome messages per server in one catch-up
-BEAT_EVERY = 30
+BEAT_EVERY = 120                 # seconds between saves (each one is a database write); joins also save it
 
 
 def get_cfg(guild_id):
@@ -169,6 +169,11 @@ class WelcomeCog(commands.Cog, name="Welcome"):
             await send_welcome(member)
         except Exception as e:
             print(f"[welcome] {type(e).__name__}: {e}")
+        try:
+            botstateDB.set("lastup", {"at": int(time.time())})      # handled live: the start-up catch-up must not repeat it
+            botstateDB.save()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ start-up catch-up
     @commands.Cog.listener()
