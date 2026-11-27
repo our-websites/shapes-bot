@@ -2925,6 +2925,10 @@ def on_member_join(ev):
         send_welcome(ev.server_id, ev.user_id)
     except Exception as e:
         print(f"[welcome] {type(e).__name__}: {e}")
+    try:
+        botstateDB.set("lastup", {"at": int(time.time())})     # this join was handled live: the start-up catch-up must not repeat it
+    except Exception:
+        pass
 
 
 @bot.on("test")

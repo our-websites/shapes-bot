@@ -1,6 +1,6 @@
 """Cog: start-up catch-up. While the bot was offline people may have joined, so on start (and then never again) it looks at each
 server's newest members and gives them what a live join would have: the autorole, the welcome message and Roblox auto-verify.
-It also writes a "last running" time every 30 seconds so it knows how long it was gone."""
+It also writes a "last running" time every 2 minutes so it knows how long it was gone."""
 import sys
 import threading
 import time
@@ -21,7 +21,7 @@ _all_members = m._all_members
 UNKNOWN_WINDOW = 6 * 3600        # no "last running" time saved yet: look at people who joined in the last 6 hours
 MAX_WINDOW = 7 * 86400           # never look further back than a week
 WELCOME_CAP = 20                 # at most this many welcome messages per server in one catch-up
-BEAT_EVERY = 30
+BEAT_EVERY = 120                 # seconds between saves (each one is a database write); joins also save it, see mark_up()
 
 
 def _epoch(value):
@@ -39,10 +39,15 @@ def _epoch(value):
         return None
 
 
+def mark_up():
+    """Save "the bot is running right now". Also called on every live join, so a member welcomed live is never welcomed again by the catch-up."""
+    botstateDB.set("lastup", {"at": int(time.time())})
+
+
 def _beat_loop():
     while True:
         try:
-            botstateDB.set("lastup", {"at": int(time.time())})
+            mark_up()
         except Exception as e:
             print(f"[catchup] couldn't save the running time: {e}")
         time.sleep(BEAT_EVERY)
