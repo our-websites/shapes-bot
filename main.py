@@ -81,6 +81,8 @@ if not isinstance(sys.stdout, _Stamped):
 import logging
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="[%(levelname)s] %(name)s: %(message)s")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)     # one line per web request drowned everything else
+logging.getLogger("httpx").setLevel(logging.WARNING)         # every Cloudflare D1 request was logged (about two a minute)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 from tables import Table
 # ====================================================================================================
 # The discord.py-shaped layer: the small slice of the discord.py API that shapes-bot uses,
